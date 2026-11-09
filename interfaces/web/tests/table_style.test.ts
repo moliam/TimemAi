@@ -16,22 +16,41 @@ describe("Markdown table styling", () => {
     );
   });
 
-  it("wraps long cell content first and only scrolls when columns cannot fit", () => {
-    // `width: max-content` + `table-layout: fixed` made long unbreakable cell
-    // content drive an extremely wide horizontal scrollbar. Tables must size
-    // to the container and wrap; scrolling stays for genuinely wide tables.
+  it("wraps table content without creating a horizontal scroller", () => {
     const tableRule = styles.match(/\.markdown-body table \{[^}]*\}/)![0];
-    expect(tableRule).not.toMatch(/width:\s*max-content/);
     expect(tableRule).toMatch(/width:\s*100%/);
-    expect(tableRule).not.toMatch(/table-layout:\s*fixed/);
+    expect(tableRule).toMatch(/table-layout:\s*fixed/);
+
+    const wrapperRule = styles.match(/\.table-scroll \{[^}]*\}/)![0];
+    expect(wrapperRule).toMatch(/overflow:\s*hidden/);
+    expect(wrapperRule).not.toMatch(/overflow-x:\s*auto/);
+
     const cellRule = styles.match(
       /\.markdown-body \.table-scroll th, \.markdown-body \.table-scroll td \{[^}]*\}/,
     )![0];
-    expect(cellRule).toMatch(/min-width:\s*6em/);
+    expect(cellRule).toMatch(/min-width:\s*0/);
+    expect(cellRule).toMatch(/word-break:\s*break-word/);
     expect(cellRule).toMatch(/overflow-wrap:\s*anywhere/);
-    // Scroll affordance stays visible but visually quiet.
-    expect(styles).toMatch(/\.table-scroll \{[^}]*scrollbar-width:\s*thin/);
-    expect(styles).toMatch(/\.table-scroll::-webkit-scrollbar-thumb \{[^}]*border-radius:/);
+
+    // The table wrapper is no longer a scroll region, so no scrollbar
+    // affordance should remain.
+    expect(styles).not.toMatch(/\.table-scroll[^}]*scrollbar-width/);
+    expect(styles).not.toMatch(/\.table-scroll::\-webkit-scrollbar/);
+  });
+
+  it("wraps plain text fences but keeps language code scrollable", () => {
+    const preRule = styles.match(/\.code-block pre,[\s\S]*?\{[^}]*\}/)![0];
+    expect(preRule).toMatch(/overflow:\s*auto/);
+    expect(styles).toMatch(/\.code-block code \{[^}]*min-width:\s*max-content/);
+
+    const textPreRule = styles.match(/\.code-block-text pre,[\s\S]*?\{[^}]*\}/)![0];
+    expect(textPreRule).toMatch(/overflow-x:\s*hidden/);
+    expect(textPreRule).toMatch(/white-space:\s*pre-wrap/);
+    expect(textPreRule).toMatch(/overflow-wrap:\s*anywhere/);
+
+    const textCodeRule = styles.match(/\.code-block-text code,[\s\S]*?\{[^}]*\}/)![0];
+    expect(textCodeRule).toMatch(/min-width:\s*0/);
+    expect(textCodeRule).toMatch(/white-space:\s*inherit/);
   });
 
   it("uses backgrounds for table headers but not alternating body rows", () => {

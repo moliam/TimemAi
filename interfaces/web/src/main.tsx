@@ -338,12 +338,15 @@ import {
 import {
   computeStreamRetention,
   dedupeFreeTalkItems,
+  repeatsRetainedFreeTalk,
+  streamModelPhase,
   streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
 } from "./activity_groups";
 import {
   QueuedMessage,
+  queuedMessageTimer,
   reorderQueuedMessages,
   reservedQueuedAttachmentIds,
 } from "./queued_messages";
@@ -859,6 +862,8 @@ function TimemApp() {
   const [pendingModelToolResultBytes, setPendingModelToolResultBytes] =
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
+    useState(false);
+  const [pendingIncludeReasoningInContext, setPendingIncludeReasoningInContext] =
     useState(false);
   const [pendingResourceCaps, setPendingResourceCaps] = useState(false);
   const [pendingRestorePromptContext, setPendingRestorePromptContext] =
@@ -1603,6 +1608,25 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveIncludeReasoningInContext = useCallback(
+    (enabled: boolean) => {
+      setPendingIncludeReasoningInContext(true);
+      if (
+        !sendCommand({
+          type: "system_include_reasoning_in_context_update",
+          enabled,
+        })
+      ) {
+        setPendingIncludeReasoningInContext(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the thinking-chain context setting.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
   const saveResourceCaps = useCallback(
     (
       cpu_enabled: boolean,
@@ -2208,6 +2232,8 @@ function TimemApp() {
             setPendingModelToolResultBytes(false);
           if (completed?.type === "system_context_compress_threshold_update")
             setPendingContextCompressThreshold(false);
+          if (completed?.type === "system_include_reasoning_in_context_update")
+            setPendingIncludeReasoningInContext(false);
           if (completed?.type === "system_restore_prompt_context_on_startup_update")
             setPendingRestorePromptContext(false);
           if (completed?.type === "system_resource_caps_update")
@@ -2325,6 +2351,7 @@ function TimemApp() {
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
+        setPendingIncludeReasoningInContext(false);
         setPendingRestorePromptContext(false);
         setPendingResourceCaps(false);
         setServer((current) =>
@@ -2343,6 +2370,8 @@ function TimemApp() {
                   model_tool_result_bytes: event.model_tool_result_bytes,
                   context_compress_threshold_percent:
                     event.context_compress_threshold_percent,
+                  include_reasoning_in_context:
+                    event.include_reasoning_in_context,
                   restore_prompt_context_on_startup:
                     event.restore_prompt_context_on_startup,
                   system_cpu_cap_percent: event.system_cpu_cap_percent,
@@ -5552,6 +5581,11 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              includeReasoningInContext={
+                server?.mem?.include_reasoning_in_context ?? true
+              }
+              includeReasoningInContextPending={pendingIncludeReasoningInContext}
+              onIncludeReasoningInContextChange={saveIncludeReasoningInContext}
               systemCpuCapPercent={
                 server?.mem?.system_cpu_cap_percent ?? 85
               }
@@ -9846,6 +9880,51 @@ function SortableQueuedMessage({
   });
 }
 
+function QueuedMessageTimerBadge({
+  timer,
+}: {
+  timer: NonNullable<QueuedMessage["timer"]>;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (timer.deadlineMs === undefined) return;
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [timer.deadlineMs]);
+  const time =
+    timer.deadlineMs === undefined
+      ? undefined
+      : formatRemainingDuration(Math.max(0, timer.deadlineMs - nowMs));
+  const countdownLabel =
+    time === undefined ? undefined : t("tools.remaining", { time });
+  return (
+    <small className="queued-message-timer" title={t("timer.queueHint")}>
+      <span className="queued-message-timer-icon" aria-hidden="true">
+        <AlarmClock size={11} />
+      </span>
+      <span className="queued-message-timer-kind">{t("timer.timerTag")}</span>
+      {timer.name && (
+        <b className="queued-message-timer-name" title={timer.name}>
+          {timer.name}
+        </b>
+      )}
+      {time === undefined ? (
+        <span className="queued-message-timer-countdown">
+          {t("timer.queueNoDeadline")}
+        </span>
+      ) : (
+        <span
+          className="queued-message-timer-countdown"
+          aria-label={countdownLabel}
+        >
+          <LocalizedFlippingTime message="tools.remaining" time={time} />
+        </span>
+      )}
+    </small>
+  );
+}
+
 function TimemThread({
   activeSession,
   sessions,
@@ -10127,15 +10206,22 @@ function TimemThread({
     applyAuthoritativeComposerText(composerExpandedBaseRef.current);
   }, [applyAuthoritativeComposerText]);
   const queuedMessages: QueuedMessage[] =
-    activeSession?.message_queue.items.map((item) => ({
-      id: item.command_id,
-      text: item.payload.text,
-      createdAtMs: item.payload.created_at_ms,
-      attachmentIds: item.payload.attachments.map(
-        (attachment) => attachment.id,
-      ),
-      roleIds: item.payload.worker_roles.map((role) => role.id),
-    })) ?? [];
+    activeSession?.message_queue.items.map((item) => {
+      const timer = queuedMessageTimer(
+        item.payload.text,
+        item.payload.dispatch_deadline_ms,
+      );
+      return {
+        id: item.command_id,
+        text: item.payload.text,
+        createdAtMs: item.payload.created_at_ms,
+        attachmentIds: item.payload.attachments.map(
+          (attachment) => attachment.id,
+        ),
+        roleIds: item.payload.worker_roles.map((role) => role.id),
+        ...(timer ? { timer } : {}),
+      };
+    }) ?? [];
   const displayQueuedMessages = queuedMessages;
   const queuePanelCollapsed =
     !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
@@ -11222,10 +11308,14 @@ function TimemThread({
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
                     title={
                       firstQueuedMessage?.deliveryError ||
+                      firstQueuedMessage?.timer?.prompt ||
                       firstQueuedMessage?.text
                     }
                   >
-                    <p>{firstQueuedMessage?.text}</p>
+                    {firstQueuedMessage?.timer && (
+                      <QueuedMessageTimerBadge timer={firstQueuedMessage.timer} />
+                    )}
+                    <p>{firstQueuedMessage?.timer?.prompt ?? firstQueuedMessage?.text}</p>
                     {firstQueuedMessage &&
                       firstQueuedMessage.attachmentIds.length > 0 && (
                         <small className="queued-message-summary-attachments">
@@ -11375,6 +11465,9 @@ function TimemThread({
                                   {index + 1}
                                 </span>
                                 <div className="queued-message-preview">
+                                  {message.timer && (
+                                    <QueuedMessageTimerBadge timer={message.timer} />
+                                  )}
                                   {messageRoleNames.length > 0 && (
                                     <small
                                       className="queued-message-roles"
@@ -11432,10 +11525,12 @@ function TimemThread({
                                   ) : (
                                     <p
                                       title={
-                                        message.deliveryError || message.text
+                                        message.deliveryError ||
+                                        message.timer?.prompt ||
+                                        message.text
                                       }
                                     >
-                                      {message.text}
+                                      {message.timer?.prompt ?? message.text}
                                     </p>
                                   )}
                                   {message.attachmentIds.length > 0 && (
@@ -11568,7 +11663,10 @@ function TimemThread({
                           {draggedQueuedMessagePosition}
                         </span>
                         <div className="queued-message-preview">
-                          <p>{draggedQueuedMessage.text}</p>
+                          {draggedQueuedMessage.timer && (
+                            <QueuedMessageTimerBadge timer={draggedQueuedMessage.timer} />
+                          )}
+                          <p>{draggedQueuedMessage.timer?.prompt ?? draggedQueuedMessage.text}</p>
                           {draggedQueuedMessage.attachmentIds.length > 0 && (
                             <small className="queued-message-attachments">
                               <Paperclip size={11} />
@@ -13211,10 +13309,6 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
-function modelPhaseForStream(waitingModel: boolean, status?: string): boolean {
-  return waitingModel || status === "streaming";
-}
-
 const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
   text,
 }: {
@@ -13272,7 +13366,25 @@ function TurnAnswerDelivery({
   const preview = streamUiMode ? turn.preview : undefined;
   const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
   const intermediate = preview?.response?.status === "intermediate";
-  const previewText = intermediate ? "" : preview?.response?.text ?? "";
+  const rawPreviewText = intermediate ? "" : preview?.response?.text ?? "";
+  // The model occasionally re-states an earlier free-talk paragraph verbatim
+  // around a tool round. The process stream keeps the first copy and
+  // dedupeFreeTalkItems drops later ones, so surfacing the same text again in
+  // the provisional answer preview only shows a paragraph that is about to
+  // disappear once the response lands ("a duplicate that then retracts").
+  // Suppress the live preview while it repeats retained commentary.
+  const retainedFreeTalkTexts = useMemo(
+    () =>
+      new Set(
+        streamTools
+          .filter((activity) => activity.kind === "free_talk")
+          .map((activity) => (activity.detail ?? "").trim()),
+      ),
+    [streamTools],
+  );
+  const previewText = repeatsRetainedFreeTalk(rawPreviewText, retainedFreeTalkTexts)
+    ? ""
+    : rawPreviewText;
   // A response has one text home: live preview supersedes the retained thought.
   const thoughtText = previewText ? "" : retainedThought?.detail ??
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
@@ -13290,10 +13402,12 @@ function TurnAnswerDelivery({
   );
   const thinkingTailShown = preview?.thinking_tail ?? "";
   const showThinkingChain = useShowThinkingChain();
-  const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
-    preview?.stream_phase === "thinking";
-  const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
-  const modelPhase = modelPhaseForStream(waitingModel, preview?.response?.status);
+  const modelPhase = streamModelPhase(
+    waitingModel,
+    preview?.response?.status,
+  );
+  const isThinking = modelPhase && preview?.stream_phase === "thinking";
+  const isWaiting = !!modelRetryStatus && modelPhase && !preview?.stream_phase;
   const phase = modelPhase ? "model" : "local";
   const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
   const phaseStartedAt = useMemo(
@@ -13401,7 +13515,7 @@ function TurnAnswerDelivery({
           <span className="stream-working-total" aria-hidden="true">
             <Clock8 size={12} />
             <WorkingElapsed createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed" />
-            <span className="stream-working-calls">✦ {countTurnModelRequests(turn)}</span>
+            <span className="stream-working-calls">AI {countTurnModelRequests(turn)}</span>
           </span>
         </div>
       )}
@@ -14997,6 +15111,11 @@ function activityFromTurnEvent(
       createdAt: event.created_at_ms,
     };
   }
+  if (kind === "unconsumed_supplements") {
+    // The worker re-submits pending supplements as a new turn right after
+    // TurnFinished; broadcasting the raw payload is transient technical noise.
+    return null;
+  }
   const detail = Object.entries(event.payload)
     .filter(
       ([key]) =>
@@ -15930,6 +16049,9 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  includeReasoningInContext: boolean;
+  includeReasoningInContextPending: boolean;
+  onIncludeReasoningInContextChange: (enabled: boolean) => void;
   systemCpuCapPercent: number;
   systemMemCapPercent: number;
   systemCpuCapEnabled: boolean;
@@ -16025,6 +16147,9 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    includeReasoningInContext,
+    includeReasoningInContextPending,
+    onIncludeReasoningInContextChange,
     systemCpuCapPercent,
     systemMemCapPercent,
     systemCpuCapEnabled,
@@ -16253,6 +16378,7 @@ const SettingsCenter = memo(function SettingsCenter(
     mailboxCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    includeReasoningInContextPending ||
     resourceCapsPending ||
     restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
@@ -16716,7 +16842,6 @@ const SettingsCenter = memo(function SettingsCenter(
                   <div className="settings-group-heading">
                     <div>
                       <strong>{t("system.thinkingChainTitle")}</strong>
-                      <p>{t("system.thinkingChainDesc")}</p>
                     </div>
                   </div>
                   <label className="resource-cap-switch thinking-chain-switch">
@@ -16734,6 +16859,32 @@ const SettingsCenter = memo(function SettingsCenter(
                       {t("system.thinkingChainToggle")}
                     </span>
                   </label>
+                  <div className="thinking-chain-context-option">
+                    <label className="resource-cap-switch thinking-chain-switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        checked={includeReasoningInContext}
+                        aria-label={t("system.reasoningContextAria")}
+                        disabled={
+                          includeReasoningInContextPending || !connected
+                        }
+                        onChange={(event) =>
+                          onIncludeReasoningInContextChange(event.target.checked)
+                        }
+                      />
+                      <span
+                        className="resource-cap-slider"
+                        aria-hidden="true"
+                      />
+                      <span className="resource-cap-name">
+                        {t("system.reasoningContextToggle")}
+                      </span>
+                    </label>
+                    <p className="thinking-chain-context-desc">
+                      {t("system.reasoningContextDesc")}
+                    </p>
+                  </div>
                 </section>
                 <section className="settings-group system-resource-caps">
                   <div className="settings-group-heading">
@@ -19738,6 +19889,8 @@ function runtimeSelectOptions(key: string): readonly string[] | null {
       return ["approve", "ask"];
     case "TIMEM_WORK_INSTRUCTIONS":
       return ["silent", "ask", "off"];
+    case "TIMEM_INCLUDE_REASONING_IN_CONTEXT":
+      return ["off", "on"];
     case "TIMEM_MAX_ROUNDS":
       return ["50", "200", "500", "unlimited"];
     case "TIMEM_ENABLE_THINKING":
@@ -19759,6 +19912,7 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_MAX_LLM_OUTPUT", "Max output tokens", "text"],
   ["TIMEM_BASH_APPROVAL", "Bash approval", "bash_approval"],
   ["TIMEM_WORK_INSTRUCTIONS", "AGENTS/CLAUDE loading", "work_instructions"],
+  ["TIMEM_INCLUDE_REASONING_IN_CONTEXT", "Replay reasoning in context", "include_reasoning"],
   ["TIMEM_ENABLE_THINKING", "Enable thinking", "boolean"],
   ["TIMEM_REASONING_EFFORT", "Reasoning effort", "text"],
   ["TIMEM_STREAM", "Stream response", "boolean"],
@@ -20166,6 +20320,18 @@ function NewSessionDialog({
                         </option>
                         <option value="silent">silent</option>
                         <option value="ask">ask</option>
+                        <option value="off">off</option>
+                      </select>
+                    ) : kind === "include_reasoning" ? (
+                      <select
+                        value={env[key] ?? ""}
+                        disabled={creating}
+                        onChange={(event) => updateEnv(key, event.target.value)}
+                      >
+                        <option value="">
+                          Inherit · {runtimeDefaults[key] ?? "off"}
+                        </option>
+                        <option value="on">on</option>
                         <option value="off">off</option>
                       </select>
                     ) : kind === "boolean" ? (
@@ -20803,15 +20969,6 @@ function InlineDecision({
 const GLOBAL_TITLE_TIP_MARGIN = 8;
 const GLOBAL_TITLE_TIP_GAP = 8;
 
-const pointerOutsideRect = (p: { x: number; y: number }, r: DOMRect) =>
-  p.x < r.left - 1 ||
-  p.x > r.right + 1 ||
-  p.y < r.top - 1 ||
-  p.y > r.bottom + 1;
-
-const sameDomRect = (a: DOMRect, b: DOMRect) =>
-  a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
-
 function GlobalTitleTip() {
   const [tip, setTip] = useState<{ text: string; rect: DOMRect } | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -20847,9 +21004,12 @@ function GlobalTitleTip() {
   useEffect(() => {
     const titleHolder = (node: EventTarget | null): Element | null =>
       node instanceof Element ? node.closest("[title]") : null;
+    const rememberPointer = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY };
+    };
 
     const onPointerOver = (event: PointerEvent) => {
-      pointerRef.current = { x: event.clientX, y: event.clientY };
+      rememberPointer(event);
       const active = activeRef.current;
       if (
         active &&
@@ -20872,11 +21032,22 @@ function GlobalTitleTip() {
       deactivate();
     };
     const onPointerMove = (event: PointerEvent) => {
-      pointerRef.current = { x: event.clientX, y: event.clientY };
-      const active = activeRef.current;
+      rememberPointer(event);
+      let active = activeRef.current;
+      if (!active) {
+        // `pointerover` can be missed when React replaces the node under a
+        // stationary pointer (for example during a streaming re-render).
+        // pointermove is the reliable fallback for entering a titled element,
+        // so hover must not depend on pointerover alone.
+        const el = titleHolder(event.target);
+        if (el) activate(el);
+        active = activeRef.current;
+      }
       if (!active) return;
       if (!active.el.isConnected) {
         deactivate();
+        const el = titleHolder(event.target);
+        if (el) activate(el);
         return;
       }
       const r = active.el.getBoundingClientRect();
@@ -20887,11 +21058,54 @@ function GlobalTitleTip() {
         event.clientY > r.bottom + 1
       ) {
         deactivate();
+        const el = titleHolder(event.target);
+        if (el) activate(el);
         return;
       }
       // React re-renders may rewrite `title` while hovering; keep it removed
       // so the delayed native bubble can never fight the instant one.
       if (active.el.hasAttribute("title")) active.el.removeAttribute("title");
+    };
+    const onScroll = () => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (!active.el.isConnected) {
+        deactivate();
+        return;
+      }
+      const pointer = pointerRef.current;
+      if (!pointer) {
+        deactivate();
+        return;
+      }
+      // Hit testing can disagree with the hovered node (overlays, shadow
+      // roots, or a re-rendered subtree). The active element's live rect is
+      // the source of truth: a scroll elsewhere on the page must not dismiss
+      // a tooltip that is still anchored under the pointer. Close only when
+      // the active element actually moved away from the pointer.
+      const rect = active.el.getBoundingClientRect();
+      if (
+        pointer.x < rect.left - 1 ||
+        pointer.x > rect.right + 1 ||
+        pointer.y < rect.top - 1 ||
+        pointer.y > rect.bottom + 1
+      ) {
+        deactivate();
+        return;
+      }
+      setTip((current) => {
+        if (!current) return current;
+        const next = active.el.getBoundingClientRect();
+        if (
+          current.rect.left === next.left &&
+          current.rect.top === next.top &&
+          current.rect.width === next.width &&
+          current.rect.height === next.height
+        ) {
+          return current;
+        }
+        return { ...current, rect: next };
+      });
     };
     const onFocusIn = (event: FocusEvent) => {
       const el = titleHolder(event.target);
@@ -20909,30 +21123,6 @@ function GlobalTitleTip() {
       if (event.relatedTarget instanceof Node && active.el.contains(event.relatedTarget)) return;
       deactivate();
     };
-    // Autoscrolling regions (streaming thread output, anchored lists) emit
-    // scroll events every frame. Hiding the tip on any scroll killed it within
-    // one activation frame, and with the pointer at rest no pointerover ever
-    // revives it: hover hints silently disappeared in exactly those busy
-    // regions while click (focusin) still worked. Re-anchor the tip to the
-    // hovered element instead; hide only when the element left the pointer or
-    // was removed from the document.
-    const reconcileTipForViewportChange = () => {
-      const active = activeRef.current;
-      if (!active) return;
-      if (!active.el.isConnected) {
-        deactivate();
-        return;
-      }
-      const r = active.el.getBoundingClientRect();
-      const pointer = pointerRef.current;
-      if (pointer && pointerOutsideRect(pointer, r)) {
-        deactivate();
-        return;
-      }
-      setTip((prev) =>
-        prev && sameDomRect(prev.rect, r) ? prev : { text: active.title, rect: r },
-      );
-    };
     const hideForViewportChange = () => {
       if (activeRef.current) deactivate();
     };
@@ -20942,8 +21132,8 @@ function GlobalTitleTip() {
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("focusin", onFocusIn, true);
     document.addEventListener("focusout", onFocusOut, true);
-    document.addEventListener("scroll", reconcileTipForViewportChange, true);
-    window.addEventListener("resize", reconcileTipForViewportChange);
+    document.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", hideForViewportChange);
     window.addEventListener("blur", hideForViewportChange);
     return () => {
       deactivate();
@@ -20952,8 +21142,8 @@ function GlobalTitleTip() {
       document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
-      document.removeEventListener("scroll", reconcileTipForViewportChange, true);
-      window.removeEventListener("resize", reconcileTipForViewportChange);
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", hideForViewportChange);
       window.removeEventListener("blur", hideForViewportChange);
     };
   }, [activate, deactivate]);

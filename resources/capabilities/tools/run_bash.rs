@@ -1393,6 +1393,14 @@ fn strip_heredoc_bodies(command: &str) -> String {
             if strip_tabs {
                 cursor += 1;
             }
+            // POSIX allows blanks between `<<`/`<<-` and the delimiter word;
+            // a newline never starts a delimiter, so only spaces and tabs
+            // are skipped here. Without this, `<< 'EOF'` style heredocs kept
+            // their bodies visible to the background detector and a body
+            // `&` was misrejected as an unmanaged background process.
+            while matches!(chars.get(cursor).copied(), Some(' ') | Some('\t')) {
+                cursor += 1;
+            }
             let delimiter_start = cursor;
             while cursor < chars.len() && !chars[cursor].is_whitespace() && chars[cursor] != ';' {
                 cursor += 1;
@@ -1886,8 +1894,18 @@ pub(crate) fn execute_run_bash_action(
     runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
-    if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
-        let reason = "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.";
+    let regular_command = match regular_command_from_action(action) {
+        Ok(command) => command,
+        Err(reason) => {
+            return ActionExecution::Completed(bash_finished_error_outcome(
+                bash_action_not_executed(None, &reason),
+                "InvalidInput",
+                reason,
+            ));
+        }
+    };
+    if !loop_command.is_empty() && !regular_command.is_empty() {
+        let reason = "The action provided both cmd/command and loop_cmd. Use cmd (or its alias command) for a normal/background command, or loop_cmd with interval_ms for polling.";
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(None, reason),
             "InvalidInput",
@@ -1896,7 +1914,7 @@ pub(crate) fn execute_run_bash_action(
     }
     let is_regular_command = loop_command.is_empty();
     let command_to_run = if is_regular_command {
-        command_from_action(action)
+        regular_command
     } else {
         loop_command.clone()
     };
@@ -2505,8 +2523,38 @@ fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
     }
 }
 
-fn command_from_action(action: &ParsedAction) -> String {
-    action.input_str("cmd")
+/// Resolves the regular (non-polling) command from `cmd` and its `command`
+/// alias. Models frequently emit `command`; accepting it here keeps the tool
+/// schema, execution, and UI projection consistent. If both fields are
+/// present with different non-empty values the action is ambiguous and is
+/// rejected instead of silently picking one.
+pub(crate) fn resolve_regular_command(cmd: &str, command: &str) -> Result<String, String> {
+    let cmd = cmd.trim();
+    let command = command.trim();
+    match (cmd.is_empty(), command.is_empty()) {
+        (true, true) => Ok(String::new()),
+        (false, true) => Ok(cmd.to_string()),
+        (true, false) => Ok(command.to_string()),
+        (false, false) if cmd == command => Ok(cmd.to_string()),
+        (false, false) => Err(
+            "The action provided both cmd and command with different values. Use cmd (or its alias command) once."
+                .to_string(),
+        ),
+    }
+}
+
+pub(crate) fn regular_command_from_action(action: &ParsedAction) -> Result<String, String> {
+    resolve_regular_command(&action.input_str("cmd"), &action.input_str("command"))
+}
+
+/// Best-effort command for display paths that cannot fail (UI projections).
+pub(crate) fn display_regular_command(action: &ParsedAction) -> String {
+    let cmd = action.input_str("cmd");
+    if cmd.is_empty() {
+        action.input_str("command")
+    } else {
+        cmd
+    }
 }
 
 fn contains_long_local_shell_sleep(command: &str) -> bool {

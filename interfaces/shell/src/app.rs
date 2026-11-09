@@ -15,14 +15,13 @@ use crate::{
     workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
     HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
     ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
-    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
-    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot, ShellUiMode,
-    StaleContextDecisionRequest, StreamPreviewState, StreamPreviewUpdate, StreamToolFoldState,
-    StreamToolFoldUpdate, ThinkingViewSnapshot, TurnInput, TurnUi, UiModeResolution,
-    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
-    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
-    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, ANSI_DIM,
-    CORE_TOPIC_ACTION, SPINNER_ICONS, TIMEM_LOGO,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField, RuntimeProfiler,
+    RuntimeRetryStatus, ShellStatusSnapshot, ShellUiMode, StaleContextDecisionRequest,
+    StreamPreviewState, StreamPreviewUpdate, StreamToolFoldState, StreamToolFoldUpdate,
+    ThinkingViewSnapshot, TurnInput, TurnUi, UiModeResolution, WorkInstructionLoadMessageKind,
+    WorkInstructionLoadMode, WorkInstructionLoadReport, WorkInstructionLoadRequest,
+    WorkspaceCommand, WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    WorkspaceMenuReport, ANSI_DIM, CORE_TOPIC_ACTION, SPINNER_ICONS, TIMEM_LOGO,
 };
 use crossterm::event::Event;
 use reedline::{
@@ -169,6 +168,10 @@ pub fn run(args: Vec<String>) {
         bash_approval_mode_from_sources(options.bash_approval.as_deref(), &session_env);
     let mut work_instruction_mode =
         work_instruction_mode_from_sources(options.work_instructions.as_deref(), &session_env);
+    let mut include_reasoning_in_context = parse_include_reasoning_in_context(
+        options.include_reasoning_in_context.as_deref(),
+        &session_env,
+    );
     let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut profiler = RuntimeProfiler::default();
     let mut stored_session = restored_session.unwrap_or_else(|| {
@@ -177,6 +180,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             &current_work_dir,
         )
     });
@@ -197,6 +201,7 @@ pub fn run(args: Vec<String>) {
         &config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         &session_work_dir,
     );
     if let Err(error) = session_store.upsert_session(&stored_session) {
@@ -207,6 +212,7 @@ pub fn run(args: Vec<String>) {
         &config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
     ));
     let mut core = AgentCore::new_with_interface_preferences(
         STATIC_PROMPT,
@@ -239,7 +245,7 @@ pub fn run(args: Vec<String>) {
             }
         }
     }
-    core.configure_runtime_from_host(&config, bash_approval_mode);
+    core.configure_runtime_from_host(&config, bash_approval_mode, include_reasoning_in_context);
     let _ = core.change_prompt_cwd(session_work_dir.to_string_lossy());
     let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
         WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&session_work_dir),
@@ -305,6 +311,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             core.current_prompt_cwd(),
         );
         return;
@@ -424,14 +431,15 @@ pub fn run(args: Vec<String>) {
             println!("{}", render_prof_report_data(&report));
             continue;
         }
-        if input == "/config" {
+        if input == "/setting" || input == "/config" {
             prompt_status.clear_before_exit();
             let prompt_cwd = core.current_prompt_cwd().to_path_buf();
-            if run_config_menu(
+            if run_settings_menu(
                 &mut config,
                 &mut core,
                 &mut bash_approval_mode,
                 &mut work_instruction_mode,
+                &mut include_reasoning_in_context,
                 &mut work_instruction_context,
                 &prompt_cwd,
             ) {
@@ -440,6 +448,7 @@ pub fn run(args: Vec<String>) {
                     &config,
                     bash_approval_mode,
                     work_instruction_mode,
+                    include_reasoning_in_context,
                     &prompt_cwd,
                 );
                 if let Err(error) = session_store.upsert_session(&stored_session) {
@@ -596,6 +605,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             core.current_prompt_cwd(),
         );
         queued_questions.extend(newly_queued_questions);
@@ -623,6 +633,7 @@ fn load_or_create_shell_session(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) -> StoredSession {
     if let Some(session) = load_resumable_shell_session(session_store) {
@@ -633,6 +644,7 @@ fn load_or_create_shell_session(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         current_dir,
     )
 }
@@ -667,6 +679,7 @@ fn new_shell_session(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) -> StoredSession {
     let session_id = "shell_default".to_string();
@@ -685,7 +698,12 @@ fn new_shell_session(
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),
         profile: shell_session_profile(config),
-        env: shell_session_env_values(config, bash_approval_mode, work_instruction_mode),
+        env: shell_session_env_values(
+            config,
+            bash_approval_mode,
+            work_instruction_mode,
+            include_reasoning_in_context,
+        ),
         env_overrides: None,
         mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
@@ -740,6 +758,7 @@ fn shell_session_env_values(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), config.model.clone()),
@@ -769,6 +788,14 @@ fn shell_session_env_values(
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             timem_in_process::agent_api::work_instruction_mode_label(work_instruction_mode)
                 .to_string(),
+        ),
+        (
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT".to_string(),
+            if include_reasoning_in_context {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
         ),
         ("TIMEM_API_KEY".to_string(), config.api_key.clone()),
         (
@@ -815,13 +842,18 @@ fn cache_shell_session_runtime(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) {
     stored_session.updated_at_ms = now_ms_i64();
     stored_session.current_dir = current_dir.display().to_string();
     stored_session.profile = shell_session_profile(config);
-    stored_session.env =
-        shell_session_env_values(config, bash_approval_mode, work_instruction_mode);
+    stored_session.env = shell_session_env_values(
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        include_reasoning_in_context,
+    );
 }
 
 fn take_shell_resume_notice(
@@ -876,6 +908,7 @@ fn append_shell_turn_result(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) {
     append_shell_history_message(
@@ -911,6 +944,7 @@ fn append_shell_turn_result(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         current_dir,
     );
     stored_session.state = if outcome.stop_reason.is_some() {
@@ -2071,60 +2105,6 @@ fn paste_recovery_return_edit_clear_lines(
 
 type ConfigField = RuntimeConfigField;
 
-fn run_config_menu(
-    config: &mut crate::ModelServiceConfig,
-    core: &mut AgentCore,
-    bash_approval_mode: &mut BashApprovalMode,
-    work_instruction_mode: &mut WorkInstructionLoadMode,
-    work_instruction_context: &mut Option<String>,
-    current_work_dir: &Path,
-) -> bool {
-    let Some(field) = choose_config_field(config, *bash_approval_mode, *work_instruction_mode)
-    else {
-        println!("已取消配置修改。");
-        return false;
-    };
-    let current = config_field_value(config, *bash_approval_mode, *work_instruction_mode, field);
-    println!("\n{} 当前值：{}", field.label(), current);
-    print!("请输入新值（留空取消）：");
-    let _ = io::stdout().flush();
-    let Some(raw_value) = read_tty_line_cancelable() else {
-        println!("\n已取消配置修改。");
-        return false;
-    };
-    let value = raw_value.trim();
-    if value.is_empty() {
-        println!("已取消配置修改。");
-        return false;
-    }
-    match apply_config_value(
-        config,
-        core,
-        bash_approval_mode,
-        work_instruction_mode,
-        field,
-        value,
-    ) {
-        Ok(report) => {
-            println!("{}", render_config_apply_report(&report));
-            if field == RuntimeConfigField::WorkInstructions {
-                if let Some(message) = apply_work_instruction_mode_after_config(
-                    *work_instruction_mode,
-                    current_work_dir,
-                    work_instruction_context,
-                ) {
-                    println!("{}", render_startup_status_block(&[message]));
-                }
-            }
-            true
-        }
-        Err(err) => {
-            println!("{}", render_config_apply_error(err));
-            false
-        }
-    }
-}
-
 fn apply_work_instruction_mode_after_config(
     mode: WorkInstructionLoadMode,
     current_work_dir: &Path,
@@ -2247,6 +2227,7 @@ fn choose_workspace_item(report: &WorkspaceMenuReport) -> Option<WorkspaceSelect
                     Some(WorkspaceSelection::Add)
                 };
             }
+            MenuKey::Left | MenuKey::Right | MenuKey::Space => {}
             MenuKey::Cancel => break None,
             MenuKey::Other => {}
         }
@@ -2340,56 +2321,211 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn choose_config_field(
+/// Resolves the thinking-chain context setting: explicit CLI option first,
+/// then the environment, then the product default (on).
+fn parse_include_reasoning_in_context(
+    option: Option<&str>,
+    env: &std::collections::HashMap<String, String>,
+) -> bool {
+    let raw = option
+        .map(ToString::to_string)
+        .or_else(|| env.get("TIMEM_INCLUDE_REASONING_IN_CONTEXT").cloned());
+    match raw {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "on" | "true" | "1" | "enabled"
+        ),
+        None => true,
+    }
+}
+
+/// One editable row of the menuconfig-style `/setting` screen.
+struct SettingsMenuRow {
+    field: ConfigField,
+    section: &'static str,
+    value: String,
+    /// Enumerated rows cycle through these values in place; `None` means free
+    /// text edited with the input prompt.
+    choices: Option<&'static [&'static str]>,
+}
+
+const SETTINGS_SECTION_MODEL: &str = "MODEL";
+const SETTINGS_SECTION_RUNTIME: &str = "RUNTIME";
+const SETTINGS_SECTION_CONTEXT: &str = "CONTEXT";
+
+fn settings_menu_rows(
     config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
-) -> Option<ConfigField> {
-    let mut input = ShellInputSource::open().ok()?;
-    let (mut terminal_mode, mut nonblocking_mode) = os::enter_interactive_mode(&input).ok()?;
-    println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
-    let mut selected = 0usize;
-    let report =
-        crate::runtime_config_menu_report(config, bash_approval_mode, work_instruction_mode);
-    print!("{}", render_config_menu(&report, selected));
-    let _ = io::stdout().flush();
-    let result = loop {
-        match read_menu_key(&mut input) {
-            MenuKey::Up => selected = selected.saturating_sub(1),
-            MenuKey::Down => selected = (selected + 1).min(report.items.len().saturating_sub(1)),
-            MenuKey::Enter => break report.items.get(selected).map(|item| item.field),
-            MenuKey::Cancel => break None,
-            MenuKey::Other => {}
+    include_reasoning_in_context: bool,
+) -> Vec<SettingsMenuRow> {
+    let rows: [(ConfigField, &'static str, Option<&'static [&'static str]>); 9] = [
+        (ConfigField::Model, SETTINGS_SECTION_MODEL, None),
+        (
+            ConfigField::ApiProtocol,
+            SETTINGS_SECTION_MODEL,
+            Some(&["openai-compatible", "openai-responses", "anthropic"]),
+        ),
+        (
+            ConfigField::ResponseProtocol,
+            SETTINGS_SECTION_MODEL,
+            Some(&["xml", "json"]),
+        ),
+        (ConfigField::BaseUrl, SETTINGS_SECTION_MODEL, None),
+        (ConfigField::MaxInput, SETTINGS_SECTION_RUNTIME, None),
+        (ConfigField::MaxOutput, SETTINGS_SECTION_RUNTIME, None),
+        (
+            ConfigField::BashApproval,
+            SETTINGS_SECTION_RUNTIME,
+            Some(&["ask", "approve"]),
+        ),
+        (
+            ConfigField::WorkInstructions,
+            SETTINGS_SECTION_RUNTIME,
+            Some(&["silent", "ask", "off"]),
+        ),
+        (
+            ConfigField::IncludeReasoningInContext,
+            SETTINGS_SECTION_CONTEXT,
+            Some(&["on", "off"]),
+        ),
+    ];
+    rows.iter()
+        .map(|(field, section, choices)| SettingsMenuRow {
+            field: *field,
+            section,
+            value: config_field_value(
+                config,
+                bash_approval_mode,
+                work_instruction_mode,
+                include_reasoning_in_context,
+                *field,
+            ),
+            choices: *choices,
+        })
+        .collect()
+}
+
+fn render_settings_menu(rows: &[SettingsMenuRow], selected: usize) -> String {
+    let mut out = String::from("Timem settings\n");
+    out.push_str("Enter 编辑 · ←/→ 或空格 切换 · ↑/↓ 选择 · Esc 退出\n");
+    let mut last_section = "";
+    for (idx, row) in rows.iter().enumerate() {
+        if row.section != last_section {
+            out.push_str(&format!("\n-- {} --\n", row.section));
+            last_section = row.section;
         }
-        print!(
-            "\x1b[{}F{}",
-            report.items.len(),
-            render_config_menu(&report, selected)
-        );
-        let _ = io::stdout().flush();
+        let marker = if idx == selected { "▶" } else { " " };
+        let line = format!("{marker} {:<38} {}", row.field.label(), row.value);
+        if idx == selected {
+            out.push_str(&format!("\x1b[7m{line}\x1b[0m\n"));
+        } else {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn next_choice_value(choices: &[&str], current: &str) -> Option<String> {
+    if choices.is_empty() {
+        return None;
+    }
+    let position = choices
+        .iter()
+        .position(|choice| *choice == current)
+        .unwrap_or(0);
+    Some(choices[(position + 1) % choices.len()].to_string())
+}
+
+fn run_settings_menu(
+    config: &mut crate::ModelServiceConfig,
+    core: &mut AgentCore,
+    bash_approval_mode: &mut BashApprovalMode,
+    work_instruction_mode: &mut WorkInstructionLoadMode,
+    include_reasoning_in_context: &mut bool,
+    work_instruction_context: &mut Option<String>,
+    current_work_dir: &Path,
+) -> bool {
+    let Ok(mut input) = ShellInputSource::open() else {
+        println!("无法打开终端输入。");
+        return false;
     };
+    let Ok((mut terminal_mode, mut nonblocking_mode)) = os::enter_interactive_mode(&input) else {
+        println!("当前终端不支持交互式设置界面。");
+        return false;
+    };
+    let mut selected = 0usize;
+    let mut changed = false;
+    loop {
+        let rows = settings_menu_rows(
+            config,
+            *bash_approval_mode,
+            *work_instruction_mode,
+            *include_reasoning_in_context,
+        );
+        if rows.is_empty() {
+            break;
+        }
+        selected = selected.min(rows.len().saturating_sub(1));
+        print!("\x1b[H\x1b[2J{}", render_settings_menu(&rows, selected));
+        let _ = io::stdout().flush();
+        let key = read_menu_key(&mut input);
+        let row = &rows[selected];
+        let field = row.field;
+        let mut next_value: Option<String> = None;
+        match key {
+            MenuKey::Up => selected = selected.saturating_sub(1),
+            MenuKey::Down => selected = (selected + 1).min(rows.len().saturating_sub(1)),
+            MenuKey::Left | MenuKey::Right | MenuKey::Space | MenuKey::Enter => {
+                if let Some(choices) = row.choices {
+                    next_value = next_choice_value(choices, &row.value);
+                } else if key == MenuKey::Enter {
+                    println!("\n{} 当前值：{}", field.label(), row.value);
+                    print!("请输入新值（留空取消）：");
+                    let _ = io::stdout().flush();
+                    if let Some(raw) = read_tty_line_cancelable() {
+                        let value = raw.trim().to_string();
+                        if !value.is_empty() {
+                            next_value = Some(value);
+                        }
+                    }
+                }
+            }
+            MenuKey::Cancel | MenuKey::Other => break,
+        }
+        let Some(value) = next_value else {
+            continue;
+        };
+        match apply_config_value(
+            config,
+            core,
+            bash_approval_mode,
+            work_instruction_mode,
+            include_reasoning_in_context,
+            field,
+            &value,
+        ) {
+            Ok(report) => {
+                changed = true;
+                println!("{}", render_config_apply_report(&report));
+                if field == ConfigField::WorkInstructions {
+                    if let Some(message) = apply_work_instruction_mode_after_config(
+                        *work_instruction_mode,
+                        current_work_dir,
+                        work_instruction_context,
+                    ) {
+                        println!("{}", render_startup_status_block(&[message]));
+                    }
+                }
+            }
+            Err(error) => println!("{}", render_config_apply_error(error)),
+        }
+    }
     nonblocking_mode.restore();
     terminal_mode.restore();
     println!();
-    result
-}
-
-fn render_config_menu(report: &RuntimeConfigMenuReport, selected: usize) -> String {
-    report
-        .items
-        .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            let marker = if idx == selected { "▶" } else { " " };
-            let value = config_display_value(config_field_row_kind(item.field), &item.value);
-            let line = format!("{marker} {:<22} {value}", item.key);
-            if idx == selected {
-                format!("\x1b[7m{line}\x1b[0m\n")
-            } else {
-                format!("{line}\n")
-            }
-        })
-        .collect()
+    changed
 }
 
 fn render_config_apply_report(report: &RuntimeConfigApplyReport) -> String {
@@ -2420,6 +2556,9 @@ fn render_config_apply_error(error: RuntimeConfigApplyError) -> String {
         RuntimeConfigApplyError::InvalidWorkInstructions => {
             "配置无效：工作目录指令加载策略只能是 silent、ask 或 off。".to_string()
         }
+        RuntimeConfigApplyError::InvalidIncludeReasoningInContext => {
+            "配置无效：上下文思维链回放只能填 on 或 off（true/false 也可以）。".to_string()
+        }
     }
 }
 
@@ -2427,7 +2566,10 @@ fn render_config_apply_error(error: RuntimeConfigApplyError) -> String {
 enum MenuKey {
     Up,
     Down,
+    Left,
+    Right,
     Enter,
+    Space,
     Cancel,
     Other,
 }
@@ -2446,11 +2588,16 @@ fn read_menu_key(input: &mut impl Read) -> MenuKey {
             match seq.as_slice() {
                 [b'[', b'A'] => MenuKey::Up,
                 [b'[', b'B'] => MenuKey::Down,
+                [b'[', b'D'] => MenuKey::Left,
+                [b'[', b'C'] => MenuKey::Right,
                 _ => MenuKey::Cancel,
             }
         }
         b'k' => MenuKey::Up,
         b'j' => MenuKey::Down,
+        b'h' => MenuKey::Left,
+        b'l' => MenuKey::Right,
+        b' ' => MenuKey::Space,
         _ => MenuKey::Other,
     }
 }
@@ -2459,6 +2606,7 @@ fn config_field_value(
     config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     field: ConfigField,
 ) -> String {
     config_display_value(
@@ -2467,6 +2615,7 @@ fn config_field_value(
             config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             field,
         ),
     )
@@ -2494,6 +2643,9 @@ fn config_field_row_kind(field: ConfigField) -> crate::RuntimeConfigRowKind {
         RuntimeConfigField::MaxOutput => crate::RuntimeConfigRowKind::MaxLlmOutput,
         RuntimeConfigField::BashApproval => crate::RuntimeConfigRowKind::BashApproval,
         RuntimeConfigField::WorkInstructions => crate::RuntimeConfigRowKind::WorkInstructions,
+        RuntimeConfigField::IncludeReasoningInContext => {
+            crate::RuntimeConfigRowKind::IncludeReasoningInContext
+        }
     }
 }
 
@@ -2502,6 +2654,7 @@ fn apply_config_value(
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
+    include_reasoning_in_context: &mut bool,
     field: ConfigField,
     value: &str,
 ) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
@@ -2509,6 +2662,7 @@ fn apply_config_value(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         field,
         value,
     )
@@ -3664,6 +3818,7 @@ fn config_row_description(kind: crate::RuntimeConfigRowKind) -> &'static str {
         crate::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
         crate::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
         crate::RuntimeConfigRowKind::WorkInstructions => "AGENTS/CLAUDE 自动加载，silent/ask/off",
+        crate::RuntimeConfigRowKind::IncludeReasoningInContext => "上下文思维链回放，on/off",
         crate::RuntimeConfigRowKind::Space => "记忆空间",
         crate::RuntimeConfigRowKind::ApiAudit => "payload 记录",
         crate::RuntimeConfigRowKind::ActionAudit => "action 记录",

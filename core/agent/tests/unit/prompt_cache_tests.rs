@@ -98,7 +98,7 @@ fn cache_planner_marks_only_recent_dynamic_tail() {
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
         prompt.push_str(&format!(
-            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## TIMEM_ASSISTANT\ndelta {idx}\n[END DELTA]\n"
+            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## ASSISTANT\ndelta {idx}\n[END DELTA]\n"
         ));
     }
 
@@ -131,10 +131,7 @@ fn cache_planner_keeps_one_delta_as_one_addressable_block() {
 fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one-root label <ASSISTANT>...</ASSISTANT>",
-                "Ai3",
-            )
+crate::prompt_render::formatted_response_trailer()
         );
 
     let parts = prompt_parts_from_rendered_prompt(&prompt);
@@ -178,11 +175,8 @@ fn higher_reasoning_intensity_trailer_is_an_uncached_final_block() {
 #[test]
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## RUNTIME\nrepair\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one Markdown response with one state branch",
-                "TIMEM_ASSISTANT",
-            )
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## ASSISTANT\nwrong\n\n## RUNTIME\nrepair\n[END DELTA]\n\n{}",
+crate::prompt_render::formatted_response_trailer()
         );
 
     let blocks = plan_prompt_cache(&prompt);
@@ -252,7 +246,7 @@ fn rendered_prompt_with_stable_assistant_count(stable_count: usize) -> String {
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=stable_count {
         prompt.push_str(&format!(
-                "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## TIMEM_ASSISTANT\nassistant stable checkpoint payload {idx}\n[END DELTA]\n"
+                "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## ASSISTANT\nassistant stable checkpoint payload {idx}\n[END DELTA]\n"
             ));
     }
     let current = stable_count + 1;

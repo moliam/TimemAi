@@ -248,6 +248,10 @@ struct AppState {
     /// run in parallel (mailbox state files are per-session), while
     /// same-session sends stay serialized because they share one state file.
     mailbox_send_lane_locks: Arc<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
+    /// Latest monitor sweep shared by every `session_resource_usage_query`:
+    /// browser tabs (Insights panel, header chip) read one kernel-level
+    /// sample per 2s sweep instead of each re-reading cgroupfs and /proc.
+    resource_samples: Arc<session_resource_monitor::ResourceSampleCache>,
 }
 
 #[derive(Default)]
@@ -377,6 +381,7 @@ impl WebMemState {
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
+            include_reasoning_in_context: self.settings.include_reasoning_in_context,
             restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
             system_cpu_cap_percent: self.settings.system_cpu_cap_percent,
             system_mem_cap_percent: self.settings.system_mem_cap_percent,
@@ -648,6 +653,7 @@ struct RuntimeSettings {
     config: ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     max_rounds: u32,
 }
 
@@ -842,6 +848,7 @@ struct WebSessionRuntimeProfile {
     max_rounds: String,
     bash_approval: String,
     work_instructions: String,
+    include_reasoning_in_context: bool,
     api_key_configured: bool,
 }
 
@@ -880,9 +887,10 @@ struct WebNextTurnPayload {
     text: String,
     attachments: Vec<WebAttachment>,
     worker_roles: Vec<WorkerRole>,
-    /// Timer queue entry with queue_timeout_minutes > 0: once the wall clock
-    /// passes this deadline the entry is dispatched immediately out of queue
-    /// order instead of waiting behind pending messages.
+    /// Timer queue entry's wall-clock retry deadline. A positive
+    /// `queue_timeout_minutes` caps FIFO waiting; an immediate-delivery
+    /// fallback uses fire time so the scheduler retries it on its next tick.
+    /// Once reached, the entry is dispatched immediately out of queue order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dispatch_deadline_ms: Option<u64>,
 }
@@ -1140,6 +1148,7 @@ enum WireEvent {
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
+        include_reasoning_in_context: bool,
         restore_prompt_context_on_startup: bool,
         system_cpu_cap_percent: f64,
         system_mem_cap_percent: f64,
@@ -1314,6 +1323,7 @@ struct WebMemInfo {
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
+    include_reasoning_in_context: bool,
     restore_prompt_context_on_startup: bool,
     system_cpu_cap_percent: f64,
     system_mem_cap_percent: f64,
@@ -1811,6 +1821,9 @@ enum ClientCommand {
     SystemContextCompressThresholdUpdate {
         percent: u8,
     },
+    SystemIncludeReasoningInContextUpdate {
+        enabled: bool,
+    },
     SystemRestorePromptContextOnStartupUpdate {
         enabled: bool,
     },
@@ -1856,6 +1869,7 @@ impl ClientCommand {
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
+            | Self::SystemIncludeReasoningInContextUpdate { .. }
             | Self::SystemRestorePromptContextOnStartupUpdate { .. }
             | Self::SystemResourceCapsUpdate { .. }
             | Self::SystemResourceCapsEscalate { .. }
@@ -1939,6 +1953,7 @@ impl ClientCommand {
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
+                | Self::SystemIncludeReasoningInContextUpdate { .. }
                 | Self::SystemRestorePromptContextOnStartupUpdate { .. }
                 | Self::SystemResourceCapsUpdate { .. }
                 | Self::SystemResourceCapsEscalate { .. }
@@ -2004,6 +2019,7 @@ impl ClientCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebExitReason {
     HelpRequested,
+    VersionRequested,
     CtrlC,
     #[cfg(unix)]
     Sigterm,
@@ -2020,6 +2036,7 @@ impl WebExitReason {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::HelpRequested => "help_requested",
+            Self::VersionRequested => "version_requested",
             Self::CtrlC => "ctrl_c",
             #[cfg(unix)]
             Self::Sigterm => "sigterm",
@@ -2039,6 +2056,10 @@ pub async fn run(
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(WebExitReason::HelpRequested);
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        print_version();
+        return Ok(WebExitReason::VersionRequested);
     }
 
     let launch = WebLaunchOptions::parse(args)?;
@@ -2101,6 +2122,12 @@ pub async fn run(
             ));
         }
     };
+    // A persisted MEM setting outranks the launch-time default, so a system
+    // toggle survives restarts and new Sessions inherit it.
+    if let Ok(mut template_settings) = template.settings.lock() {
+        template_settings.include_reasoning_in_context =
+            initial_mem.settings.include_reasoning_in_context;
+    }
     let mem = Arc::new(Mutex::new(initial_mem));
     let diagnostic_root = if launch.debug {
         Some(Arc::new(TemporaryDebugRoot::create()?))
@@ -2166,6 +2193,7 @@ pub async fn run(
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
+        resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -2725,18 +2753,52 @@ fn debug_browse_listing(session_id: &str, sub_path: &str, dir: &Path) -> String 
 }
 
 fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
-    let body = match std::fs::metadata(file) {
-        Ok(meta) if meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES => format!(
-            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. <a href=\"?session_id={session}&amp;path={path}&amp;download=1\">Download the file</a> instead.</p>",
-            meta.len(),
-            MAX_DEBUG_FILE_PREVIEW_BYTES,
-            session = html_escape(session_id),
-            path = html_escape(sub_path),
-        ),
-        _ => match std::fs::read(file) {
-            Ok(bytes) => format!("<pre>{}</pre>", html_escape(&String::from_utf8_lossy(&bytes))),
-            Err(_) => "<p class=\"err\">debug_file_read_failed</p>".to_string(),
-        },
+    let total_bytes = std::fs::metadata(file).map(|meta| meta.len()).unwrap_or(0);
+    // Oversized files still preview their head, cut at a line boundary:
+    // dump files append records newest-first, so the head already shows
+    // the freshest entries a reader is looking for, and the full file
+    // stays one click away through the download link.
+    let truncated = total_bytes > MAX_DEBUG_FILE_PREVIEW_BYTES;
+    let mut head: Vec<u8> = Vec::new();
+    let mut read_failed = false;
+    match std::fs::File::open(file) {
+        Ok(opened) => {
+            let mut limited = std::io::Read::take(opened, MAX_DEBUG_FILE_PREVIEW_BYTES);
+            if std::io::Read::read_to_end(&mut limited, &mut head).is_err() {
+                read_failed = true;
+            }
+        }
+        Err(_) => read_failed = true,
+    }
+    let mut cut_note = String::new();
+    if truncated {
+        cut_note = match head.iter().rposition(|byte| *byte == b'\n') {
+            Some(line_end) => {
+                head.truncate(line_end + 1);
+                " (truncated at a line boundary)".to_string()
+            }
+            None => " (truncated)".to_string(),
+        };
+    }
+    let body = if read_failed {
+        "<p class=\"err\">debug_file_read_failed</p>".to_string()
+    } else {
+        let notice = if truncated {
+            format!(
+                "<p class=\"err\">File is {total} bytes; showing the first {shown} bytes{cut}. <a href=\"?session_id={session}&amp;path={path}&amp;download=true\">Download the full file</a>.</p>",
+                total = total_bytes,
+                shown = head.len(),
+                cut = cut_note,
+                session = html_escape(session_id),
+                path = html_escape(sub_path),
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{notice}<pre>{}</pre>",
+            html_escape(&String::from_utf8_lossy(&head))
+        )
     };
     debug_browse_page(session_id, sub_path, &body)
 }
@@ -2906,6 +2968,21 @@ async fn debug_reset_statistics(
         Ok(()) => StatusCode::OK,
         Err(_) => StatusCode::BAD_REQUEST,
     }
+}
+
+async fn debug_stats_version(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(debug) = state.debug.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(json!({ "version": debug.stats_version() })).into_response()
 }
 
 async fn upgrade_status(
@@ -3115,9 +3192,7 @@ impl Drop for ZeroizingPassword {
     fn drop(&mut self) {
         // Safety: the buffer is dropped immediately after zeroizing, so the
         // (possibly non-UTF-8) transient state is never observable.
-        for byte in unsafe { self.0.as_mut_vec() } {
-            *byte = 0;
-        }
+        unsafe { self.0.as_mut_vec() }.fill(0);
     }
 }
 
@@ -3247,6 +3322,7 @@ fn build_router(state: AppState, port: u16) -> Router {
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
             debug_reset_statistics: post(debug_reset_statistics),
+            debug_stats_version: get(debug_stats_version),
             upgrade_status: get(upgrade_status),
             upgrade_check: post(upgrade_check),
             upgrade_apply: post(upgrade_apply),
@@ -5511,19 +5587,32 @@ fn handle_command_with_id(
         }
         ClientCommand::SessionResourceUsageQuery { session_id } => {
             ensure_session_exists(state, &session_id)?;
-            let usage = agent_core::resource_caps::session_resource_usage(&session_id)
-                .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
-            let system = agent_core::resource_caps::system_resource_usage()
-                .map_err(|error| format!("system_resource_usage_failed:{error}"))?
-                .map(|usage| WebSystemResourceUsage {
-                    cpu_busy_ticks: usage.cpu_busy_ticks,
-                    cpu_total_ticks: usage.cpu_total_ticks,
-                    memory_total_bytes: usage.memory_total_bytes,
-                    memory_available_bytes: usage.memory_available_bytes,
-                });
+            // Fast path: share the monitor's latest 2s sweep, so every
+            // connected browser tab (Insights panel, header chip) reads one
+            // kernel-level sample instead of each re-reading cgroupfs and
+            // /proc. A cache miss (restore in progress, monitor between
+            // sweeps, no accounting scope, or a transient read error) falls
+            // back to the direct probe below with unchanged semantics.
+            let sweep = state.resource_samples.lookup_sweep(&session_id);
+            let (sampled_at_ms, usage, system) = match sweep {
+                Some((sampled_at_ms, usage, system)) => (sampled_at_ms, Some(usage), Some(system)),
+                _ => {
+                    let usage = agent_core::resource_caps::session_resource_usage(&session_id)
+                        .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
+                    let system = agent_core::resource_caps::system_resource_usage()
+                        .map_err(|error| format!("system_resource_usage_failed:{error}"))?;
+                    (now_ms(), usage, system)
+                }
+            };
+            let system = system.map(|usage| WebSystemResourceUsage {
+                cpu_busy_ticks: usage.cpu_busy_ticks,
+                cpu_total_ticks: usage.cpu_total_ticks,
+                memory_total_bytes: usage.memory_total_bytes,
+                memory_available_bytes: usage.memory_available_bytes,
+            });
             return Ok(Some(WireEvent::SessionResourceUsage {
                 session_id,
-                sampled_at_ms: now_ms(),
+                sampled_at_ms,
                 usage: usage.map(|usage| WebSessionResourceUsage {
                     cpu_usage_usec: usage.cpu_usage_usec,
                     cpu_quota_cores: usage.cpu_quota_cores,
@@ -5814,6 +5903,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5868,6 +5958,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5912,6 +6003,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5969,6 +6061,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6005,6 +6098,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6041,6 +6135,48 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemIncludeReasoningInContextUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.include_reasoning_in_context = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            // The persisted system setting outranks the launch default so new
+            // and restored Sessions inherit it.
+            if let Ok(mut template_settings) = state.template.settings.lock() {
+                template_settings.include_reasoning_in_context = enabled;
+            }
+            update_all_worker_include_reasoning_in_context(state, enabled)?;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: enabled,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6075,6 +6211,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: enabled,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6127,6 +6264,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6204,6 +6342,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -7703,6 +7842,13 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(&windows_verbatim_path_for_user_display(path))
+}
+
+/// User-facing display form of a path: hides Windows verbatim prefixes
+/// while keeping the rendered text canonicalizable back to the same path.
+#[cfg(all(windows, test))]
+pub(crate) fn path_for_user_display(path: &std::path::Path) -> String {
+    windows_verbatim_path_for_user_display(&path.to_string_lossy())
 }
 
 /// Converts canonical Windows drive and UNC paths out of the Win32 verbatim
@@ -9246,6 +9392,7 @@ fn spawn_timer_scheduler(state: AppState) {
     tokio::spawn(async move {
         loop {
             fire_due_timers(&state);
+            dispatch_timed_out_queue_intents(&state);
             sleep(TIMER_SCHEDULER_INTERVAL).await;
         }
     });
@@ -9331,6 +9478,83 @@ fn fire_due_timers(state: &AppState) {
         sync_worker_timers(state, &session_id);
         publish_timers_updated(state, &session_id);
     }
+}
+
+/// The timer scheduler is also the wall-clock owner for queued timer prompts.
+/// Turn completion normally pumps the queue, but a long-running turn may never
+/// produce that boundary. Re-check deadlines every tick so an expired wait cap
+/// is honored even while the current turn is still running.
+fn dispatch_timed_out_queue_intents(state: &AppState) {
+    if state
+        .session_restore_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let now = now_ms();
+    let due = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .values()
+            .filter(|session| !session.workers.is_empty())
+            .filter_map(|session| {
+                let timed_out = session
+                    .message_queue
+                    .projection()
+                    .items
+                    .iter()
+                    .filter(|item| payload_dispatch_deadline_reached(&item.payload, now))
+                    .map(|item| item.command_id.clone())
+                    .collect::<Vec<_>>();
+                if timed_out.is_empty() {
+                    return None;
+                }
+                Some((
+                    session.session_id.clone(),
+                    current_turn_id(session).map(str::to_string),
+                    timed_out,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (session_id, turn_id, command_ids) in due {
+        if turn_id.is_none() {
+            // The ordinary pump already prefers timed-out entries over FIFO
+            // order; this call is the missing wall-clock trigger while idle.
+            dispatch_next_turn_intent_if_ready(state, &session_id);
+            continue;
+        }
+        // `pending_turn_id` is set before Core emits TurnStarted. Only append
+        // to a Core-authoritative active turn; otherwise the next tick retries.
+        if !session_has_active_turn(state, &session_id).unwrap_or(false) {
+            continue;
+        }
+        for command_id in command_ids {
+            if let Err(error) = send_queued_message_now(state, &session_id, &command_id) {
+                if !is_transient_queue_timeout_dispatch_error(&error) {
+                    state.runtime_log.record(
+                        "timer_queue_timeout_dispatch_failed",
+                        json!({
+                            "session_id": session_id,
+                            "command_id": command_id,
+                            "error": error,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn is_transient_queue_timeout_dispatch_error(error: &str) -> bool {
+    matches!(
+        error,
+        "message_queue_item_not_found"
+            | "message_queue_dispatch_in_progress"
+            | "message_queue_supplement_rejected"
+    )
 }
 
 /// One received mail in a session's mailbox, as surfaced to the WebUI.
@@ -11496,14 +11720,14 @@ fn enqueue_timer_fire(
 ) -> bool {
     let command_id = unique_web_id("timer_fire");
     // The wait cap is anchored at fire time: once the wall clock passes the
-    // deadline the queued entry is dispatched immediately out of order.
-    let dispatch_deadline_ms = if queue_timeout_minutes == 0 {
-        None
-    } else {
-        let deadline =
-            now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
-        u64::try_from(deadline).ok()
-    };
+    // deadline the queued entry is dispatched immediately out of order. Even
+    // immediate delivery can fall back here when the active turn closes at the
+    // append boundary; use fire time as the deadline so the scheduler retries
+    // on its next tick instead of waiting for a turn boundary that may never
+    // come.
+    let deadline =
+        now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
+    let dispatch_deadline_ms = u64::try_from(deadline).ok();
     match enqueue_next_turn_intent(
         state,
         session_id,
@@ -11932,6 +12156,12 @@ fn enqueue_next_turn_intent(
     message_queue_projection(state, session_id)
 }
 
+fn payload_dispatch_deadline_reached(payload: &WebNextTurnPayload, now: u128) -> bool {
+    payload
+        .dispatch_deadline_ms
+        .is_some_and(|deadline| now >= u128::from(deadline))
+}
+
 fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
     let intent = state.sessions.lock().ok().and_then(|mut sessions| {
         let session = sessions.get_mut(session_id)?;
@@ -11952,11 +12182,7 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
             .projection()
             .items
             .iter()
-            .find(|item| {
-                item.payload
-                    .dispatch_deadline_ms
-                    .is_some_and(|deadline| now_ms() >= u128::from(deadline))
-            })
+            .find(|item| payload_dispatch_deadline_reached(&item.payload, now_ms()))
             .map(|item| item.command_id.clone());
         let item = if let Some(command_id) = explicit_after_stop {
             session
@@ -13259,6 +13485,42 @@ fn update_all_worker_context_compress_threshold_percent(
     Ok(())
 }
 
+fn update_all_worker_include_reasoning_in_context(
+    state: &AppState,
+    enabled: bool,
+) -> Result<(), String> {
+    let worker_ids = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| {
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    let value = if enabled { "on" } else { "off" }.to_string();
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            match handle.update_runtime_config(
+                agent_core::RuntimeConfigField::IncludeReasoningInContext,
+                value.clone(),
+            ) {
+                Ok(()) => {}
+                Err(error) if error == "core_session_worker_stopped" => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn update_all_worker_model_tool_result_bytes(
     state: &AppState,
     max_bytes: usize,
@@ -13516,6 +13778,7 @@ fn normalize_model_endpoint_input(
             &mut settings.config,
             &mut settings.bash_approval_mode,
             &mut settings.work_instruction_mode,
+            &mut settings.include_reasoning_in_context,
             field,
             value,
         )
@@ -13586,6 +13849,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Silent,
+        include_reasoning_in_context: false,
         max_rounds: 50,
     }
 }
@@ -15326,6 +15590,7 @@ fn update_session_runtime_setting(
         &mut settings.config,
         &mut settings.bash_approval_mode,
         &mut settings.work_instruction_mode,
+        &mut settings.include_reasoning_in_context,
         field,
         value,
     )
@@ -15334,6 +15599,7 @@ fn update_session_runtime_setting(
         &settings.config,
         settings.bash_approval_mode,
         settings.work_instruction_mode,
+        settings.include_reasoning_in_context,
         field,
         effect,
     );
@@ -15407,6 +15673,7 @@ fn propagate_runtime_config_to_sessions(
                     &mut settings.config,
                     &mut settings.bash_approval_mode,
                     &mut settings.work_instruction_mode,
+                    &mut settings.include_reasoning_in_context,
                     field,
                     value,
                 );
@@ -16432,7 +16699,7 @@ fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Optio
     const SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT: usize = 16 * 1024;
     let path = session_work_file_path(state, session_id)?;
     let pointer = format!(
-        "Session work file: {}. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "Session work file: {}. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
         path.display()
     );
     // Content injection is best-effort: a missing or unreadable work file
@@ -18599,6 +18866,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 &settings.config,
                 settings.bash_approval_mode,
                 settings.work_instruction_mode,
+                settings.include_reasoning_in_context,
             )
             .items
             .into_iter()
@@ -18645,6 +18913,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             system_mem_cap_enabled: true,
             resource_caps: resource_caps_projection(&WebMemSettings::default()),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
+            include_reasoning_in_context: default_include_reasoning_in_context(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });
     let (role_library, session_groups) = current_mem_state(state)
@@ -18756,12 +19025,14 @@ fn update_runtime_setting(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         ..
     } = &mut *settings;
     let effect = apply_runtime_config_value(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         field,
         value,
     )
@@ -18770,6 +19041,7 @@ fn update_runtime_setting(
         config,
         *bash_approval_mode,
         *work_instruction_mode,
+        *include_reasoning_in_context,
         field,
         effect,
     ))
@@ -18785,6 +19057,9 @@ fn runtime_config_field_from_key(key: &str) -> Result<agent_core::RuntimeConfigF
         "TIMEM_MAX_LLM_OUTPUT" => agent_core::RuntimeConfigField::MaxOutput,
         "TIMEM_BASH_APPROVAL" => agent_core::RuntimeConfigField::BashApproval,
         "TIMEM_WORK_INSTRUCTIONS" => agent_core::RuntimeConfigField::WorkInstructions,
+        "TIMEM_INCLUDE_REASONING_IN_CONTEXT" => {
+            agent_core::RuntimeConfigField::IncludeReasoningInContext
+        }
         _ => return Err("unsupported_runtime_config_key".to_string()),
     })
 }
@@ -18849,6 +19124,20 @@ impl WorkerTemplate {
                     launch.work_instructions.as_deref(),
                     &env,
                 ),
+                include_reasoning_in_context: launch
+                    .include_reasoning_in_context
+                    .as_deref()
+                    .or_else(|| {
+                        env.get("TIMEM_INCLUDE_REASONING_IN_CONTEXT")
+                            .map(String::as_str)
+                    })
+                    .map(|value| {
+                        matches!(
+                            value.trim().to_ascii_lowercase().as_str(),
+                            "on" | "true" | "1" | "enabled"
+                        )
+                    })
+                    .unwrap_or(true),
                 max_rounds: env
                     .get("TIMEM_MAX_ROUNDS")
                     .and_then(|value| parse_round_budget(value).ok())
@@ -18889,7 +19178,11 @@ impl WorkerTemplate {
         core.set_context_compress_threshold_percent(
             mem.settings.context_compress_threshold_percent,
         )?;
-        core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);
+        core.configure_runtime_from_host(
+            &settings.config,
+            settings.bash_approval_mode,
+            settings.include_reasoning_in_context,
+        );
         core.set_max_rounds(settings.max_rounds);
         core.set_reminder_tips_config(self.reminder_tips_config.clone());
         core.configure_self_tool_runtime(
@@ -19007,6 +19300,7 @@ impl WorkerTemplate {
             "TIMEM_MAX_LLM_OUTPUT",
             "TIMEM_BASH_APPROVAL",
             "TIMEM_WORK_INSTRUCTIONS",
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT",
         ] {
             if let Some(value) = env_overrides.get(key) {
                 apply_session_runtime_field(
@@ -19249,6 +19543,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MAX_ROUNDS",
     "TIMEM_BASH_APPROVAL",
     "TIMEM_WORK_INSTRUCTIONS",
+    "TIMEM_INCLUDE_REASONING_IN_CONTEXT",
     "TIMEM_MODEL_CATALOG_ID",
     "TIMEM_MODEL_REQUIREMENTS",
     "TIMEM_ENABLE_THINKING",
@@ -19344,6 +19639,7 @@ fn apply_session_runtime_field(
         &mut settings.config,
         &mut settings.bash_approval_mode,
         &mut settings.work_instruction_mode,
+        &mut settings.include_reasoning_in_context,
         field,
         value,
     )
@@ -19385,6 +19681,7 @@ impl WebSessionRuntimeProfile {
                 settings.work_instruction_mode,
             )
             .to_string(),
+            include_reasoning_in_context: settings.include_reasoning_in_context,
             api_key_configured: !settings.config.api_key.is_empty(),
         }
     }
@@ -19428,6 +19725,14 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
         (
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
+        ),
+        (
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT".to_string(),
+            if settings.include_reasoning_in_context {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
         ),
         (
             "TIMEM_TOOL_CALL_MODE".to_string(),
@@ -19551,6 +19856,7 @@ struct WebLaunchOptions {
     max_llm_output_tokens: Option<u32>,
     bash_approval: Option<String>,
     work_instructions: Option<String>,
+    include_reasoning_in_context: Option<String>,
     debug: bool,
     open_browser: bool,
 }
@@ -19572,14 +19878,39 @@ impl Default for WebLaunchOptions {
             max_llm_output_tokens: None,
             bash_approval: None,
             work_instructions: None,
+            include_reasoning_in_context: None,
             debug: false,
             open_browser: true,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebPreflight {
+    Help,
+    Version,
+    Run,
+}
+
+pub(crate) fn preflight_web_args(args: &[String]) -> Result<WebPreflight, String> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Ok(WebPreflight::Help);
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        return Ok(WebPreflight::Version);
+    }
+    WebLaunchOptions::parse_syntax(args)?;
+    Ok(WebPreflight::Run)
+}
+
 impl WebLaunchOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
+        let options = Self::parse_syntax(args)?;
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn parse_syntax(args: &[String]) -> Result<Self, String> {
         let mut options = Self::default();
         let mut index = 0;
         while index < args.len() {
@@ -19610,6 +19941,10 @@ impl WebLaunchOptions {
                 }
                 "--public-host" => string(&mut options.public_host)?,
                 "--space" => string(&mut options.space)?,
+                argument if argument.starts_with("--space=") => {
+                    options.space = Some(argument["--space=".len()..].to_string());
+                    index += 1;
+                }
                 "--api-protocol" => string(&mut options.api_protocol)?,
                 "--response-protocol" => string(&mut options.response_protocol)?,
                 "--api-key" => string(&mut options.api_key)?,
@@ -19617,6 +19952,9 @@ impl WebLaunchOptions {
                 "--base-url" => string(&mut options.base_url)?,
                 "--bash-approval" => string(&mut options.bash_approval)?,
                 "--work-instructions" => string(&mut options.work_instructions)?,
+                "--include-reasoning-in-context" => {
+                    string(&mut options.include_reasoning_in_context)?
+                }
                 "--debug" => {
                     options.debug = true;
                     index += 1;
@@ -19625,7 +19963,7 @@ impl WebLaunchOptions {
                     options.open_browser = false;
                     index += 1;
                 }
-                "--data-dir" => {
+                argument if argument == "--data-dir" || argument.starts_with("--data-dir=") => {
                     return Err(
                         "unsupported_option:--data-dir; MEM is the complete workspace".to_string(),
                     );
@@ -19669,14 +20007,18 @@ impl WebLaunchOptions {
                 _ => index += 1,
             }
         }
-        if let Some(port) = options.port {
+        Ok(options)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(port) = self.port {
             if !(PORT_START..=PORT_END).contains(&port) {
                 return Err(format!(
                     "port_out_of_range:{port}; expected {PORT_START}..={PORT_END}"
                 ));
             }
         }
-        Ok(options)
+        Ok(())
     }
 
     fn model_service_source(&self) -> ModelServiceConfigSource {
@@ -19834,8 +20176,12 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
     }
 }
 
+pub(crate) fn print_version() {
+    println!("Timem Web {}", env!("CARGO_PKG_VERSION"));
+}
+
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n  --debug                      keep up to 512 MiB of audit data for debugging\n  -V, --version                print version and exit\n  -h, --help                   print this help and exit\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

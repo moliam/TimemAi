@@ -35,10 +35,11 @@ async function waitFor(check, message, timeout = 10000) {
 }
 
 const now = Date.now();
+const queuedTimerDeadlineMs = now + 180_000;
 const timers = () => [
   {
     timer_id: "timer-u1", name: "每日提醒",
-    prompt: "检查长构建结果并汇报：跑 ctest --output-on-failure，失败用例列出清单与原因；\n全绿则一句话汇报，并顺带检查磁盘占用，超过 85% 时清理 target 旧产物。",
+    prompt: "检查长构建结果并汇报：跑 ctest --output-on-failure，失败用例列出清单与原因；\n全绿则一句话汇报，并顺带检查磁盘占用，超过 85% 时清理 target 旧产物。\n补充检查：逐一核对告警等级、产物哈希与安装包体积，确认没有遗留的临时目录或未合并的配置分叉，并把结论按优先级排序列成简报，供后续追踪与复盘使用。",
     mode: "once", after_ms: 60000, at: null, interval_ms: null,
     created_by: "user", created_at_ms: now, enabled: true,
     next_fire_ms: now + 60000, last_fired_ms: null,
@@ -74,7 +75,20 @@ const session = () => ({
   history_before_cursor: null, history_has_more: false,
   active_turn_id: null, cancelling_turn_id: null, pending_turn_id: null,
   message_queue: {
-    revision: 0, items: [], auto_send_enabled: true,
+    revision: 1,
+    items: [{
+      command_id: "timer_fire_queued",
+      enqueue_seq: 0,
+      payload: {
+        turn_id: "web_turn_timer_queued",
+        created_at_ms: now,
+        text: "[timer:每日提醒] 排队中的定时提醒",
+        attachments: [],
+        worker_roles: [],
+        dispatch_deadline_ms: queuedTimerDeadlineMs,
+      },
+    }],
+    auto_send_enabled: true,
     continuation: { state: "awaiting_normal_completion" },
     dispatching_command_id: null,
   },
@@ -316,6 +330,45 @@ async function main() {
   const lastCommand = (type) => [...host.commands].reverse().find((c) => c.type === type);
   try {
     await waitFor(() => exists(".timer-header-button"), "timer header button missing");
+
+    // A queued timer row keeps the host's alarm identity, shows the timer
+    // name, strips the raw wire prefix from its body, and keeps a live
+    // countdown to the queue-wait deadline.
+    await waitFor(() => exists(".queued-message-timer"), "queued timer badge missing");
+    const queuedTimer = await browser.evaluate(`(() => {
+      const badge = document.querySelector('.queued-message-timer');
+      const countdown = badge?.querySelector('.queued-message-timer-countdown');
+      return {
+        name: badge?.querySelector('.queued-message-timer-name')?.textContent ?? "",
+        countdown: countdown?.getAttribute('aria-label') ?? "",
+        body: document.querySelector('.queued-message-preview p')?.textContent ?? "",
+        icon: Boolean(badge?.querySelector('.queued-message-timer-icon svg')),
+      };
+    })()`);
+    assert(queuedTimer.icon, "queued timer alarm logo missing");
+    assert(queuedTimer.name === "每日提醒", `queued timer name missing: ${JSON.stringify(queuedTimer)}`);
+    assert(queuedTimer.countdown.length > 0, `queued timer countdown missing: ${JSON.stringify(queuedTimer)}`);
+    assert(queuedTimer.body.includes("排队中的定时提醒"), `queued timer body missing: ${JSON.stringify(queuedTimer)}`);
+    assert(!queuedTimer.body.includes("[timer:"), `queued timer body leaked the raw prefix: ${JSON.stringify(queuedTimer)}`);
+    await waitFor(async () => {
+      const next = await browser.evaluate(
+        `document.querySelector('.queued-message-timer-countdown')?.getAttribute('aria-label')`,
+      );
+      return Boolean(next) && next !== queuedTimer.countdown;
+    }, "queued timer countdown did not advance");
+    // The collapsed one-line queue summary keeps the same timer identity.
+    await click(`document.querySelector('.queued-message-panel-toggle')?.click()`);
+    await waitFor(() => exists(".queued-message-summary .queued-message-timer"), "collapsed queued timer badge missing");
+    assert(
+      await browser.evaluate(`document.querySelector('.queued-message-summary .queued-message-timer-name')?.textContent === '每日提醒'`),
+      "collapsed queued timer name missing",
+    );
+    assert(
+      await browser.evaluate(`Boolean(document.querySelector('.queued-message-summary .queued-message-timer-countdown')?.getAttribute('aria-label'))`),
+      "collapsed queued timer countdown missing",
+    );
+    await click(`document.querySelector('.queued-message-panel-toggle')?.click()`);
+    await waitFor(() => exists(".queued-message-items .queued-message-timer"), "expanded queued timer badge missing");
     // Indicator: wait for the hello snapshot to hydrate the session, then the
     // count badge and highlight must appear for active timers.
     await waitFor(
@@ -621,6 +674,11 @@ async function main() {
       assert(timerBg === expectedTimerBg,
         `timer entry must use the neutral system card: theme=${theme} expected=${expectedTimerBg} got=${timerBg}`);
       assert(bubbleBg !== timerBg, "bubble and timer tint must differ");
+      const queuedTimerBg = await browser.evaluate(
+        `getComputedStyle(document.querySelector('.queued-message-timer')).backgroundColor`,
+      );
+      assert(queuedTimerBg && queuedTimerBg !== "rgba(0, 0, 0, 0)",
+        `queued timer badge must tint: theme=${theme} background=${queuedTimerBg}`);
     }
 
     // Layout acceptance across themes and widths (panel + create form).
@@ -637,6 +695,29 @@ async function main() {
              }).length; })()`,
         );
         assert(overflow === 0, `timer panel controls overflow at ${theme}/${width}`);
+        const queueBounds = await browser.evaluate(`(() => {
+          const list = document.querySelector('.queued-message-list');
+          const badge = list?.querySelector('.queued-message-timer');
+          if (!list || !badge) return null;
+          const listRect = list.getBoundingClientRect();
+          const badgeRect = badge.getBoundingClientRect();
+          return {
+            viewport: innerWidth,
+            listLeft: listRect.left,
+            listRight: listRect.right,
+            badgeLeft: badgeRect.left,
+            badgeRight: badgeRect.right,
+          };
+        })()`);
+        assert(queueBounds, `queued timer row missing at ${theme}/${width}`);
+        assert(
+          queueBounds.listLeft >= -1 && queueBounds.listRight <= queueBounds.viewport + 1,
+          `queued message panel overflow at ${theme}/${width}: ${JSON.stringify(queueBounds)}`,
+        );
+        assert(
+          queueBounds.badgeLeft >= queueBounds.listLeft - 1 && queueBounds.badgeRight <= queueBounds.listRight + 1,
+          `queued timer badge overflow at ${theme}/${width}: ${JSON.stringify(queueBounds)}`,
+        );
         console.log(`timer panel acceptance: ${theme} ${width}px passed`);
       }
     }

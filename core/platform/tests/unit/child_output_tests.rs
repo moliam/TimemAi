@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::test_support::process_lifecycle_test_lock;
 
 #[cfg(unix)]

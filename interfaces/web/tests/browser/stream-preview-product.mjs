@@ -34,6 +34,15 @@ async function waitFor(check, message, timeout = 10000) {
   throw new Error(typeof message === "function" ? await message() : message);
 }
 
+// Abortive TCP reset for the network-outage scenario: the host must observe a
+// mid-stream connection failure. A graceful close can surface as a clean
+// stream end, parse as an incomplete model response, and take the
+// repair/retry path that masks the network-error interruption UX.
+const abortNetwork = (res) => {
+  const socket = res.socket;
+  if (socket && typeof socket.resetAndDestroy === "function") socket.resetAndDestroy();
+  else res.destroy();
+};
 const worker = (state) => ({
   worker_id: "worker-1", context_id: "context-1", display_name: "Primary",
   ordinal: 0, state, parent_worker_id: null,
@@ -427,12 +436,16 @@ async function main() {
       const interactionXml = protocol === "xml" && scenario === "interaction";
       write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","ender":{"byte_nr":199}}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender>');
       await new Promise(resolve => { release = resolve; });
-      if (scenario === 'network') { res.destroy(); return; }
+      if (scenario === 'network') { abortNetwork(res); return; }
       if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
       else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile></actions></ASSISTANT>');
       else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile><readfile><path>Cargo.toml</path><ender><byte_nr>99</byte_nr></ender></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
+      // A persistent outage: retried/repaired model requests must fail too,
+      // or one successful retry would complete the turn and never surface the
+      // network-error interruption this scenario verifies.
+      if (scenario === 'network') { abortNetwork(res); return; }
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
       write(protocol === "json" ? JSON.stringify({status:"all_finished",final_answer:"HTTP final"}) : "<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?</finish_confirm><final_answer>HTTP final</final_answer></ASSISTANT>");
     }
@@ -511,7 +524,9 @@ async function main() {
     assert(requests===1,"response finished before browser observed preview");
     if (scenario === "interaction") {
       appendStreaming("\n\n" + Array.from({length:180}, (_,i) => `Paragraph ${i} streaming text.`).join("\n\n"));
-      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 60000);
+      // streamReveal renders at a fixed pace; on throttled runners
+      // 180 paragraphs can exceed 60s, so give the reveal a wider window.
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 120000);
       await browser.call("Browser.grantPermissions", {origin:"http://127.0.0.1:18987", permissions:["clipboardReadWrite", "clipboardSanitizedWrite"]});
       await browser.evaluate(`(() => { const node=document.querySelector('.response-preview .markdown-body p');const r=document.createRange();r.selectNodeContents(node);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r); })()`);
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
@@ -575,7 +590,7 @@ async function main() {
       releaseFinal();
     }
     if (scenario === "network") {
-      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview-interruption')?.textContent.includes('Network error')`), "network lost partial output");
+      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview-interruption')?.textContent.includes('Network error')`), "network lost partial output", 30000);
       assert(await browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`), "network lost partial Chat");
       console.log("PASS actual Host + HTTP SSE + Chrome: broken HTTP retains partial response and Chat");
       return;
@@ -630,7 +645,10 @@ async function main() {
       assert(modelInputs.slice(1).some(body => body.includes("SUPPLEMENT_STREAM_CHECK")), "next request did not consume supplement");
     }
     if (scenario === "invalid") {
-      assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
+      // The retract event rides the websocket asynchronously; a synchronous
+      // check races event delivery on slow runners (macOS flake). Converge
+      // with waitFor instead of asserting the instantaneous snapshot.
+      await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
     }
     const persistedFinal = async (dir) => {
       for (const entry of await readdir(dir, {withFileTypes:true})) {

@@ -291,3 +291,32 @@ fn invalid_native_tool_call_payloads_are_protocol_violations() {
         assert!(!is_invalid_native_tool_call_error(error), "{error}");
     }
 }
+
+#[test]
+fn reasoning_content_rejection_requires_exact_field_non_transient_4xx_and_rejection_signal() {
+    for error in [
+        "model_http_400: unknown parameter: reasoning_content",
+        "model_http_404: reasoning_content is not supported by this endpoint",
+        "model_http_422: extra inputs are not permitted: reasoning_content",
+        "model_http_422: unexpected field `reasoning_content` in assistant message",
+    ] {
+        assert!(
+            is_reasoning_content_input_rejected(error),
+            "must detect: {error}"
+        );
+    }
+    for error in [
+        "model_http_400: invalid request payload",
+        "model_http_400: reasoning_content has an invalid value",
+        "model_http_500: reasoning_content is unsupported",
+        "model_http_429: reasoning_content not allowed right now",
+        "model_http_401: reasoning_content unauthorized",
+        "model_network_error: reasoning_content rejected",
+        "model_http_400: parallel_tool_calls unsupported",
+    ] {
+        assert!(
+            !is_reasoning_content_input_rejected(error),
+            "must not detect: {error}"
+        );
+    }
+}

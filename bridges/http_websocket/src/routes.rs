@@ -23,6 +23,7 @@ pub struct BrowserRouteHandlers<S> {
     pub performance_trace: MethodRouter<S>,
     pub debug_browse: MethodRouter<S>,
     pub debug_reset_statistics: MethodRouter<S>,
+    pub debug_stats_version: MethodRouter<S>,
     pub upgrade_status: MethodRouter<S>,
     pub upgrade_check: MethodRouter<S>,
     pub upgrade_apply: MethodRouter<S>,
@@ -51,6 +52,7 @@ where
         .route("/api/upload", handlers.upload)
         .route("/api/debug-browse", handlers.debug_browse)
         .route("/api/debug/reset", handlers.debug_reset_statistics)
+        .route("/api/debug/stats-version", handlers.debug_stats_version)
         .route("/api/upgrade/status", handlers.upgrade_status)
         .route("/api/upgrade/check", handlers.upgrade_check)
         .route("/api/upgrade/apply", handlers.upgrade_apply)
@@ -94,6 +96,7 @@ mod tests {
             performance_trace: post(|| async { StatusCode::NO_CONTENT }),
             debug_browse: get(|| async { "debug_browse" }),
             debug_reset_statistics: post(|| async { "debug_reset_statistics" }),
+            debug_stats_version: get(|| async { "debug_stats_version" }),
             upgrade_status: get(|| async { "upgrade_status" }),
             upgrade_check: post(|| async { "upgrade_check" }),
             upgrade_apply: post(|| async { "upgrade_apply" }),

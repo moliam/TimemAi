@@ -1306,7 +1306,7 @@ fn prompt_is_append_only_and_segmented() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
-    assert!(second.contains("## TIMEM_ASSISTANT"));
+    assert!(second.contains("## ASSISTANT"));
     assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
     assert!(!second.contains("All previous pending open tasks are completed."));
     assert!(second.contains("\n\n继续"));
@@ -1362,7 +1362,7 @@ fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(prompt.contains("先分析"));
     assert!(prompt.contains(
         "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n你好"
@@ -1677,7 +1677,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt.find("## ASSISTANT").unwrap();
     let raw = prompt.find(raw_response).unwrap();
     let system_result = prompt
         .find("The following are results of the actions generated in response:")
@@ -1685,7 +1685,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     assert!(assistant < raw);
     assert!(raw < system_result);
     assert!(!action_results(&prompt).is_empty());
-    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
+    assert!(!prompt.contains("## ASSISTANT\n\n需要读取自身信息。"));
 }
 
 #[test]
@@ -1803,7 +1803,7 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
 }
 
 #[test]
-fn assistant_prompt_heading_uses_current_worker_speaker_name() {
+fn assistant_prompt_heading_is_the_fixed_protocol_role_name() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("assistant_heading"));
     core.set_assistant_speaker_name("ID2\nignored");
     assert_eq!(core.assistant_speaker_name(), "ID2 ignored");
@@ -1822,8 +1822,8 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## ID2 ignored"));
-    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\nAll previous"));
+    assert!(prompt.contains("\n## ASSISTANT\n"));
+    assert!(!prompt.contains("## ID2 ignored"));
 }
 
 #[test]
@@ -1841,7 +1841,7 @@ fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_cl
     };
 
     assert!(!prompt.contains("Your identity in prompt history"));
-    assert!(prompt.contains("## Ai4"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(!prompt.contains("ASSSISTANT_ID"));
     assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
@@ -2132,12 +2132,14 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     let report = core
         .apply_runtime_config_update(
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::MaxInput,
             "3K",
         )
@@ -2176,6 +2178,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::BashApproval,
             "approve",
         )
@@ -2189,6 +2192,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::WorkInstructions,
             "off",
         )
@@ -2196,6 +2200,36 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     assert_eq!(report.key, "TIMEM_WORK_INSTRUCTIONS");
     assert_eq!(report.value, "off");
     assert_eq!(work, agent_core::WorkInstructionLoadMode::Off);
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            "on",
+        )
+        .unwrap();
+    assert_eq!(report.key, "TIMEM_INCLUDE_REASONING_IN_CONTEXT");
+    assert_eq!(report.value, "on");
+    assert!(include_reasoning);
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            "bogus",
+        )
+        .unwrap_err();
+    assert_eq!(
+        report,
+        agent_core::RuntimeConfigApplyError::InvalidIncludeReasoningInContext
+    );
+    assert!(include_reasoning);
 }
 
 #[test]
@@ -2218,7 +2252,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         http_transport: Default::default(),
     };
 
-    core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
+    core.configure_runtime_from_host(&config, BashApprovalMode::Approve, false);
 
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
@@ -2444,7 +2478,7 @@ fn shorter_worker_role_description_is_not_mistaken_for_a_repeated_prefix() {
 }
 
 #[test]
-fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
+fn worker_role_description_is_reinjected_after_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2468,7 +2502,13 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!compacted_prompt.contains("comply this worker's methodology: Inspect evidence."));
+    assert_eq!(
+        compacted_prompt
+            .matches("comply this worker's methodology: Inspect evidence.")
+            .count(),
+        1,
+        "compaction must re-anchor the role description: {compacted_prompt}"
+    );
 
     let prompt = match core.begin_turn("second task", Some(&role)) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2480,7 +2520,11 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
             .count(),
         1
     );
-    assert!(!prompt.contains("(also used in the above)"));
+    assert_eq!(
+        prompt.matches("(also used in the above)").count(),
+        1,
+        "the next turn must reference the visible description: {prompt}"
+    );
     assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
 }
 
@@ -3217,6 +3261,49 @@ fn compaction_confirmation_carries_the_session_work_file() {
 }
 
 #[test]
+fn compaction_reinjects_tool_repo_hint_once() {
+    let marker = "unique_tool_repo_compaction_marker_51bd";
+    let context = format!(
+        "Previously accumulated reusable scripts are available at: /tmp/tools\n{marker}\nThe tool directories have semantic names."
+    );
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_tool_repo_hint"),
+    );
+    let _ = core.begin_turn("first", Some(&context));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(marker).count(),
+        1,
+        "compaction must re-inject the tool-repo hint once: {prompt}"
+    );
+
+    let next = match core.begin_turn("second", Some(&context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        next.matches(marker).count(),
+        1,
+        "the re-injected tool-repo hint must stay one-time: {next}"
+    );
+}
+
+#[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
     fs::write(
@@ -3292,7 +3379,7 @@ fn context_compress_summary_only_removes_all_existing_deltas() {
     assert!(!prompt.contains("Context compress summary replacing"));
     assert_eq!(prompt.matches("remove stale test delta").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compression summary)")
+        .find("## ASSISTANT (context compression summary)")
         .unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
     let compact_result = prompt.find("context compressed successfully.").unwrap();
@@ -3340,7 +3427,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 
     assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compression summary)")
+        .find("## ASSISTANT (context compression summary)")
         .unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
     let compact_result = prompt.find("context compressed successfully.").unwrap();
@@ -3450,7 +3537,7 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("## ASSISTANT (context compression summary)"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
@@ -3753,6 +3840,94 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
             "unexpected {redundant}: {prompt}"
         );
     }
+}
+
+#[test]
+fn observed_tokens_above_budget_retries_compaction_after_exhausted_followup() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("observed_retry_after_exhausted"),
+    );
+    core.set_max_llm_input_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_500),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Hard over budget (observed 3500 >= max 3000) forces the compaction
+    // requirement even though the local chars/4 estimate stays far below it.
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
+
+    // The model ignores the compaction requirement -> follow-up exhausted.
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"still not compacted"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_600),
+        truncated: false,
+    });
+    // First refusal: the bounded forced-compaction loop retries (1/2).
+    let retry_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(retry_prompt.contains("context_compress"));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"still not compacted"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_700),
+        truncated: false,
+    });
+    // Second refusal reaches the bound: abandoned, the response is honored,
+    // and the follow-up latch becomes Exhausted.
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Fail closed: even with the exhausted latch, a hard over-budget prompt
+    // must retry the compaction requirement on the next turn.
+    let prompt = match core.begin_turn("next again", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
+}
+
+#[test]
+fn chinese_content_local_estimate_below_budget_with_observed_over_budget_triggers_compaction() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("chinese_observed_over_budget"),
+    );
+    core.set_max_llm_input_tokens(3_000);
+    // Chinese content: the local chars/4 estimate stays far below the budget
+    // while the provider tokenizer counts far more tokens for it.
+    let _ = core.begin_turn(&"检查构建结果并汇报系统状态。".repeat(30), None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_500),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("下一轮", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
 }
 
 #[test]
@@ -4725,7 +4900,7 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
     };
 
     let assistant_pos = prompt
-        .find("## TIMEM_ASSISTANT")
+        .find("## ASSISTANT")
         .expect("missing assistant repair slice");
     let raw_pos = prompt
         .find(raw_response)
@@ -5065,7 +5240,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
-        .contains("## ASSISTANT:\n"));
+        .contains("## ASSISTANT\n"));
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
@@ -6061,10 +6236,10 @@ fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
         .is_none());
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt.find("## ASSISTANT").unwrap();
     let action_result = prompt.find(r#"{"action_result":"#).unwrap();
     assert!(assistant < action_result);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(!prompt.contains("## ASSISTANT (context compression summary)"));
     assert!(!core.scratch_file().exists());
 }
 
@@ -8254,7 +8429,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("actions[0].input.any_required:cmd|loop_cmd"));
+    assert!(prompt.contains("actions[0].input.any_required:cmd|command|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -8732,7 +8907,7 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(prompt.contains("推导一下"));
     assert!(!prompt.contains("Free_talk:"));
 }
@@ -11201,4 +11376,427 @@ fn serial_tool_action_counts_toward_turn_stats_tool_calls() {
         ),
         other => panic!("expected final step, got {other:?}"),
     }
+}
+
+#[test]
+fn include_reasoning_opted_out_omits_captured_reasoning() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_opted_out"),
+    );
+    // The runtime option defaults on; an explicit opt-out must suppress the
+    // replay for every later response while still consuming the capture.
+    core.set_include_reasoning_in_context(false);
+    core.set_model_reasoning("SECRET REASONING CHAIN", false);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("SECRET REASONING CHAIN"));
+
+    // The pending capture is consumed even when the opt-in is off, so a later
+    // enablement must never replay stale reasoning.
+    core.set_include_reasoning_in_context(true);
+    let prompt = match core.begin_turn("again", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("SECRET REASONING CHAIN"));
+}
+
+#[test]
+fn include_reasoning_defaults_on_and_replays_without_explicit_enablement() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_default_on"),
+    );
+    core.set_model_reasoning("DEFAULT ON REASONING", false);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("DEFAULT ON REASONING"),
+        "reasoning replay must default on: {prompt}"
+    );
+}
+
+#[test]
+fn include_reasoning_replays_captured_reasoning_before_final_answer() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_replay"),
+    );
+    core.set_include_reasoning_in_context(true);
+    core.set_model_reasoning(
+        "STEP ONE inspect the build.\nSTEP TWO verify the output.",
+        true,
+    );
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("STEP ONE inspect the build."));
+    assert!(prompt.contains("STEP TWO verify the output."));
+    assert!(prompt.contains("[reasoning truncated]"));
+    let reasoning_pos = prompt.find("STEP ONE inspect the build.").unwrap();
+    let answer_pos = prompt.find("seeded answer").unwrap();
+    assert!(reasoning_pos < answer_pos);
+}
+
+#[test]
+fn include_reasoning_without_captured_reasoning_omits_the_slice() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_no_capture"),
+    );
+    core.set_include_reasoning_in_context(true);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"plain finish"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("[reasoning truncated]"));
+    assert!(!prompt.contains("model_reasoning"));
+}
+
+#[test]
+fn include_reasoning_stays_in_context_across_later_turns() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_persistent"),
+    );
+    core.set_model_reasoning("PERSISTENT_REASONING_CHAIN", false);
+    let _ = core.begin_turn("first", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"first answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Second turn: the model returns no reasoning at all. The first turn's
+    // reasoning must still be rendered because it lives in the context deltas.
+    let _ = core.begin_turn("second", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"second answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("third", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("PERSISTENT_REASONING_CHAIN"),
+        "reasoning must persist in the context after later turns: {prompt}"
+    );
+    assert!(prompt.contains("first answer"));
+    assert!(prompt.contains("second answer"));
+}
+
+#[test]
+fn include_reasoning_replays_on_native_tool_rounds() {
+    // Regression: native tool rounds never funnel through
+    // assistant_response_slices, so captured reasoning used to be dropped
+    // entirely (observed as missing reasoning_content replay in real audits).
+    // The unified delta-append entry must attach it exactly once.
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_native_round"),
+    );
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "model".to_string(),
+        gateway: "https://gateway.example.test/v1".to_string(),
+        requested_mode: agent_core::ToolCallMode::Auto,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Probe,
+        reason: "test".to_string(),
+        probe_latency_ms: Some(1),
+        observed_tool_calls: 2,
+    });
+    let _ = core.begin_turn("inspect cwd", None);
+    core.set_model_reasoning("NATIVE ROUND REASONING CHAIN", false);
+    let arguments = json!({"type": "cwd"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![agent_core::NativeToolCall {
+            assistant_continuation: None,
+            id: "call_reason_1".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("NATIVE ROUND REASONING CHAIN"),
+        "native tool-round reasoning must replay into the next prompt: {prompt}"
+    );
+    let assistant_pos = prompt
+        .find("## ASSISTANT (thinking)")
+        .unwrap_or_else(|| panic!("dedicated thinking heading missing: {prompt}"));
+    let reasoning_pos = prompt.find("NATIVE ROUND REASONING CHAIN").unwrap();
+    assert!(
+        reasoning_pos > assistant_pos,
+        "reasoning must render under the dedicated thinking heading: {prompt}"
+    );
+    assert!(
+        !prompt.contains("## RUNTIME\n\nNATIVE ROUND REASONING"),
+        "reasoning must not render as a runtime action result: {prompt}"
+    );
+    // The round keeps its structured native exchange alongside the textual
+    // reasoning slice.
+    assert_eq!(core.export_dynamic_context().native_exchanges.len(), 1);
+}
+
+#[test]
+fn include_reasoning_is_not_clipped_by_the_tool_result_gate() {
+    // Regression: reasoning used to degrade to result_of_llm_action and pass
+    // through tool_result_gate::fit (16 KiB head retention). It is assistant
+    // text now and must reach the prompt whole (slice-splitting at 12 KiB is
+    // the only allowed boundary).
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_not_clipped"),
+    );
+    let _ = core.begin_turn("long thinking round", None);
+    let tail_marker = "REASONING_TAIL_MARKER_0123456789";
+    let mut long_reasoning = "A".repeat(20_000);
+    long_reasoning.push_str(tail_marker);
+    core.set_model_reasoning(&long_reasoning, false);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"working_still_action":{"self_tool":{"type":"cwd"}}}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains(&"A".repeat(5_000)),
+        "long reasoning must not be clipped mid-run: {prompt}"
+    );
+    assert!(
+        prompt.contains(tail_marker),
+        "reasoning tail must survive into the prompt: {prompt}"
+    );
+    let reasoning_pos = prompt.find(tail_marker).unwrap();
+    let replay_pos = prompt
+        .find(r#"{"working_still_action":{"self_tool""#)
+        .unwrap_or_else(|| panic!("response replay missing: {prompt}"));
+    assert!(
+        reasoning_pos < replay_pos,
+        "reasoning must precede the replayed response in the delta: {prompt}"
+    );
+}
+
+#[test]
+fn include_reasoning_precedes_the_compaction_summary_and_runtime_confirmation() {
+    // Post-compaction context contract: retained prefix + ASSISTANT thinking
+    // of the compaction round + ASSISTANT summary + RUNTIME re-injection.
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_compact_order"),
+    );
+    let _ = core.begin_turn("compact soon", None);
+    core.set_model_reasoning("COMPACT ROUND REASONING", false);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"compacting","context_compress":{"summary":"COMPACT SUMMARY TEXT","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let reasoning_pos = prompt
+        .find("COMPACT ROUND REASONING")
+        .unwrap_or_else(|| panic!("compaction reasoning missing: {prompt}"));
+    let summary_pos = prompt
+        .find("COMPACT SUMMARY TEXT")
+        .unwrap_or_else(|| panic!("summary missing: {prompt}"));
+    let confirmation_pos = prompt
+        .find("context compressed successfully")
+        .unwrap_or_else(|| panic!("runtime confirmation missing: {prompt}"));
+    assert!(
+        reasoning_pos < summary_pos && summary_pos < confirmation_pos,
+        "expected thinking -> summary -> runtime re-injection order: {prompt}"
+    );
+}
+
+#[test]
+fn include_reasoning_is_attached_exactly_once_across_rounds() {
+    // Guard against future double-attach regressions: the take() semantics
+    // must keep exactly one copy of a given reasoning chain in the prompt no
+    // matter how many later rounds or turns re-render the context.
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_once"),
+    );
+    core.set_model_reasoning("ONCE_ONLY_REASONING_MARKER", false);
+    let _ = core.begin_turn("round one", None);
+    for round in 1..=3 {
+        let step = core.apply_model_response(LlmResponse {
+            tool_calls: Vec::new(),
+            content: scored(r#"{"working_still_action":{"self_tool":{"type":"cwd"}}}"#),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let prompt = match step {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("round {round} unexpected step: {other:?}"),
+        };
+        assert_eq!(
+            prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
+            1,
+            "round {round} must carry the reasoning exactly once: {prompt}"
+        );
+    }
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("later turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
+        1,
+        "later turns must keep exactly one copy: {prompt}"
+    );
+}
+
+#[test]
+fn reasoning_input_downgrade_strips_continuations_from_later_requests() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("reasoning_input_downgrade"),
+    );
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "model".to_string(),
+        gateway: "https://gateway.example.test/v1".to_string(),
+        requested_mode: agent_core::ToolCallMode::Auto,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Probe,
+        reason: "test".to_string(),
+        probe_latency_ms: Some(1),
+        observed_tool_calls: 2,
+    });
+    let _ = core.begin_turn("inspect cwd", None);
+    let arguments = json!({"type": "cwd"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![agent_core::NativeToolCall {
+            assistant_continuation: Some(agent_core::AssistantContinuation {
+                catalog_id: "cap".to_string(),
+                model: "qwen-plus".to_string(),
+                reasoning_content: "PROVIDER REASONING".to_string(),
+            }),
+            id: "call_cont_1".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let prompt = core.render_prompt();
+    let request = core.model_interaction_request(prompt);
+    assert!(request.native_exchanges[0].calls[0]
+        .assistant_continuation
+        .is_some());
+
+    core.note_reasoning_input_rejected();
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    assert!(request.native_exchanges[0].calls[0]
+        .assistant_continuation
+        .is_none());
 }

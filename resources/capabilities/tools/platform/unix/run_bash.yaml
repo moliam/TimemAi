@@ -44,9 +44,9 @@ description: |
   place real `sleep N` (N>=30) or a trailing `&` outside quotes. If a
   legitimate command is rejected by the scan, restructure it (quote the data
   part) rather than trying obfuscation.
-  For the call itself: for a normal or background command provide cmd and do
-  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out
-  are optional. For polling, provide loop_cmd with interval_ms, omit cmd, and
+  For the call itself: for a normal or background command provide cmd (or its
+  alias `command`) and do not provide loop_cmd or interval_ms; timeout_ms,
+  background, and tail_out are optional. For polling, provide loop_cmd with interval_ms, omit cmd, and
   keep background false or absent. Polling must be loop_cmd, cannot be cmd;
   providing cmd together with interval_ms is invalid and will be rejected. loop_timeout_ms is the total polling wait
   budget; once_timeout_ms is the per-check command timeout.
@@ -64,6 +64,7 @@ input_schema: |
     "additionalProperties": false,
     "properties": {
       "cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty shell command for normal or background mode. Mutually exclusive with loop_cmd."},
+      "command": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Alias for cmd. Provide either cmd or command; if both are present their values must match. Mutually exclusive with loop_cmd."},
       "loop_cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty polling check command. Runtime re-runs it until it exits with code 0. Mutually exclusive with cmd and requires interval_ms."},
       "timeout_ms": {"type": "integer", "minimum": 1, "description": "Normal command wait budget in milliseconds. Default: 5000."},
       "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 60000 when loop_cmd is present."},
@@ -73,7 +74,7 @@ input_schema: |
       "tail_out": {"type": "boolean", "description": "Controls which side of oversized output is retained. True retains the ending; false retains the beginning. Default: true. Truncation facts are reported in runtime metadata, not inserted into stdout or stderr."},
       "edit": {"description": "Absolute paths of every file this command creates, modifies, or writes. Accept a single path string or an array of path strings. Required whenever the command writes files (sed -i, >>, >, tee, cp/mv onto a file, patch, formatters --write, heredocs like cat > file <<'EOF', etc.); list each file once, even inside compound commands. Omit entirely for read-only commands.", "oneOf": [{"type": "string", "minLength": 1, "pattern": "\\S"}, {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}]}
     },
-    "x-required-any": [["cmd", "loop_cmd"]]
+    "x-required-any": [["cmd", "command", "loop_cmd"]]
   }
 example_json: |
   {

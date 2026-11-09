@@ -198,6 +198,52 @@ fn second_web_process_cannot_open_the_same_mem_workspace() {
 }
 
 #[test]
+fn version_and_usage_errors_bypass_a_running_workspace_lock() {
+    let root = temporary_root("preflight-before-lock");
+    let (mut first, _, _) = spawn_running_web(&root);
+    let mem = root.join("mem");
+
+    let version = Command::new(env!("CARGO_BIN_EXE_timem"))
+        .args(["--version", "--space", mem.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(version.status.success(), "{}", output_text(&version));
+    assert!(output_text(&version).contains(env!("CARGO_PKG_VERSION")));
+
+    let clean_version_root = root.join("version-mem");
+    let clean_version = Command::new(env!("CARGO_BIN_EXE_timem"))
+        .args(["--version", "--space", clean_version_root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        clean_version.status.success(),
+        "{}",
+        output_text(&clean_version)
+    );
+    assert!(!clean_version_root.exists());
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_timem"))
+        .args([
+            "--space",
+            mem.to_str().unwrap(),
+            "--definitely-not-an-option",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    let text = output_text(&invalid);
+    assert!(
+        text.contains("unknown_option:--definitely-not-an-option"),
+        "{text}"
+    );
+    assert!(!text.contains("already open"), "{text}");
+
+    assert_eq!(unsafe { libc::kill(first.0.id() as i32, libc::SIGTERM) }, 0);
+    wait_until(WAIT_TIMEOUT, || first.0.try_wait().ok().flatten().is_some());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn web_processes_can_open_different_mem_workspaces() {
     let root_a = temporary_root("different-mem-a");
     let root_b = temporary_root("different-mem-b");

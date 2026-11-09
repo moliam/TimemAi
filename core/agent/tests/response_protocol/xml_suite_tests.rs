@@ -952,7 +952,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             Case {
                 name: "missing required run bash command",
                 raw: "<ASSISTANT><actions><run_bash/></actions></ASSISTANT>",
-                issue: "actions[0][0].input.any_required:cmd|loop_cmd",
+                issue: "actions[0][0].input.any_required:cmd|command|loop_cmd",
                 guidance: "do not satisfy the capability schema",
             },
             Case {

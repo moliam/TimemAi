@@ -33,11 +33,23 @@ describe("thinking chain setting", () => {
   it("keeps localized labels in both catalogs", () => {
     for (const catalog of [zh, en]) {
       expect(catalog.system.thinkingChainTitle.length).toBeGreaterThan(0);
-      expect(catalog.system.thinkingChainDesc.length).toBeGreaterThan(0);
       expect(catalog.system.thinkingChainToggle.length).toBeGreaterThan(0);
       expect(catalog.system.thinkingChainAria.length).toBeGreaterThan(0);
+      expect(catalog.system.reasoningContextToggle.length).toBeGreaterThan(0);
+      expect(catalog.system.reasoningContextAria.length).toBeGreaterThan(0);
+      expect(catalog.system.reasoningContextDesc.length).toBeGreaterThan(0);
     }
     expect(zh.system.thinkingChainToggle).toBe("显示思考链");
-    expect(zh.system.thinkingChainDesc).toContain("所有会话");
+    expect(zh.system.reasoningContextToggle).toBe("思维链加入上下文");
+    expect(zh.system.reasoningContextDesc).toBe(
+      "把思维链添加入上下文，有助于提升任务能力，但消耗多余 token。",
+    );
+  });
+
+  it("groups the context replay switch under the same thinking-chain block", () => {
+    expect(source).toContain('className="thinking-chain-context-option"');
+    expect(source).toContain('className="thinking-chain-context-desc"');
+    expect(source).toContain('type: "system_include_reasoning_in_context_update"');
+    expect(source).toContain('server?.mem?.include_reasoning_in_context ?? true');
   });
 });

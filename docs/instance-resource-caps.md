@@ -162,7 +162,7 @@ root 修复，动作只有两类白名单操作：
 
 ## 4. 可观测性
 
-- RUNTIME_INFO 新增 `resource` reporter（`core/agent/src/runtime_info.rs`）：
+- `## RUNTIME` 新增 `resource` reporter（`core/agent/src/runtime_info.rs`）：
   - 完整生效：报告 caps、换算值（核数/GiB）与 cgroup scope，每次 host 启动后只呈现一次。
   - 未完整生效（部分失败、平台不支持、配置非法）：每次请求持续呈现，并提示模型在此期间
     少派、派轻量 shell job——这是内核围栏缺失时唯一的软补偿。
@@ -172,6 +172,15 @@ root 修复，动作只有两类白名单操作：
   内存主值取 `memory.stat` 的 `anon + file_mapped`（真实占用），`file` 中未映射的
   可回收页缓存单列显示，避免把 page cache 误当成真实占用；平台无 cgroup 记账时返回
   `usage: null`，前端显示“不可用”而不是伪造 0。
+- Insights 采样合流（2026-11-07）：`session_resource_usage_query` 优先复用监控循环
+  最新一轮完整 sweep（`ResourceSampleCache` 单槽、每轮整体原子替换、只保留最新一轮，
+  天然有界）：多个浏览器标签（Insights 看板、头部芯片）共享同一份内核级采样，不再
+  各自直读 cgroupfs 与 /proc；缓存未命中（监控恢复中、两轮 sweep 之间、无记账
+  scope、瞬时读取失败或系统快照缺失）时回退现场直采，语义不变；失败样本不入缓存。
+- 统计页刷新探针（2026-11-07）：统计页每次重渲染时版本号 +1 并以 `data-stats-version`
+  嵌入 `<main class="shell">`；页面轮询先请求 `GET /api/debug/stats-version`
+  （只读版本号，认证与现有 debug API 相同），版本一致则跳过整页 fetch，减少无谓
+  传输；版本不一致或探针失败才拉取全页并做 innerHTML 对比替换。
 
 ## 5. WebUI 系统设置接口
 
@@ -192,7 +201,7 @@ root 修复，动作只有两类白名单操作：
   缺字段时用环境变量/85 种子）。host 启动加载 MEM 设置后、以及 MEM 空间切换后，都会
   以当前设置重新应用一次 caps（`apply_instance_resource_caps_from_mem`），因此重启后
   保存值继续生效；环境变量仅作为首次种子。
-- **可观测性联动**：RUNTIME_INFO 的 `resource` 段在 caps 值变化后会再次呈现一次新状态。
+- **可观测性联动**：`## RUNTIME` 的 `resource` 段在 caps 值变化后会再次呈现一次新状态。
 - **UI 细节**：每个维度一行 = 开关（`role="switch"`，on=内核管控）+ 档位下拉
   （10/25/50/70/85/100），不再渲染内核状态徽标或技术文案，只按能力四态呈现
   （`resourceCapability`，`interfaces/web/src/runtime_settings.ts`）：
@@ -268,7 +277,7 @@ user@1000.service 委托,此前 `cgroup.controllers` 仅为 `memory pids`)。CPU
   `..` 与越界拒绝）、探测分层（Ready / NeedsEscalation / Unavailable / Unsupported）、
   `sudo -S` 流透传（PATH 注入假 sudo 记录 argv 与 stdin，断言密码只经 stdin 流入且
   不进日志）、`enabled=false` 写回 `max`（写失败但已为 max 时判 `Disabled`）。
-- `agent_core` 925 项全绿：系统 caps 环境变量/设置解析、`Disabled` 的 RUNTIME_INFO
+- `agent_core` 925 项全绿：系统 caps 环境变量/设置解析、`Disabled` 的 `## RUNTIME`
   渲染（intentionally unbounded 文案）。
 - `timem` lib 471 项 + embedded_assets 2 项全绿；前端 882 项全绿，
   `pnpm build` 重建并提交 `interfaces/web/dist`。

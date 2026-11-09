@@ -3302,13 +3302,13 @@ fn explicit_assistant_speaker_name_sets_prompt_identity_and_updates_on_rename() 
         "renamed prompt should use the updated Session-derived identity:\n{}",
         prompts[1]
     );
+    let second_system_end = prompts[1].find("[END SYSTEM PROMPT]").unwrap();
     assert!(
-        prompts[1].contains("## ASSISTANT_of_研发 会话"),
-        "assistant history should use the updated identity heading:\n{}",
+        prompts[1][second_system_end..].contains("\n## ASSISTANT\n"),
+        "assistant history should use the fixed protocol heading:\n{}",
         prompts[1]
     );
     let first_system_end = prompts[0].find("[END SYSTEM PROMPT]").unwrap();
-    let second_system_end = prompts[1].find("[END SYSTEM PROMPT]").unwrap();
     assert!(prompts[0][..first_system_end].contains("Current session name: ID4"));
     assert!(prompts[1][..second_system_end].contains("Current session name: Renamed worker"));
     assert!(!prompts[1][second_system_end..].contains("Current session name: Renamed worker"));
@@ -3389,7 +3389,7 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
         test_config(),
         test_worker_config(&dir, "session_worker_heading", 4),
         AssistantHeadingModel {
-            expected_heading: "## ID4".to_string(),
+            expected_heading: "## ASSISTANT".to_string(),
             calls: 0,
         },
     );

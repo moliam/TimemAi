@@ -1894,6 +1894,18 @@ fn shell_lifecycle_validation_ignores_heredoc_body_content() {
         false
     )
     .is_ok());
+    // POSIX allows blanks between `<<`/`<<-` and the delimiter word; the
+    // body stays data and its `&` must not reach the background detector.
+    assert!(validate_bash_lifecycle(
+        "cat > /tmp/t.py << 'EOF'\ns = &format!(\"{stamp}\")\nsetsid & sleep 30\nEOF\necho done",
+        false
+    )
+    .is_ok());
+    assert!(validate_bash_lifecycle(
+        "cat <<- 'EOF'\n\tdata with & and setsid\n\tEOF\necho ok",
+        false
+    )
+    .is_ok());
     // A real background launch after a heredoc is still rejected.
     assert_eq!(
         validate_bash_lifecycle("cat <<'EOF'\nbody\nEOF\nsleep 30 &", false),
@@ -2877,4 +2889,84 @@ fn background_spawn_rejects_when_job_cap_is_reached() {
     );
     drop(manager);
     let _ = fs::remove_dir_all(&memory_dir);
+}
+
+#[test]
+fn command_alias_resolution_prefers_the_only_value() {
+    assert_eq!(resolve_regular_command("", "pwd").unwrap(), "pwd");
+    assert_eq!(resolve_regular_command("pwd", "").unwrap(), "pwd");
+    assert_eq!(resolve_regular_command("pwd", "pwd").unwrap(), "pwd");
+    assert!(resolve_regular_command("", "").unwrap().is_empty());
+}
+
+#[test]
+fn command_alias_rejects_different_values() {
+    let error = resolve_regular_command("pwd", "ls").unwrap_err();
+    assert!(error.contains("both cmd and command"), "{error}");
+}
+
+#[test]
+fn run_bash_accepts_command_as_cmd_alias() {
+    let memory_dir = tmp_memory_dir("run_bash_command_alias");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: "command_alias".to_string(),
+        raw_input: serde_json::json!({"command": "printf command_alias_ok"}),
+    };
+    let ActionExecution::Completed(outcome) =
+        execute_run_bash_action(&mut core, &action, &mut NeverCancelRuntime)
+    else {
+        panic!("approve mode should execute directly");
+    };
+    let evidence = outcome.bash_result.expect("structured shell evidence");
+    assert!(
+        evidence.stdout.contains("command_alias_ok"),
+        "{}",
+        evidence.stdout
+    );
+}
+
+#[test]
+fn run_bash_rejects_conflicting_cmd_and_command() {
+    let memory_dir = tmp_memory_dir("run_bash_command_alias_conflict");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: "command_alias_conflict".to_string(),
+        raw_input: serde_json::json!({"cmd": "printf one", "command": "printf two"}),
+    };
+    let ActionExecution::Completed(outcome) =
+        execute_run_bash_action(&mut core, &action, &mut NeverCancelRuntime)
+    else {
+        panic!("approve mode should return an invalid-input outcome, not approval");
+    };
+    assert_eq!(outcome.status, ActionStatus::Failed);
+    assert!(
+        outcome.text.contains("both cmd and command"),
+        "{}",
+        outcome.text
+    );
 }

@@ -457,6 +457,130 @@ async function main() {
     await browser.call("Page.bringToFront");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "initial snapshot");
 
+    // Regression: the chat viewport auto-scrolls while a response streams.
+    // GlobalTitleTip used to close every tooltip on any document scroll, so
+    // hovering a title appeared dead until focus/click. An unrelated scroll
+    // must leave a tooltip anchored under the pointer, and leaving the title
+    // must still dismiss it.
+    const assertTooltipSurvivesUnrelatedScroll = async (selector, label) => {
+      const point = await center(browser, selector);
+      assert(point, `${label} is visible for hover`);
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+      });
+      await sleep(60);
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0,
+      });
+      await waitFor(
+        () => browser.evaluate(`!!document.querySelector('.global-title-tip')`),
+        `${label} tooltip appears on hover`,
+      );
+      const before = await browser.evaluate(
+        `document.querySelector('.global-title-tip')?.textContent ?? ''`,
+      );
+      await browser.evaluate(`(() => {
+        const scroll = document.querySelector('.chat-scroll');
+        scroll.dispatchEvent(new Event('scroll'));
+      })()`);
+      await sleep(120);
+      const after = await browser.evaluate(`(() => {
+        const tip = document.querySelector('.global-title-tip');
+        return tip ? { text: tip.textContent, visibility: getComputedStyle(tip).visibility } : null;
+      })()`);
+      assert(
+        after && after.visibility === 'visible' && after.text === before,
+        `${label} tooltip survives unrelated scroll: ${JSON.stringify({ before, after })}`,
+      );
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+      });
+      await waitFor(
+        () => browser.evaluate(`!document.querySelector('.global-title-tip')`),
+        `${label} tooltip closes after the pointer leaves`,
+      );
+    };
+    await assertTooltipSurvivesUnrelatedScroll('.session-name', 'session name');
+    await assertTooltipSurvivesUnrelatedScroll('.session-insights-chip', 'insights chip');
+    await assertTooltipSurvivesUnrelatedScroll('.header-model-control', 'header model');
+
+    // Chromium can replace the node under a stationary pointer during a
+    // streaming re-render without delivering another pointerover. pointermove
+    // must still activate the tooltip; otherwise hover appears dead until the
+    // element is focused by a click.
+    await browser.call("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+    });
+    await waitFor(
+      () => browser.evaluate(`!document.querySelector('.global-title-tip')`),
+      "fallback probe starts without a tooltip",
+    );
+    const fallbackPoint = await center(browser, '.session-name');
+    assert(fallbackPoint, "session name is visible for pointermove fallback");
+    await browser.evaluate(`(() => {
+      const el = document.querySelector('.session-name');
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true,
+        clientX: r.x + r.width / 2,
+        clientY: r.y + r.height / 2,
+        pointerType: 'mouse',
+      }));
+    })()`);
+    await waitFor(
+      () => browser.evaluate(`!!document.querySelector('.global-title-tip')`),
+      "pointermove fallback activates a title tooltip",
+    );
+    await browser.call("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+    });
+    await waitFor(
+      () => browser.evaluate(`!document.querySelector('.global-title-tip')`),
+      "pointermove fallback tooltip closes after leaving",
+    );
+
+    // The scroll preservation must use the active element's live geometry,
+    // not hit testing: during compositor scroll macOS Chromium can report a
+    // different topmost node even though the pointer is still over the title.
+    const point = await center(browser, '.session-name');
+    assert(point, "session name is visible for hit-test regression");
+    await browser.call("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+    });
+    await sleep(60);
+    await browser.call("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0,
+    });
+    await waitFor(
+      () => browser.evaluate(`!!document.querySelector('.global-title-tip')`),
+      "hit-test regression tooltip appears on hover",
+    );
+    await browser.evaluate(`(() => {
+      window.__timemOriginalElementFromPoint = document.elementFromPoint;
+      document.elementFromPoint = () => document.documentElement;
+      document.querySelector('.chat-scroll').dispatchEvent(new Event('scroll'));
+    })()`);
+    await sleep(120);
+    const hitTestAfter = await browser.evaluate(`(() => {
+      const tip = document.querySelector('.global-title-tip');
+      return tip ? { text: tip.textContent, visibility: getComputedStyle(tip).visibility } : null;
+    })()`);
+    assert(
+      hitTestAfter && hitTestAfter.visibility === 'visible' && hitTestAfter.text === 'Insights acceptance',
+      `session tooltip ignores unstable hit testing during scroll: ${JSON.stringify(hitTestAfter)}`,
+    );
+    await browser.evaluate(`(() => {
+      document.elementFromPoint = window.__timemOriginalElementFromPoint;
+      delete window.__timemOriginalElementFromPoint;
+    })()`);
+    await browser.call("Input.dispatchMouseEvent", {
+      type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+    });
+    await waitFor(
+      () => browser.evaluate(`!document.querySelector('.global-title-tip')`),
+      "hit-test regression tooltip closes after leaving",
+    );
+
     // Responsive sidebar regression: at desktop widths the collapsed role
     // panel is the 44px right rail; below 1051px it must become a fixed
     // off-canvas drawer instead of wrapping into a grid row under the left
@@ -1086,7 +1210,12 @@ async function main() {
     assert(lightShield.background === 'rgba(0, 0, 0, 0)' && lightShield.fill === 'rgb(22, 163, 74)' && lightShield.color === 'rgb(255, 255, 255)', `light theme keeps the green silhouette only: ${JSON.stringify(lightShield)}`);
     const lightShieldPoint = await center(browser, ".session-insights-shield.full");
     await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: lightShieldPoint.x, y: lightShieldPoint.y });
-    await sleep(260);
+    // The hover surface cross-fades in; wait for the transition to settle so
+    // slow runners do not sample the mid-fade alpha instead of the endpoint.
+    await waitFor(
+      () => browser.evaluate(`getComputedStyle(document.querySelector('.session-insights-shield.full')).backgroundColor === 'rgb(238, 245, 247)'`),
+      "light hover settles on the neutral surface",
+    );
     const lightHover = await browser.evaluate(`(() => {
       const el = document.querySelector('.session-insights-shield.full');
       return { background: getComputedStyle(el).backgroundColor, fill: getComputedStyle(el.querySelector('svg path')).fill };

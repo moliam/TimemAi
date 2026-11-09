@@ -274,6 +274,9 @@ fn manifest_can_use_a_separate_self_test_entrypoint() {
     let mut manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(draft.join(".timem-tool.json")).unwrap()).unwrap();
     manifest["self_test"]["entrypoint"] = serde_json::json!(self_test_entrypoint);
+    // A separate entrypoint still has to spawn a nested powershell chain on
+    // Windows; the 2s template budget is too tight for loaded CI runners.
+    manifest["self_test"]["timeout_ms"] = serde_json::json!(30_000);
     fs::write(
         draft.join(".timem-tool.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),

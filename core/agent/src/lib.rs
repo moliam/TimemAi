@@ -162,10 +162,10 @@ pub use host::{
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
-    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeIdentity,
-    CapabilityProbeSource, InteractionConfig, InteractionProfile, ModelImagePart,
-    ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice, NativeToolResult,
-    ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
+    parse_parallel_tool_calls, parse_tool_call_mode, AssistantContinuation,
+    CapabilityProbeIdentity, CapabilityProbeSource, InteractionConfig, InteractionProfile,
+    ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
+    NativeToolResult, ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
@@ -397,6 +397,7 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
+        | "model_reasoning"
         | "context_compression_summary" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
@@ -1978,6 +1979,17 @@ pub struct AgentCore {
     context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
     context_compress_required: bool,
+    /// Runtime opt-in: when on, the captured provider reasoning of the latest
+    /// model response is replayed into the next prompt delta. Default on: the
+    /// reasoning strengthens the next request, at the cost of extra tokens.
+    context_include_reasoning: bool,
+    /// Captured provider reasoning of the latest model response, consumed by
+    /// the next deferred response-slice batch. `(text, truncated)`.
+    pending_model_reasoning: Option<(String, bool)>,
+    /// Provider accepted reasoning-continuation input so far. A runtime
+    /// rejection of the `reasoning_content` field flips this off so later
+    /// requests are built without it until the session restarts.
+    reasoning_input_supported: bool,
     /// Consecutive model responses that ignored the forced-compaction
     /// requirement. Reaching MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
     /// abandons the automatic requirement instead of looping forever.
@@ -2024,13 +2036,19 @@ pub struct AgentCore {
     process_scope_snapshot_override: Option<os::ProcessAggregateScopeSnapshot>,
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
-    loaded_work_instruction_fingerprints: HashSet<String>,
-    loaded_session_work_file_fingerprints: HashSet<String>,
     /// Last accepted work-instruction block: re-injected right after a
     /// compaction so the remainder of the turn keeps the project-level
     /// guidance before the next supporting context arrives.
     last_work_instruction_context: Option<String>,
     last_session_work_file_context: Option<String>,
+    /// Full worker-role instructions admitted in the latest supporting
+    /// context. Re-injected after compaction so a retained reference line
+    /// cannot point at a description that was just discarded.
+    last_worker_role_contexts: Vec<String>,
+    /// Tool-repository hint admitted in the latest supporting context.
+    /// Re-injected after compaction while keeping it one-time per visible
+    /// context.
+    last_tool_repo_hint_context: Option<String>,
     /// Absolute path of this session's persistent work file (Timem.md in
     /// the session's mem storage), synced from the Host. Durable, complex
     /// work assigned to the session records its guidance, plans, and
@@ -2161,6 +2179,9 @@ impl AgentCore {
             context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
             context_compress_required: false,
+            context_include_reasoning: true,
+            pending_model_reasoning: None,
+            reasoning_input_supported: true,
             forced_compaction_refusals: 0,
             threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
@@ -2185,10 +2206,10 @@ impl AgentCore {
             process_scope_snapshot_override: None,
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
-            loaded_work_instruction_fingerprints: HashSet::new(),
-            loaded_session_work_file_fingerprints: HashSet::new(),
             last_work_instruction_context: None,
             last_session_work_file_context: None,
+            last_worker_role_contexts: Vec::new(),
+            last_tool_repo_hint_context: None,
             session_work_file: None,
             pending_prompt_components: Vec::new(),
             pending_user_interruption_note: false,
@@ -2243,6 +2264,26 @@ impl AgentCore {
         self.refresh_rendered_static_prompt();
     }
 
+    /// Provider-replay view of the registered native exchanges. When the
+    /// provider rejected reasoning input, the continuation metadata is
+    /// stripped so later requests stay compliant while the textual reasoning
+    /// replay in the deltas is kept.
+    fn native_exchange_request_view(&self) -> Vec<NativeExchange> {
+        if self.reasoning_input_supported {
+            return self.native_exchanges.clone();
+        }
+        self.native_exchanges
+            .iter()
+            .map(|exchange| {
+                let mut exchange = exchange.clone();
+                for call in exchange.calls.iter_mut() {
+                    call.assistant_continuation = None;
+                }
+                exchange
+            })
+            .collect()
+    }
+
     pub fn model_interaction_request(
         &self,
         rendered_prompt: impl Into<String>,
@@ -2262,7 +2303,7 @@ impl AgentCore {
             images: Vec::new(),
             static_tool_count,
             tools,
-            native_exchanges: self.native_exchanges.clone(),
+            native_exchanges: self.native_exchange_request_view(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
             send_parallel_tool_calls: self.send_native_parallel_tool_control,
@@ -2444,6 +2485,32 @@ impl AgentCore {
         if let Some(component) = self.pending_prompt_components.last_mut() {
             component.created_at_ms = logical_time_ms;
         }
+    }
+
+    /// Runtime opt-in toggling whether the captured provider reasoning of the
+    /// latest model response is replayed into the next prompt delta. Default on.
+    /// Latches that the provider rejected the provider-specific reasoning
+    /// continuation input (`reasoning_content`) after the catalog predicted
+    /// support. Later requests are built without the field; the visible
+    /// textual reasoning replay in deltas is unaffected. Session-scoped: a
+    /// restart re-probes according to the catalog.
+    pub fn note_reasoning_input_rejected(&mut self) {
+        self.reasoning_input_supported = false;
+    }
+
+    pub fn set_include_reasoning_in_context(&mut self, on: bool) {
+        self.context_include_reasoning = on;
+    }
+
+    /// Captures the provider reasoning of the latest model response so the
+    /// response slices can replay it into the prompt context when the runtime
+    /// opt-in is enabled. Empty or blank reasoning clears the pending capture.
+    pub fn set_model_reasoning(&mut self, reasoning: &str, truncated: bool) {
+        self.pending_model_reasoning = if reasoning.trim().is_empty() {
+            None
+        } else {
+            Some((reasoning.to_string(), truncated))
+        };
     }
 
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -2787,7 +2854,7 @@ impl AgentCore {
                 status: update.status.clone(),
             })
             .collect();
-        // RUNTIME_INFO is request-local. It is built only when a registered
+        // The RUNTIME observation is request-local. It is built only when a registered
         // reporter has important state and is never persisted into history.
         // Model API request observation point for disk pressure sampling.
         let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
@@ -2932,15 +2999,18 @@ impl AgentCore {
         &mut self,
         config: &ModelServiceConfig,
         bash_approval_mode: BashApprovalMode,
+        include_reasoning_in_context: bool,
     ) {
         self.set_max_llm_input_tokens(config.max_llm_input_tokens);
         self.set_bash_approval_mode(bash_approval_mode);
+        self.set_include_reasoning_in_context(include_reasoning_in_context);
     }
     pub fn apply_runtime_config_update(
         &mut self,
         config: &mut ModelServiceConfig,
         bash_approval_mode: &mut BashApprovalMode,
         work_instruction_mode: &mut WorkInstructionLoadMode,
+        include_reasoning_in_context: &mut bool,
         field: RuntimeConfigField,
         value: &str,
     ) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
@@ -2948,6 +3018,7 @@ impl AgentCore {
             config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             field,
             value,
         )?;
@@ -2956,11 +3027,15 @@ impl AgentCore {
             RuntimeConfigEffect::MaxInputChanged(tokens) => self.set_max_llm_input_tokens(tokens),
             RuntimeConfigEffect::BashApprovalChanged(mode) => self.set_bash_approval_mode(mode),
             RuntimeConfigEffect::WorkInstructionsChanged(_) => {}
+            RuntimeConfigEffect::IncludeReasoningInContextChanged(on) => {
+                self.set_include_reasoning_in_context(on);
+            }
         }
         let report = runtime_config_apply_report(
             config,
             *bash_approval_mode,
             *work_instruction_mode,
+            *include_reasoning_in_context,
             field,
             effect,
         );
@@ -3149,7 +3224,6 @@ impl AgentCore {
         let rendered = prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             deltas,
-            &self.assistant_speaker_name,
             self.response_protocol.suite(),
             self.resolved_tool_call_mode,
         );
@@ -3465,7 +3539,7 @@ impl AgentCore {
     pub fn export_dynamic_context(&self) -> DynamicContextSnapshot {
         DynamicContextSnapshot {
             deltas: self.deltas.clone(),
-            native_exchanges: self.native_exchanges.clone(),
+            native_exchanges: self.native_exchange_request_view(),
             last_observed_prompt_tokens: self.last_observed_prompt_tokens,
             active_memo: self.active_memo.clone(),
             pending_forcible_memo_note: self.pending_forcible_memo_note.clone(),
@@ -3539,6 +3613,8 @@ impl AgentCore {
         self.restart_notice_restate = None;
         self.last_work_instruction_context = None;
         self.last_session_work_file_context = None;
+        self.last_worker_role_contexts.clear();
+        self.last_tool_repo_hint_context = None;
         self.cwd_note_pending = true;
         self.deltas.clear();
         self.native_exchanges.clear();
@@ -3570,8 +3646,6 @@ impl AgentCore {
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.turn_finished_summary = None;
-        self.loaded_session_work_file_fingerprints.clear();
-        self.loaded_work_instruction_fingerprints.clear();
         // The memo intentionally survives a plain clear: it is the long-task
         // anchor, the Host projection keeps it active, and the one-shot
         // runtime state restatement re-injects it on the next request.
@@ -3614,128 +3688,151 @@ impl AgentCore {
         if instruction.is_empty() {
             return true;
         }
-        if self.pending_prompt_components.iter().any(|component| {
-            Self::text_contains_complete_worker_role_instruction(&component.content, instruction)
-        }) {
-            return true;
-        }
-        self.deltas.iter().any(|delta| {
-            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
-            let mut visible_component = String::new();
-            let mut current_component_id: Option<&str> = None;
-            for slice in &delta.slices {
-                let component_id = if slice.component_id.is_empty() {
-                    slice.slice_id.as_str()
-                } else {
-                    slice.component_id.as_str()
-                };
-                let component_changed = current_component_id
-                    .map(|current| current != component_id)
-                    .unwrap_or(false);
-                if component_changed || hidden.contains(&slice.slice_id) {
-                    if Self::text_contains_complete_worker_role_instruction(
-                        &visible_component,
-                        instruction,
-                    ) {
-                        return true;
-                    }
-                    visible_component.clear();
-                }
-                current_component_id = Some(component_id);
-                if hidden.contains(&slice.slice_id) {
-                    current_component_id = None;
-                } else {
-                    visible_component.push_str(&slice.text);
-                }
-            }
-            Self::text_contains_complete_worker_role_instruction(&visible_component, instruction)
+        self.visible_context_contains_matching(|text| {
+            Self::text_contains_complete_worker_role_instruction(text, instruction)
         })
     }
 
-    fn filter_repeated_worker_roles(&self, supporting_context: &str) -> String {
+    fn filter_repeated_worker_roles(&mut self, supporting_context: &str) -> String {
         let mut rendered_in_this_context = HashSet::new();
-        supporting_context
-            .lines()
-            .map(|line| {
-                let Some(payload) = line.strip_prefix(WORKER_ROLE_CONTEXT_PREFIX) else {
-                    return line.to_string();
-                };
-                let Ok(payload) = serde_json::from_str::<Value>(payload) else {
-                    return line.to_string();
-                };
-                let Some(name) = payload.get("name").and_then(Value::as_str) else {
-                    return line.to_string();
-                };
-                let Some(description) = payload.get("description").and_then(Value::as_str) else {
-                    return line.to_string();
-                };
-                let spec = self.response_protocol.suite().prompt_boundaries();
-                let full = worker_role_full_instruction(name, description, spec);
-                if self.current_visible_context_contains(&full)
-                    || rendered_in_this_context.contains(&full)
-                {
-                    worker_role_reference_instruction(name, spec)
-                } else {
-                    rendered_in_this_context.insert(full.clone());
-                    full
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
+        let mut rendered_lines = Vec::new();
+        let mut role_contexts = Vec::new();
+        for line in supporting_context.lines() {
+            let Some(payload) = line.strip_prefix(WORKER_ROLE_CONTEXT_PREFIX) else {
+                rendered_lines.push(line.to_string());
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<Value>(payload) else {
+                rendered_lines.push(line.to_string());
+                continue;
+            };
+            let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                rendered_lines.push(line.to_string());
+                continue;
+            };
+            let Some(description) = payload.get("description").and_then(Value::as_str) else {
+                rendered_lines.push(line.to_string());
+                continue;
+            };
+            let spec = self.response_protocol.suite().prompt_boundaries();
+            let full = worker_role_full_instruction(name, description, spec);
+            if !role_contexts.contains(&full) {
+                role_contexts.push(full.clone());
+            }
+            if self.current_visible_context_contains(&full)
+                || rendered_in_this_context.contains(&full)
+            {
+                rendered_lines.push(worker_role_reference_instruction(name, spec));
+            } else {
+                rendered_in_this_context.insert(full.clone());
+                rendered_lines.push(full);
+            }
+        }
+        self.last_worker_role_contexts = role_contexts;
+        rendered_lines.join("\n").trim().to_string()
     }
 
     fn filter_supporting_context(&mut self, supporting_context: &str) -> String {
         let context = self.filter_repeated_work_instructions(supporting_context);
         let context = self.filter_repeated_session_work_file(&context);
+        let context = self.filter_repeated_tool_repo_hint(&context);
         self.filter_repeated_worker_roles(&context)
     }
 
     fn filter_repeated_work_instructions(&mut self, supporting_context: &str) -> String {
         let Some((start, end, block)) = work_instruction_context_block(supporting_context) else {
+            // The current context carries no project instructions; do not
+            // resurrect an old block after a later compaction.
+            self.last_work_instruction_context = None;
             return supporting_context.trim().to_string();
         };
-        let fingerprint = stable_text_fingerprint(block);
-        if self
-            .loaded_work_instruction_fingerprints
-            .insert(fingerprint)
-        {
-            self.last_work_instruction_context = Some(block.to_string());
-            return supporting_context.trim().to_string();
+        // Keep the latest block for compaction re-injection even when this
+        // copy is already visible; the exact visible copy decides whether the
+        // incoming duplicate is emitted.
+        self.last_work_instruction_context = Some(block.to_string());
+        if self.visible_context_contains(block) {
+            return remove_context_range(supporting_context, start, end);
         }
-
-        let mut filtered = String::new();
-        filtered.push_str(supporting_context[..start].trim_end());
-        let tail = supporting_context[end..].trim_start();
-        if !filtered.trim().is_empty() && !tail.is_empty() {
-            filtered.push_str("\n\n");
-        }
-        filtered.push_str(tail);
-        filtered.trim().to_string()
+        supporting_context.trim().to_string()
     }
 
+    /// Keeps the session work file pointer as a one-time anchor while still
+    /// admitting changed content. The pointer line is emitted once per visible
+    /// context; a changed content block is emitted without the pointer, so the
+    /// path is never repeated but the latest work state is available. Exact
+    /// visible-block checks make this survive a restored snapshot without
+    /// serializing filter bookkeeping.
     fn filter_repeated_session_work_file(&mut self, supporting_context: &str) -> String {
-        let Some((start, end, block)) = session_work_file_context_block(supporting_context) else {
-            return supporting_context.to_string();
-        };
-        let fingerprint = stable_text_fingerprint(block);
-        if self
-            .loaded_session_work_file_fingerprints
-            .insert(fingerprint)
-        {
-            self.last_session_work_file_context = Some(block.to_string());
+        let block_span = session_work_file_context_block(supporting_context);
+        let pointer_limit = block_span
+            .map(|(start, _, _)| start)
+            .unwrap_or(supporting_context.len());
+        let pointer_span = session_work_file_pointer_span(supporting_context, pointer_limit);
+        if pointer_span.is_none() && block_span.is_none() {
             return supporting_context.to_string();
         }
 
-        let mut filtered = String::new();
-        filtered.push_str(supporting_context[..start].trim_end());
-        let tail = supporting_context[end..].trim_start();
-        if !filtered.trim().is_empty() && !tail.is_empty() {
-            filtered.push_str("\n\n");
+        // Match the exact path rather than the generic prefix: project
+        // instructions or user text may mention “session work file” without
+        // being this session's Host pointer.
+        let pointer_path = pointer_span.and_then(|(start, end)| {
+            session_work_file_pointer_path(&supporting_context[start..end])
+        });
+        let pointer_visible = pointer_path
+            .map(|path| {
+                self.visible_context_contains(&format!("Session work file: {path}"))
+                    || self.visible_context_contains(&format!("session work file: {path}"))
+            })
+            .unwrap_or(false);
+        let block_visible = block_span
+            .map(|(_, _, block)| self.visible_context_contains(block))
+            .unwrap_or(false);
+
+        if let Some((block_start, block_end, _)) = block_span {
+            // Re-injection after compaction must carry the pointer as well as
+            // the content; the next supporting context may only be a turn away.
+            let start = pointer_span.map(|(start, _)| start).unwrap_or(block_start);
+            self.last_session_work_file_context =
+                Some(supporting_context[start..block_end].trim().to_string());
+        } else if self.last_session_work_file_context.is_none() {
+            if let Some((start, end)) = pointer_span {
+                self.last_session_work_file_context =
+                    Some(supporting_context[start..end].trim().to_string());
+            }
         }
-        filtered.push_str(tail);
-        filtered.trim().to_string()
+
+        if block_visible {
+            let start = pointer_span
+                .map(|(start, _)| start)
+                .or_else(|| block_span.map(|(start, _, _)| start))
+                .unwrap_or(0);
+            let end = block_span
+                .map(|(_, end, _)| end)
+                .or_else(|| pointer_span.map(|(_, end)| end))
+                .unwrap_or(supporting_context.len());
+            return remove_context_range(supporting_context, start, end);
+        }
+        if pointer_visible {
+            if let Some((start, end)) = pointer_span {
+                return remove_context_range(supporting_context, start, end);
+            }
+        }
+        supporting_context.to_string()
+    }
+
+    fn filter_repeated_tool_repo_hint(&mut self, supporting_context: &str) -> String {
+        let Some((start, end, block)) = tool_repo_hint_context_block(supporting_context) else {
+            // The tool repository hint is no longer present (for example the
+            // repository became empty); drop the stale compaction anchor.
+            self.last_tool_repo_hint_context = None;
+            return supporting_context.to_string();
+        };
+        self.last_tool_repo_hint_context = Some(block.to_string());
+        if self.visible_context_contains(block) {
+            remove_context_range(supporting_context, start, end)
+        } else {
+            supporting_context.to_string()
+        }
     }
 
     pub(crate) fn mark_user_interrupted_work(&mut self) {
@@ -3843,6 +3940,11 @@ impl AgentCore {
     /// Core: the compaction confirmation and the post-clear restatement
     /// carry it so durable work stays re-anchorable.
     pub fn update_session_work_file(&mut self, path: Option<String>) {
+        if self.session_work_file != path {
+            // A different (or removed) work file invalidates the compaction
+            // anchor recorded for the previous path.
+            self.last_session_work_file_context = None;
+        }
         self.session_work_file = path;
     }
 
@@ -3864,18 +3966,62 @@ impl AgentCore {
     }
 
     fn visible_context_contains_line(&self, line: &str) -> bool {
+        self.visible_context_contains(line)
+    }
+
+    /// Reconstructs each visible component before matching so markers that
+    /// straddle a prompt-slice boundary are still found. Hidden slices break
+    /// the component: a match must not bridge text the model cannot see.
+    fn visible_context_contains(&self, needle: &str) -> bool {
+        self.visible_context_contains_matching(|text| text.contains(needle))
+    }
+
+    fn visible_context_contains_matching(&self, mut matches: impl FnMut(&str) -> bool) -> bool {
         if self
             .pending_prompt_components
             .iter()
-            .any(|component| component.content.contains(line))
+            .any(|component| matches(&component.content))
         {
             return true;
         }
-        self.deltas.iter().any(|delta| {
-            delta.slices.iter().any(|slice| {
-                !delta.hidden_slice_ids.contains(&slice.slice_id) && slice.text.contains(line)
-            })
-        })
+        for delta in &self.deltas {
+            let hidden = delta
+                .hidden_slice_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let mut visible_component = String::new();
+            let mut current_component_id: Option<&str> = None;
+            for slice in &delta.slices {
+                let component_id = if slice.component_id.is_empty() {
+                    slice.slice_id.as_str()
+                } else {
+                    slice.component_id.as_str()
+                };
+                let hidden_slice = hidden.contains(slice.slice_id.as_str());
+                let component_changed = current_component_id
+                    .map(|current| current != component_id)
+                    .unwrap_or(false);
+                if component_changed || hidden_slice {
+                    if matches(&visible_component) {
+                        return true;
+                    }
+                    visible_component.clear();
+                }
+                current_component_id = if hidden_slice {
+                    None
+                } else {
+                    Some(component_id)
+                };
+                if !hidden_slice {
+                    visible_component.push_str(&slice.text);
+                }
+            }
+            if matches(&visible_component) {
+                return true;
+            }
+        }
+        false
     }
 
     fn mailbox_reminder_line(&self) -> Option<String> {
@@ -3936,9 +4082,10 @@ impl AgentCore {
             lines.push(line);
         }
         if let Some(path) = self.session_work_file.as_ref() {
-            // The Host session context restates a one-line work-file pointer
-            // every turn, and the compaction confirmation carries the raw
-            // path too; only restate it here when the visible context does
+            // The Host session context carries a one-line work-file pointer
+            // every turn, but Core keeps the pointer + content only once per
+            // visible context; the compaction confirmation also carries the
+            // raw path. Only restate it here when the visible context does
             // not already carry it (mirrors the mailbox restatement rule).
             let carried = self.visible_context_contains_line(&format!("Session work file: {path}"))
                 || self.visible_context_contains_line(&format!("session work file: {path}"));
@@ -4054,6 +4201,14 @@ impl AgentCore {
             && supporting_context
                 .map(should_run_memory_precheck)
                 .unwrap_or(false);
+        if supporting_context.is_none() {
+            // A worker role is per-turn. With no supporting context there is
+            // no role for this turn, so a later compaction must not resurrect
+            // the previous turn's role description. Project-level anchors
+            // (work instructions, tool repository, work file) stay available
+            // because their absence here is not an explicit removal signal.
+            self.last_worker_role_contexts.clear();
+        }
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_supporting_context(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
@@ -4370,7 +4525,7 @@ impl AgentCore {
                 && protocol_suite.can_show_plain_text_after_repair_failure(&response.content)
             {
                 let final_text = response.content.trim().to_string();
-                slices.extend(self.assistant_replay_slices(
+                slices.extend(self.assistant_response_slices(
                     &raw_model_output,
                     None,
                     Some(&final_text),
@@ -4404,7 +4559,7 @@ impl AgentCore {
                     )),
                 }));
             }
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&final_text),
@@ -4446,7 +4601,7 @@ impl AgentCore {
             && self.resolved_tool_call_mode != ToolCallMode::Native
             && !deferred_compact_replay
         {
-            slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
+            slices.extend(self.assistant_response_slices(&raw_model_output, Some(&parsed), None));
         }
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
@@ -4620,24 +4775,26 @@ impl AgentCore {
             // The compacted context may have dropped the work-instruction
             // block. Re-inject the last accepted block right away so the
             // remainder of this turn keeps the project-level guidance (a
-            // new supporting context only arrives with the next turn), and
-            // re-register its fingerprint so that next supporting context
-            // stays filtered as a duplicate.
-            self.loaded_work_instruction_fingerprints.clear();
+            // new supporting context only arrives with the next turn).
             if let Some(block) = self.last_work_instruction_context.clone() {
-                self.loaded_work_instruction_fingerprints
-                    .insert(stable_text_fingerprint(&block));
                 slices.push(("runtime_note".to_string(), block));
             }
-            // The session work file follows the same survival rule: the
-            // compacted context may have dropped its content block, so
-            // re-inject the last accepted block right away and re-register
-            // its fingerprint so the next supporting context stays filtered.
-            self.loaded_session_work_file_fingerprints.clear();
-            if let Some(block) = self.last_session_work_file_context.clone() {
-                self.loaded_session_work_file_fingerprints
-                    .insert(stable_text_fingerprint(&block));
-                slices.push(("runtime_note".to_string(), block));
+            // The session work file follows the same survival rule.
+            if let Some(context) = self.last_session_work_file_context.clone() {
+                slices.push(("runtime_note".to_string(), context));
+            }
+            // Worker-role descriptions and the tool-repository hint are
+            // anchors too. Re-inject only when compaction actually dropped
+            // them, so a retained copy is never duplicated.
+            for context in self.last_worker_role_contexts.clone() {
+                if !self.visible_context_contains(&context) {
+                    slices.push(("runtime_note".to_string(), context));
+                }
+            }
+            if let Some(context) = self.last_tool_repo_hint_context.clone() {
+                if !self.visible_context_contains(&context) {
+                    slices.push(("runtime_note".to_string(), context));
+                }
             }
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
                 slices.push(("runtime_note".to_string(), note));
@@ -4683,7 +4840,7 @@ impl AgentCore {
             // Validation or offload failure must not erase the assistant request
             // that produced the runtime error evidence.
             let assistant_slices =
-                self.assistant_replay_slices(&raw_model_output, Some(&parsed), None);
+                self.assistant_response_slices(&raw_model_output, Some(&parsed), None);
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
                 assistant_slices,
@@ -4717,11 +4874,16 @@ impl AgentCore {
                 .running_jobs_reminder_line()
                 .map(|line| format!("\n{line}"))
                 .unwrap_or_default();
-            let work_file_line = self
-                .session_work_file
-                .as_ref()
-                .map(|path| format!("\nsession work file: {path}"))
-                .unwrap_or_default();
+            // The re-injected work-file context already carries the pointer.
+            // Only fall back to the bare path when no context was accepted yet.
+            let work_file_line = if self.last_session_work_file_context.is_none() {
+                self.session_work_file
+                    .as_ref()
+                    .map(|path| format!("\nsession work file: {path}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             slices.push((
                 "context_compressed".to_string(),
                 format!(
@@ -4771,7 +4933,7 @@ impl AgentCore {
                         &memo,
                         &final_text,
                     )]);
-                    slices.extend(self.assistant_replay_slices(
+                    slices.extend(self.assistant_response_slices(
                         &raw_model_output,
                         Some(&parsed),
                         Some(&final_text),
@@ -4792,7 +4954,7 @@ impl AgentCore {
             if self.active_memo.is_some() {
                 self.force_close_memo_on_finish(runtime);
             }
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&final_text),
@@ -4879,7 +5041,7 @@ impl AgentCore {
                         // already carries it verbatim, so the delta text must
                         // not duplicate the model's own words.
                         if native_calls.is_empty() {
-                            slices.extend(self.assistant_replay_slices(
+                            slices.extend(self.assistant_response_slices(
                                 &raw_model_output,
                                 Some(&parsed),
                                 Some(&stop_summary),
@@ -4928,7 +5090,7 @@ impl AgentCore {
                 // protocol replays the narrative as delta text; native mode
                 // carries it verbatim inside the structured exchange only.
                 if native_calls.is_empty() {
-                    slices.extend(self.assistant_replay_slices(
+                    slices.extend(self.assistant_response_slices(
                         &raw_model_output,
                         Some(&parsed),
                         Some(&stop_summary),
@@ -5025,7 +5187,7 @@ impl AgentCore {
             // Native mode: a plain-text response without tool calls no longer
             // finishes the turn. Keep the text as visible thought and ask the
             // model to either continue working or call task_finished.
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&response.content),
@@ -5057,7 +5219,7 @@ impl AgentCore {
         } else {
             final_text
         };
-        slices.extend(self.assistant_replay_slices(
+        slices.extend(self.assistant_response_slices(
             &raw_model_output,
             Some(&parsed),
             Some(&final_text),
@@ -6264,6 +6426,40 @@ Runtime tool_call ids:",
         }
     }
 
+    /// Drains the captured reasoning of the latest model response into a
+    /// prompt slice when the runtime opt-in is on. `take` semantics keep the
+    /// reasoning attached exactly once, next to the response it explains.
+    fn take_reasoning_slice(&mut self) -> Option<(String, String)> {
+        let (mut reasoning_text, truncated) = self.pending_model_reasoning.take()?;
+        if !self.context_include_reasoning {
+            return None;
+        }
+        if truncated {
+            reasoning_text.push_str("\n[reasoning truncated]");
+        }
+        if reasoning_text.trim().is_empty() {
+            return None;
+        }
+        Some(("model_reasoning".to_string(), reasoning_text))
+    }
+
+    /// Model-response replay slices plus, when enabled, the captured reasoning
+    /// of that same response. Every response path (mid-turn action
+    /// continuations included) funnels through here so the reasoning reaches
+    /// the very next prompt instead of only turn boundaries.
+    fn assistant_response_slices(
+        &mut self,
+        raw_response: &str,
+        parsed: Option<&ParsedEnvelope>,
+        final_text: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let mut slices = self.assistant_replay_slices(raw_response, parsed, final_text);
+        if let Some(reasoning) = self.take_reasoning_slice() {
+            slices.insert(0, reasoning);
+        }
+        slices
+    }
+
     fn assistant_replay_slices(
         &self,
         raw_response: &str,
@@ -6416,6 +6612,14 @@ Runtime tool_call ids:",
         &mut self,
         mut slice_texts: Vec<(String, String)>,
     ) -> bool {
+        // Every model-response delta funnels through here (inline rounds,
+        // native tool rounds, and task_finished exchanges alike). Prepending
+        // the captured reasoning at this single choke point keeps the chain
+        // next to the response it explains without double-attaching it on
+        // paths that already took it via assistant_response_slices.
+        if let Some(reasoning) = self.take_reasoning_slice() {
+            slice_texts.insert(0, reasoning);
+        }
         let action_output_bytes = slice_texts
             .iter()
             .filter(|(prompt_type, _)| prompt_type == "result_of_llm_action")
@@ -6630,20 +6834,34 @@ Runtime tool_call ids:",
             .saturating_mul(u32::from(self.context_compress_threshold_percent))
             / 100;
         let threshold_crossed = estimated_prompt_tokens >= force_threshold;
-        if !threshold_crossed && !self.context_compress_required {
+        // Hard over-budget: the provider-reported or locally-estimated prompt
+        // already reached the full input budget. An exhausted quality follow-up
+        // may only suppress repeats below the budget; at or above it the
+        // compaction must be retried every turn (fail closed). Otherwise a
+        // tokenizer estimate drift on non-English content can grow the prompt
+        // without bound while every further request fails against the model.
+        // The dynamic (compressible) context and the provider-reported usage
+        // drive the hard retry; the static system portion cannot shrink, so
+        // counting it here would fire the retry on every small-budget test.
+        let hard_over_budget = self.last_observed_prompt_tokens >= self.max_llm_input_tokens
+            || self.dynamic_context_estimated_tokens() >= self.max_llm_input_tokens;
+        let effective_prompt_tokens = estimated_prompt_tokens.max(self.last_observed_prompt_tokens);
+        if !threshold_crossed && !hard_over_budget && !self.context_compress_required {
             self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
             return;
         }
         if self.render_prompt_slices().is_empty() {
             return;
         }
-        if threshold_crossed {
+        if threshold_crossed || hard_over_budget {
             // A manual request keeps its user-facing wording, but crossing the
             // automatic threshold still upgrades the model request to critical
             // reasoning and subjects the result to the bounded quality
-            // follow-up. The exhausted latch blocks only a new automatic cycle;
-            // it must never block an explicit user request.
-            if !self.manual_compact_trailer_pending
+            // follow-up. The exhausted latch blocks only a new automatic cycle
+            // below the budget; it must never block an explicit user request
+            // or a hard over-budget retry.
+            if !hard_over_budget
+                && !self.manual_compact_trailer_pending
                 && !self.context_compress_required
                 && self.threshold_compaction_followup_state
                     == ThresholdCompactionFollowupState::Exhausted
@@ -6652,7 +6870,7 @@ Runtime tool_call ids:",
             }
             if !self.manual_compact_trailer_pending && !self.context_compress_required {
                 self.pending_compact_request_notice =
-                    Some((estimated_prompt_tokens, force_threshold, None));
+                    Some((effective_prompt_tokens, force_threshold, None));
             }
             self.threshold_compaction_reasoning_required = true;
         }
@@ -7517,19 +7735,23 @@ Runtime tool_call ids:",
             let wall_start = Instant::now();
             let loop_command = action.input_str("loop_cmd");
             let is_regular_command = loop_command.is_empty();
-            let cmd_command = action.input_str("cmd");
-            let command = if is_regular_command {
-                cmd_command.clone()
-            } else {
-                loop_command.clone()
+            let regular_command = shell_exec::regular_command_from_action(&action);
+            let validation_error = match &regular_command {
+                Err(reason) => Some(reason.clone()),
+                Ok(regular_command) if !loop_command.is_empty() && !regular_command.is_empty() => {
+                    Some("The action provided both cmd/command and loop_cmd. Use cmd (or its alias command) for a normal/background command, or loop_cmd with interval_ms for polling.".to_string())
+                }
+                _ => None,
             };
-            let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
-                ActionExecution::Completed(ActionOutcome::failed(
-                    format!(
-                        "Action result: {}\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
-                        action.action
-                    ),
-                ))
+            let command = match &regular_command {
+                Ok(regular_command) if is_regular_command => regular_command.clone(),
+                _ => loop_command.clone(),
+            };
+            let result = if let Some(reason) = validation_error {
+                ActionExecution::Completed(ActionOutcome::failed(format!(
+                    "Action result: {}\nThe command was not executed.\nReason: {}",
+                    action.action, reason
+                )))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
@@ -9402,15 +9624,29 @@ fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {
 
 fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
     let start = supporting_context.find("work_directory_instructions:")?;
-    let relative_end_marker = supporting_context[start..].rfind("[END PROJECT INSTRUCTION")?;
-    let marker_start = start + relative_end_marker;
-    let after_marker = supporting_context[marker_start..]
-        .find(']')
-        .map(|idx| marker_start + idx + 1)?;
-    let end = supporting_context[after_marker..]
-        .find('\n')
-        .map(|idx| after_marker + idx + 1)
-        .unwrap_or(supporting_context.len());
+    // Walk the contiguous instruction blocks. Using `rfind` over the whole
+    // remaining context would swallow every later section when an uploaded
+    // file happens to contain the same end marker.
+    let mut cursor = start;
+    let end = loop {
+        let begin = supporting_context[cursor..].find("[BEGIN PROJECT INSTRUCTION")?;
+        let begin = cursor + begin;
+        let marker_start = begin + supporting_context[begin..].find("[END PROJECT INSTRUCTION")?;
+        let after_marker = supporting_context[marker_start..]
+            .find(']')
+            .map(|idx| marker_start + idx + 1)?;
+        let block_end = supporting_context[after_marker..]
+            .find('\n')
+            .map(|idx| after_marker + idx + 1)
+            .unwrap_or(supporting_context.len());
+        let rest = &supporting_context[block_end..];
+        let trimmed = rest.trim_start();
+        if trimmed.starts_with("[BEGIN PROJECT INSTRUCTION") {
+            cursor = block_end + (rest.len() - trimmed.len());
+        } else {
+            break block_end;
+        }
+    };
     let block = supporting_context[start..end].trim();
     if block.contains("[BEGIN PROJECT INSTRUCTION") {
         Some((start, end, block))
@@ -9435,6 +9671,59 @@ fn session_work_file_context_block(supporting_context: &str) -> Option<(usize, u
         Some((start, end, block))
     } else {
         None
+    }
+}
+
+const TOOL_REPO_HINT_PREFIX: &str = "Previously accumulated reusable scripts are available at: ";
+
+fn tool_repo_hint_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
+    let start = supporting_context.find(TOOL_REPO_HINT_PREFIX)?;
+    if start > 0 && !supporting_context[..start].ends_with('\n') {
+        return None;
+    }
+    let end = supporting_context[start..]
+        .find("\n\n")
+        .map(|idx| start + idx)
+        .unwrap_or(supporting_context.len());
+    let block = supporting_context[start..end].trim();
+    if block.starts_with(TOOL_REPO_HINT_PREFIX) {
+        Some((start, end, block))
+    } else {
+        None
+    }
+}
+
+fn session_work_file_pointer_path(pointer: &str) -> Option<&str> {
+    let rest = pointer.strip_prefix("Session work file: ")?;
+    let end = rest.find(". You SHOULD ")?;
+    Some(&rest[..end])
+}
+
+fn session_work_file_pointer_span(context: &str, limit: usize) -> Option<(usize, usize)> {
+    let region = &context[..limit.min(context.len())];
+    let start = region.rfind("Session work file: ")?;
+    if start > 0 && !region[..start].ends_with('\n') {
+        return None;
+    }
+    let line_end = context[start..]
+        .find('\n')
+        .map(|idx| start + idx)
+        .unwrap_or(context.len());
+    let mut end = line_end;
+    while end > start && context.as_bytes()[end - 1] == b'\r' {
+        end -= 1;
+    }
+    Some((start, end))
+}
+
+fn remove_context_range(context: &str, start: usize, end: usize) -> String {
+    let before = context[..start].trim_end();
+    let after = context[end..].trim_start();
+    match (before.is_empty(), after.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => after.to_string(),
+        (false, true) => before.to_string(),
+        (false, false) => format!("{before}\n\n{after}"),
     }
 }
 

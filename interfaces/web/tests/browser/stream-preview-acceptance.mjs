@@ -935,6 +935,125 @@ async function main() {
         }
       }
     }
+    // The star names the model worker; the wrench names local work. When both
+    // are active, the model is primary: a background job does not suppress a
+    // genuine waiting_model projection or an actively streaming response.
+    // Local-only work still gets the wrench.
+    const waitingProjection = {
+      revision: 1,
+      projection: {
+        state: "active",
+        token: { session_id: "session-1", turn_id: "core-turn-1", epoch: 1 },
+        stop_requested: false,
+        input_admission: "open",
+        activity: { kind: "waiting_model", round: 2 },
+      },
+    };
+    const backgroundEvent = toolEvent("background-waiting", 7, "run_bash", "tail -f /tmp/demo.log");
+    Object.assign(backgroundEvent.payload.payload, {
+      event: "finish",
+      status: "background_running",
+      pid: 4242,
+    });
+
+    const localOnlySession = makeSession({
+      turns: [{ ...turn("turn-1"), events: [backgroundEvent] }],
+    });
+    host.setSession(localOnlySession);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('tool-active') &&
+        !!document.querySelector('.stream-working-wrench') &&
+        !document.querySelector('.stream-working-star');
+    })()`), "local-only background work must show the wrench when the model is not working");
+    assert(await browser.evaluate(`document.querySelector('.stream-working-trailer')?.getAttribute('title') === '本地工作中'`), "local-only work must label the trailer as local work");
+    assert(await browser.evaluate(`!!document.querySelector('.stream-tool-background')`), "background tool badge missing in phase fixture");
+    assert(await browser.evaluate(`(() => {
+      const calls = document.querySelector('.stream-working-calls');
+      return !!calls && calls.textContent.startsWith('AI') && !calls.textContent.includes('✦');
+    })()`), "the model request count must not reuse the status star");
+
+    const settledIntermediateEvent = toolEvent("settled-intermediate", 7, "run_bash", "date +%s");
+    Object.assign(settledIntermediateEvent.payload.payload, {
+      event: "execution_start",
+      status: "running",
+    });
+    const settledIntermediateSession = makeSession({
+      turns: [{
+        ...turn("turn-1"),
+        events: [settledIntermediateEvent],
+        preview: {
+          attempt: 1,
+          revision: 1,
+          chat: [],
+          response: { attempt: 1, revision: 1, text: "settled preview must not duplicate", status: "intermediate" },
+        },
+      }],
+    });
+    host.setSession(settledIntermediateSession);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('tool-active') &&
+        !!document.querySelector('.stream-working-wrench') &&
+        !document.querySelector('.stream-working-star') &&
+        !document.querySelector('.response-preview');
+    })()`), "settled intermediate preview with foreground work must show local phase without duplicate preview");
+    assert(await browser.evaluate(`document.querySelector('.stream-working-trailer')?.getAttribute('title') === '本地工作中'`), "settled intermediate foreground work must label local work");
+
+    const waitingWithBackground = makeSession({
+      turns: [{ ...turn("turn-1"), events: [backgroundEvent] }],
+      turn_projection: waitingProjection,
+    });
+    host.setSession(waitingWithBackground);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('model-waiting') &&
+        !!document.querySelector('.stream-working-star') &&
+        !document.querySelector('.stream-working-wrench');
+    })()`), "a genuine model wait must stay primary while a background tool runs");
+    assert(await browser.evaluate(`document.querySelector('.stream-working-trailer')?.getAttribute('title') === '模型正在工作'`), "model wait must label the trailer as model work");
+
+    const waitingOnly = makeSession({ turn_projection: waitingProjection });
+    host.setSession(waitingOnly);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('model-waiting') &&
+        !!document.querySelector('.stream-working-star') &&
+        !document.querySelector('.stream-working-wrench');
+    })()`), "a waiting_model projection without local work must show the model star");
+    assert(await browser.evaluate(`document.querySelector('.stream-working-trailer')?.getAttribute('title') === '模型正在工作'`), "model wait must label the trailer as model work");
+
+    const streamingSession = makeSession({
+      turns: [{
+        ...turn("turn-1"),
+        events: [backgroundEvent],
+        preview: {
+          attempt: 1,
+          revision: 1,
+          chat: [],
+          response: { attempt: 1, revision: 1, text: "streaming while local tool runs", status: "streaming" },
+        },
+      }],
+      turn_projection: waitingProjection,
+    });
+    host.setSession(streamingSession);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('model-waiting') &&
+        !!document.querySelector('.stream-working-star') &&
+        !document.querySelector('.stream-working-wrench') &&
+        !!document.querySelector('.response-preview');
+    })()`), "active model streaming must show the star even with a running background tool");
+    assert(await browser.evaluate(`(() => {
+      const calls = document.querySelector('.stream-working-calls');
+      return !!calls && calls.textContent.startsWith('AI') && !calls.textContent.includes('✦');
+    })()`), "streaming model request count must not reuse the status star");
+
     const next = { ...interimSession, turns: interimSession.turns.map(t => ({ ...t, preview: null,
       events: [...t.events, thoughtEvent("after", "Next thought focus", 5), toolEvent("run_bash", 6)] })) };
     host.setSession(next);

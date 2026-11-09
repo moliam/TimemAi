@@ -18,6 +18,19 @@ export function isRunningToolActivity(
   );
 }
 
+/**
+ * The star names the model as the active worker: the Host has published a
+ * waiting_model projection, or response text is actively streaming. A local
+ * background tool never suppresses a genuinely working model; when both are
+ * active the model is primary. A local-only wait falls back to the wrench.
+ */
+export function streamModelPhase(
+  waitingModel: boolean,
+  previewStatus: string | undefined,
+): boolean {
+  return waitingModel || previewStatus === "streaming";
+}
+
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
 export type ToolActivityCount = {
@@ -175,6 +188,25 @@ export function dedupeFreeTalkItems<T extends { activity: Activity | null }>(
     seen.add(text);
     return true;
   });
+}
+
+/**
+ * Whether a live answer-preview paragraph repeats commentary the process
+ * stream already retains. The model occasionally re-states an earlier
+ * free-talk paragraph verbatim around a tool round; the stream keeps the
+ * first copy and dedupeFreeTalkItems drops later ones, so the provisional
+ * answer preview must not surface the same text a second time — it would
+ * read as a duplicate paragraph that then retracts again. Trim both sides:
+ * trailing whitespace differences are presentation noise, not new
+ * information.
+ */
+export function repeatsRetainedFreeTalk(
+  previewText: string,
+  retainedFreeTalkTexts: ReadonlySet<string>,
+): boolean {
+  const trimmed = previewText.trim();
+  if (!trimmed) return false;
+  return retainedFreeTalkTexts.has(trimmed);
 }
 
 /**

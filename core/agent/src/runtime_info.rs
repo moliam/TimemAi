@@ -1,7 +1,7 @@
 //! RuntimeInfo: the model's observation aggregator. Modules register
 //! reporters (callbacks); before each model request the registry collects
 //! their important state and, only when some reporter has something to say,
-//! renders a single `### RUNTIME_INFO` section that rides along with the
+//! renders a single `## RUNTIME` section that rides along with the
 //! next request. Unimportant facts (e.g. a job that finished normally this
 //! round and already has an action result) produce nothing.
 
@@ -68,7 +68,7 @@ pub struct JobExitSnapshot {
 }
 
 /// One registered module reporter. `name` becomes the `#### <name>` field
-/// heading inside RUNTIME_INFO; the callback returns None when the module
+/// heading inside the RUNTIME section; the callback returns None when the module
 /// has nothing important to report this request.
 pub struct RuntimeInfoReporter {
     pub name: &'static str,
@@ -111,7 +111,7 @@ impl RuntimeInfoRegistry {
         self.reporters.push(reporter);
     }
 
-    /// Collect from all reporters and render the `### RUNTIME_INFO`
+    /// Collect from all reporters and render the `## RUNTIME`
     /// section, or None when no module has important state.
     pub fn render(&self, inputs: &RuntimeInfoInputs) -> Option<String> {
         let mut fields = Vec::new();
@@ -127,7 +127,7 @@ impl RuntimeInfoRegistry {
         if fields.is_empty() {
             return None;
         }
-        let mut out = String::from("### RUNTIME_INFO\nruntime state needing model awareness:\n");
+        let mut out = String::from("## RUNTIME\nruntime state needing model awareness:\n");
         for field in fields {
             let _ = writeln!(out, "\n{}", field);
         }
@@ -514,8 +514,9 @@ mod tests {
                 status: "signal: 9 (SIGKILL)".into(),
             }],
         };
-        let out = registry.render(&inputs).expect("expected RUNTIME_INFO");
-        assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
+        let out = registry.render(&inputs).expect("expected RUNTIME");
+        assert!(out.starts_with("## RUNTIME"), "{out}");
+        assert!(!out.contains("### RUNTIME_INFO"), "{out}");
         assert!(out.contains("#### jobmanager"), "{out}");
         assert!(out.contains("#### sysstat"), "{out}");
         assert!(

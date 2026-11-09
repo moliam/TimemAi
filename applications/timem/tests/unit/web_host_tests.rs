@@ -2447,6 +2447,55 @@ fn parses_basic_web_launch_options() {
 }
 
 #[test]
+fn parses_space_option_with_equals_form() {
+    let options = WebLaunchOptions::parse(&["--space=/tmp/timem-equals".to_string()]).unwrap();
+    assert_eq!(options.space.as_deref(), Some("/tmp/timem-equals"));
+}
+
+#[test]
+fn preflight_classifies_help_version_and_run_without_eager_value_validation() {
+    assert_eq!(
+        preflight_web_args(&["--help".to_string()]).unwrap(),
+        WebPreflight::Help
+    );
+    assert_eq!(
+        preflight_web_args(&["-V".to_string()]).unwrap(),
+        WebPreflight::Version
+    );
+    assert_eq!(
+        preflight_web_args(&["--public".to_string()]).unwrap(),
+        WebPreflight::Run
+    );
+    // Port range is checked after diagnostics are installed so a startup
+    // configuration failure can still be recorded.
+    assert_eq!(
+        preflight_web_args(&["--port".to_string(), "1".to_string()]).unwrap(),
+        WebPreflight::Run
+    );
+    assert!(WebLaunchOptions::parse(&["--port".to_string(), "1".to_string()]).is_err());
+}
+
+#[test]
+fn preflight_rejects_usage_errors_before_memory_side_effects() {
+    assert_eq!(
+        preflight_web_args(&["--space".to_string()]).unwrap_err(),
+        "missing_value:--space"
+    );
+    assert_eq!(
+        preflight_web_args(&["--bogus".to_string()]).unwrap_err(),
+        "unknown_option:--bogus"
+    );
+    for args in [
+        vec!["--data-dir".to_string(), "/tmp/x".to_string()],
+        vec!["--data-dir=/tmp/x".to_string()],
+    ] {
+        assert!(preflight_web_args(&args)
+            .unwrap_err()
+            .contains("unsupported_option:--data-dir"));
+    }
+}
+
+#[test]
 fn public_url_uses_explicit_host_without_placeholder() {
     assert_eq!(
         public_access_url(Some("10.125.112.83"), 14983, "token"),
@@ -3959,6 +4008,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            include_reasoning_in_context: true,
             max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: PathBuf::from("/tmp/data"),
@@ -8297,6 +8347,7 @@ fn routing_test_state() -> AppState {
             config,
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            include_reasoning_in_context: true,
             max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: std::env::temp_dir().join(unique_web_id("timem_web_data_test")),
@@ -8355,6 +8406,7 @@ fn routing_test_state() -> AppState {
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
+        resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
     }
 }
 
@@ -8545,6 +8597,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
+        include_reasoning_in_context: true,
         max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
     }
 }
@@ -8568,6 +8621,7 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         max_rounds: "unlimited".to_string(),
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
+        include_reasoning_in_context: true,
         api_key_configured: true,
     }
 }
@@ -17960,6 +18014,106 @@ fn debug_browse_listing_renders_links_and_parent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn debug_browse_file_previews_head_of_oversized_file_with_download_link() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_oversize_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut oversized = String::from("record newest received_at\n");
+    while (oversized.len() as u64) <= MAX_DEBUG_FILE_PREVIEW_BYTES {
+        oversized.push_str("padding line 0123456789abcdef\n");
+    }
+    oversized.push_str("record tail beyond_preview_marker\n");
+    let oversized_path = dir.join("llm_response.dump");
+    std::fs::write(&oversized_path, &oversized).unwrap();
+    let html = debug_browse_file("session_1", "llm_response.dump", &oversized_path);
+    assert!(html.contains("record newest received_at"));
+    assert!(html.contains("truncated at a line boundary"));
+    assert!(html.contains(&format!("File is {} bytes", oversized.len())));
+    assert!(html.contains("download=true"));
+    assert!(!html.contains("beyond_preview_marker"));
+
+    let small_path = dir.join("small.txt");
+    std::fs::write(&small_path, "small body\n").unwrap();
+    let full = debug_browse_file("session_1", "small.txt", &small_path);
+    assert!(full.contains("<pre>small body\n</pre>"));
+    assert!(!full.contains("truncated"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn debug_browse_file_boundary_cases_stay_well_formed() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_boundary_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Exactly at the cap: full render, no truncation notice.
+    let exact = "x".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize);
+    let exact_path = dir.join("exact.txt");
+    std::fs::write(&exact_path, &exact).unwrap();
+    let html = debug_browse_file("session_1", "exact.txt", &exact_path);
+    assert!(html.contains("<pre>xxx"));
+    assert!(!html.contains("truncated"));
+
+    // One byte over the cap: head preview plus notice, tail not shown.
+    let over = format!(
+        "{}tail\n",
+        "y".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize)
+    );
+    let over_path = dir.join("over.txt");
+    std::fs::write(&over_path, &over).unwrap();
+    let html = debug_browse_file("session_1", "over.txt", &over_path);
+    assert!(html.contains("showing the first"));
+    assert!(html.contains("truncated"));
+    assert!(!html.contains(">tail"));
+
+    // Single line larger than the cap (no newline inside the head): the
+    // notice must not claim a line-boundary cut.
+    let single = "z".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize + 4096);
+    let single_path = dir.join("single.txt");
+    std::fs::write(&single_path, &single).unwrap();
+    let html = debug_browse_file("session_1", "single.txt", &single_path);
+    assert!(html.contains("truncated"));
+    assert!(!html.contains("truncated at a line boundary"));
+
+    // Multi-byte UTF-8 content cut at a line boundary stays char-clean.
+    let mut utf8 = String::new();
+    let line = "思维链思考记录一行中文内容用于边界测试\n";
+    while utf8.len() <= MAX_DEBUG_FILE_PREVIEW_BYTES as usize {
+        utf8.push_str(line);
+    }
+    utf8.push_str("final tail line beyond_preview\n");
+    let utf8_path = dir.join("utf8.txt");
+    std::fs::write(&utf8_path, &utf8).unwrap();
+    let html = debug_browse_file("session_1", "utf8.txt", &utf8_path);
+    assert!(!html.contains('\u{FFFD}'));
+    assert!(!html.contains("beyond_preview"));
+    assert!(html.contains("思维链思考记录一行中文内容用于边界测试"));
+
+    // Binary bytes neither panic nor break the page structure.
+    let mut binary = vec![0u8; 1024];
+    binary.extend_from_slice([0xFF, 0xFE, 0x00, 0x01].as_slice());
+    let binary_path = dir.join("binary.bin");
+    std::fs::write(&binary_path, &binary).unwrap();
+    let html = debug_browse_file("session_1", "binary.bin", &binary_path);
+    assert!(html.contains("<pre>"));
+
+    // Empty file renders an empty preview block.
+    let empty_path = dir.join("empty.txt");
+    std::fs::write(&empty_path, b"").unwrap();
+    let html = debug_browse_file("session_1", "empty.txt", &empty_path);
+    assert!(html.contains("<pre></pre>"));
+
+    // Markup in file content stays escaped inside the text preview.
+    let evil_path = dir.join("evil.txt");
+    std::fs::write(&evil_path, "<script>alert(1)</script>\n").unwrap();
+    let html = debug_browse_file("session_1", "evil.txt", &evil_path);
+    assert!(!html.contains("<script>alert"));
+    assert!(html.contains("&lt;script&gt;"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- task_finished summary persists as final answer across Host restore ---
 
 #[test]
@@ -20467,6 +20621,29 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
 }
 
 #[test]
+fn timer_immediate_delivery_queue_fallback_has_retry_deadline() {
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().pending_turn_id = Some("turn_fake_active".into());
+    }
+    assert!(enqueue_timer_fire(
+        &state,
+        "session_a",
+        "timer_immediate",
+        "[timer:immediate] retry me".to_string(),
+        0,
+    ));
+    let sessions = state.sessions.lock().unwrap();
+    let item = &sessions["session_a"].message_queue.projection().items[0];
+    let deadline = item
+        .payload
+        .dispatch_deadline_ms
+        .expect("immediate fallback must not wait for a turn boundary");
+    assert!(deadline <= now_ms() as u64 + 1_000);
+}
+
+#[test]
 fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
     let state = routing_test_state();
     create_session_timer(
@@ -20539,6 +20716,44 @@ impl ModelClient for TimerPromptCaptureModel {
         Ok(LlmResponse {
             tool_calls: Vec::new(),
             content: confirmed_xml_response("<final_answer>timer turn done</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+struct BlockingTimerQueueModel {
+    calls: Arc<AtomicUsize>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ModelClient for BlockingTimerQueueModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let (lock, release) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = release.wait(released).unwrap();
+            }
+        }
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>timer queue delivered</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -20734,6 +20949,144 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
             .iter()
             .any(|turn| { turn.user_entries.iter().any(|entry| entry.kind == "timer") }));
     }
+    shutdown_timer_workers(&state);
+}
+
+#[test]
+fn real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary() {
+    let state = routing_test_state();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        BlockingTimerQueueModel {
+            calls: Arc::clone(&calls),
+            prompts: Arc::clone(&prompts),
+            release: Arc::clone(&release),
+        },
+        "queue_timeout",
+    );
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "hold the turn".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            sessions[&session_id].active_turn_id.is_some() && calls.load(Ordering::SeqCst) > 0
+        },
+        "blocking active turn",
+    );
+
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("deadline".into()),
+        "deliver at deadline".into(),
+        None,
+        Some(60_000),
+        None,
+        None,
+        1,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(&session_id).unwrap().timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    let (command_id, mut payload) = {
+        let sessions = state.sessions.lock().unwrap();
+        let queue = &sessions[&session_id].message_queue;
+        assert_eq!(queue.len(), 1, "active timer must wait in the queue");
+        let item = &queue.projection().items[0];
+        assert!(
+            item.payload.dispatch_deadline_ms.is_some(),
+            "positive queue timeout must carry a wall-clock deadline"
+        );
+        (item.command_id.clone(), item.payload.clone())
+    };
+    payload.dispatch_deadline_ms = Some(1);
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .message_queue
+            .update_payload(&command_id, payload)
+            .unwrap();
+    }
+    dispatch_timed_out_queue_intents(&state);
+    // The scheduler runs repeatedly; a delivered entry must not be appended twice.
+    dispatch_timed_out_queue_intents(&state);
+    let (queue_empty, timer_entry_count) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let active_turn_id = session.active_turn_id.as_deref().unwrap_or_default();
+        let count = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == active_turn_id)
+            .map(|turn| {
+                turn.user_entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.kind == "supplement"
+                            && entry.text == "[timer:deadline] deliver at deadline"
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        (session.message_queue.is_empty(), count)
+    };
+    {
+        let (lock, release) = &*release;
+        *lock.lock().unwrap() = true;
+        release.notify_all();
+    }
+    assert!(
+        queue_empty,
+        "expired timer must leave the queue without waiting for turn completion"
+    );
+    assert_eq!(
+        timer_entry_count, 1,
+        "expired timer must enter the active turn immediately exactly once"
+    );
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session
+                    .turns
+                    .iter()
+                    .any(|turn| turn.final_answer.as_deref() == Some("timer queue delivered"))
+        },
+        "timer queue supplement to finish",
+    );
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt.contains("[timer:deadline] deliver at deadline")),
+        "the supplement must reach a model request"
+    );
     shutdown_timer_workers(&state);
 }
 
@@ -23423,7 +23776,7 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
                     "attempt": attempt,
                     "revision": revision,
                     "text": text,
-                    "status": "intermediate"
+                    "status": "streaming"
                 }
             }),
         )
@@ -23507,6 +23860,96 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
 }
 
 #[test]
+fn settled_intermediate_preview_bypasses_broadcast_throttle_without_later_events() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "settle the intermediate preview").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_intermediate_preview";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |revision: u64, status: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": 1,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": 1,
+                    "revision": revision,
+                    "text": "partial answer",
+                    "status": status
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // A streaming frame opens the throttle window and broadcasts at once.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, "streaming"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+
+    // The parser settles the attempt as intermediate. This is a one-shot state
+    // transition, not another streaming tick; it must not wait for a later
+    // topic event, because the next event may be a long-running foreground tool
+    // with no preview traffic until it finishes.
+    response_preview::publish(&state, session_id, &worker_id, &preview(2, "intermediate"));
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        1,
+        "settled intermediate frame must broadcast immediately: {drained:?}"
+    );
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    let status = match &drained[0] {
+        WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+        _ => json!(null),
+    };
+    assert_eq!(status, json!("intermediate"));
+
+    // If a streaming frame is already withheld, the settled frame must flush it
+    // first so wire order remains monotonic.
+    response_preview::publish(&state, session_id, &worker_id, &preview(3, "streaming"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+    response_preview::publish(&state, session_id, &worker_id, &preview(4, "intermediate"));
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(drained.len(), 2);
+    let statuses = drained
+        .iter()
+        .map(|event| match event {
+            WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+            _ => json!(null),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec![json!("streaming"), json!("intermediate")]);
+}
+
+#[test]
 fn streaming_preview_interruption_frame_survives_terminal_flush() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -23549,7 +23992,7 @@ fn streaming_preview_interruption_frame_survives_terminal_flush() {
                     "attempt": attempt,
                     "revision": revision,
                     "text": "HTTP early response",
-                    "status": "intermediate"
+                    "status": "streaming"
                 }
             }),
         )
@@ -23793,11 +24236,12 @@ fn settled_final_preview_bypasses_broadcast_throttle_and_keeps_wire_order() {
 }
 
 mod session_resource_observation_tests {
+    use super::{handle_command, routing_test_state, ClientCommand, WireEvent, TEST_PORT};
     use crate::server::session_resource_monitor::{
-        dominant_memory_session, dominant_share_suffix, render_observation, ResourceObservation,
-        SessionObservationState,
+        dominant_memory_session, dominant_share_suffix, render_observation, CachedResourceSweep,
+        ResourceObservation, ResourceSampleCache, SessionObservationState,
     };
-    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage};
+    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage, SystemResourceUsage};
 
     fn usage(
         cpu_usage_usec: u64,
@@ -23848,6 +24292,104 @@ mod session_resource_observation_tests {
             oom_kill_count,
             memory_current_bytes: Some(1024),
         }
+    }
+
+    #[test]
+    fn resource_usage_query_shares_the_monitor_sweep_across_tabs() {
+        let state = routing_test_state();
+        let cached = SessionResourceUsage {
+            memory_current_bytes: Some(4_000),
+            memory_anon_bytes: Some(3_000),
+            cpu_usage_usec: Some(1_000_000),
+            ..Default::default()
+        };
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("session_a".to_string(), cached);
+        state.resource_samples.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 12345,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(10),
+                cpu_total_ticks: Some(20),
+                memory_total_bytes: Some(32 * 1024 * 1024 * 1024),
+                memory_available_bytes: Some(16 * 1024 * 1024 * 1024),
+            }),
+            sessions,
+        });
+
+        let event = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionResourceUsageQuery {
+                session_id: "session_a".to_string(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::SessionResourceUsage {
+            sampled_at_ms,
+            usage,
+            system,
+            ..
+        } = event
+        else {
+            panic!("expected a session resource usage event")
+        };
+        // The cached sweep timestamp, not a fresh wall-clock sample: every
+        // tab reads the same monitor sweep.
+        assert_eq!(sampled_at_ms, 12345);
+        let usage = usage.expect("cached session sample must surface");
+        assert_eq!(usage.memory_current_bytes, Some(4_000));
+        assert_eq!(usage.memory_anon_bytes, Some(3_000));
+        let system = system.expect("cached system sample must surface");
+        assert_eq!(system.cpu_total_ticks, Some(20));
+    }
+
+    #[test]
+    fn resource_sample_cache_replaces_the_whole_sweep_atomically() {
+        let cache = ResourceSampleCache::new();
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("a".to_string(), SessionResourceUsage::default());
+        sessions.insert("b".to_string(), SessionResourceUsage::default());
+        // A sweep without a usable machine-wide snapshot is never served:
+        // queries keep their direct-probe fallback.
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 1,
+            system: None,
+            sessions,
+        });
+        assert!(cache.lookup_sweep("a").is_none());
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("a".to_string(), SessionResourceUsage::default());
+        sessions.insert("b".to_string(), SessionResourceUsage::default());
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 2,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(1),
+                cpu_total_ticks: Some(2),
+                memory_total_bytes: Some(8),
+                memory_available_bytes: Some(4),
+            }),
+            sessions,
+        });
+        assert!(cache.lookup_sweep("a").is_some());
+        assert!(cache.lookup_sweep("b").is_some());
+
+        // A later sweep only contains sessions still in the live set, so
+        // replacing it drops everything that left — atomically, with no
+        // per-session bookkeeping and no way for the cache to grow.
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 3,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(1),
+                cpu_total_ticks: Some(2),
+                memory_total_bytes: Some(8),
+                memory_available_bytes: Some(4),
+            }),
+            sessions: std::collections::HashMap::new(),
+        });
+        assert!(cache.lookup_sweep("a").is_none());
+        assert!(cache.lookup_sweep("b").is_none());
     }
 
     #[test]

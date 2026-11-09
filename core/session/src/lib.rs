@@ -2729,6 +2729,17 @@ fn apply_worker_runtime_update(
             RuntimeConfigField::WorkInstructions => {
                 core.set_self_tool_runtime_param(field.label(), value);
             }
+            RuntimeConfigField::IncludeReasoningInContext => {
+                let on = match value.trim().to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" | "enabled" => Some(true),
+                    "off" | "false" | "0" | "disabled" => Some(false),
+                    _ => None,
+                };
+                if let Some(on) = on {
+                    core.set_include_reasoning_in_context(on);
+                    core.set_self_tool_runtime_param(field.label(), if on { "on" } else { "off" });
+                }
+            }
         },
         PendingRuntimeUpdate::OpenAiCompatible { key, value } => {
             if agent_core::apply_openai_compatible_env_value(

@@ -31,6 +31,7 @@ pub enum RuntimeConfigRowKind {
     MaxLlmOutput,
     BashApproval,
     WorkInstructions,
+    IncludeReasoningInContext,
     Space,
     ApiAudit,
     ActionAudit,

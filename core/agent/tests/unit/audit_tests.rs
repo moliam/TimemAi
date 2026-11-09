@@ -244,7 +244,7 @@ fn action_related_audit_event_builders_are_structured() {
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()
-        .contains("## ASSISTANT:\n<ASSISTANT>bad</ASSISTANT>"));
+        .contains("## ASSISTANT\n<ASSISTANT>bad</ASSISTANT>"));
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()

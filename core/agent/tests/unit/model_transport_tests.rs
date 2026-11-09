@@ -1366,3 +1366,166 @@ fn zhipu_native_stream_tool_roundtrip_over_real_http() {
         let _ = std::fs::remove_file(audit);
     }
 }
+
+#[test]
+fn non_stream_json_body_replays_reasoning_delta() {
+    // Providers that ignore `stream: true` answer with one complete JSON body.
+    // The reasoning must still reach the session capture (context replay and
+    // the visible thinking chain) exactly as it does for SSE providers.
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let body = serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": "streamless answer",
+                "reasoning_content": "NONSTREAM REASONING CHAIN"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+    .to_string();
+    let body_len = body.len();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("nonstream-reasoning");
+    let mut events = Vec::new();
+    let request = crate::ModelInteractionRequest::inline("non-stream reasoning");
+    let response = test_http_client().call_model_interaction_streaming(
+        &config,
+        &request,
+        &audit_file,
+        &mut || false,
+        &mut |event: &serde_json::Value| events.push(event.clone()),
+    );
+    let response = response.unwrap();
+    assert_eq!(response.content, "streamless answer");
+    let replayed = events
+        .iter()
+        .find_map(|event| {
+            event
+                .pointer("/choices/0/delta/reasoning_content")
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or_else(|| {
+            panic!("non-stream body must synthesize the reasoning delta: {events:?}")
+        });
+    assert_eq!(replayed, "NONSTREAM REASONING CHAIN");
+    // Exactly one synthesized event: no fabricated content or duplicates.
+    assert_eq!(events.len(), 1, "{events:?}");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn non_stream_json_body_without_reasoning_emits_no_reasoning_delta() {
+    // Models without thinking must not fabricate an empty reasoning chain.
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let body = success_body("plain non-stream answer");
+    let body_len = body.len();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("nonstream-no-reasoning");
+    let mut events = Vec::new();
+    let request = crate::ModelInteractionRequest::inline("non-stream no thinking");
+    let response = test_http_client().call_model_interaction_streaming(
+        &config,
+        &request,
+        &audit_file,
+        &mut || false,
+        &mut |event: &serde_json::Value| events.push(event.clone()),
+    );
+    let response = response.unwrap();
+    assert_eq!(response.content, "plain non-stream answer");
+    assert!(
+        events.is_empty(),
+        "reasoning-less bodies must synthesize nothing: {events:?}"
+    );
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn synthesized_reasoning_delta_supports_openai_and_anthropic_shapes() {
+    let openai = crate::model_transport::synthesized_reasoning_delta(
+        serde_json::json!({
+            "choices": [{"message": {"content": "a", "reasoning_content": "R1"}}]
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("openai shape must synthesize");
+    assert_eq!(
+        openai.pointer("/choices/0/delta/reasoning_content"),
+        Some(&serde_json::json!("R1"))
+    );
+
+    let anthropic = crate::model_transport::synthesized_reasoning_delta(
+        serde_json::json!({
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "thinking", "thinking": "THINK-A"},
+                {"type": "thinking", "thinking": "THINK-B"}
+            ]
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("anthropic shape must synthesize");
+    assert_eq!(
+        anthropic.get("type"),
+        Some(&serde_json::json!("content_block_delta"))
+    );
+    assert_eq!(
+        anthropic.pointer("/delta/type"),
+        Some(&serde_json::json!("thinking_delta"))
+    );
+    assert_eq!(
+        anthropic.pointer("/delta/thinking"),
+        Some(&serde_json::json!("THINK-ATHINK-B"))
+    );
+
+    for body in [
+        serde_json::json!({"choices": [{"message": {"content": "a", "reasoning_content": ""}}]})
+            .to_string(),
+        serde_json::json!({"choices": [{"message": {"content": "a"}}]}).to_string(),
+        serde_json::json!({"content": [{"type": "text", "text": "no thinking"}]}).to_string(),
+        "not json".to_string(),
+    ] {
+        assert!(
+            crate::model_transport::synthesized_reasoning_delta(body.as_bytes()).is_none(),
+            "must not synthesize without plaintext reasoning: {body}"
+        );
+    }
+}

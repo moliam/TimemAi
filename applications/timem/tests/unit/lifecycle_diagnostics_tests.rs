@@ -32,6 +32,22 @@ fn arguments_record_only_option_names_and_resolve_mem_root() {
 }
 
 #[test]
+fn memory_root_uses_the_last_space_and_rejects_a_missing_value() {
+    let first = temp_data_root("first-space");
+    let second = temp_data_root("second-space");
+    let args = vec![
+        format!("--space={}", first.display()),
+        "--space".to_string(),
+        second.to_string_lossy().to_string(),
+    ];
+    assert_eq!(memory_root_from_args(&args).unwrap(), second);
+    assert_eq!(
+        memory_root_from_args(&["--space".to_string()]).unwrap_err(),
+        "missing_value:--space"
+    );
+}
+
+#[test]
 fn event_ring_is_strictly_bounded_and_keeps_newest_entries() {
     let data_root = temp_data_root("ring");
     let diagnostics = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();

@@ -771,7 +771,8 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert_eq!(model.prompts.len(), 2);
     assert!(!model.prompts[0].contains("#### jobmanager"));
     let second = &model.prompts[1];
-    assert!(second.contains("### RUNTIME_INFO"), "{second}");
+    assert!(second.contains("## RUNTIME"), "{second}");
+    assert!(!second.contains("RUNTIME_INFO"), "{second}");
     assert!(second.contains("#### jobmanager"), "{second}");
     assert!(
         second.contains("| pid | elapsed | created by tool_call id | command | notes |"),
@@ -2630,7 +2631,7 @@ fn session_turn_xml_invalid_native_action_still_repairs() {
     assert_eq!(repair_topics.len(), 1);
     assert_eq!(
         repair_topics[0].issue,
-        "actions[0][0].input.any_required:cmd|loop_cmd"
+        "actions[0][0].input.any_required:cmd|command|loop_cmd"
     );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
@@ -4197,7 +4198,7 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
     assert!(previous_answer < user);
     assert!(previous_answer < runtime_note);
     assert!(runtime_note < user);
-    assert!(prompt.contains("## Ai4"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(!prompt.contains("created_at_ms"));
     assert!(!prompt.contains("batch_id"));
 }
@@ -7275,7 +7276,7 @@ fn runtime_state_reminder_skips_work_file_already_visible() {
     core.submit_prompt_component(
         crate::prompt_components::PromptComponentRole::system(),
         "runtime_note",
-        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
         "test_host_context",
     );
     let lines = core.runtime_state_reminder_lines();
@@ -7430,7 +7431,7 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
-    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
         "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
@@ -7509,9 +7510,12 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
     );
     assert_eq!(second.text, "second");
     let second_prompt = &model.prompts[1];
-    assert!(
-        second_prompt.contains("Session work file: /mem/sessions/6lal8v/Timem.md"),
-        "the pointer line must still ride the supporting context: {second_prompt}"
+    assert_eq!(
+        second_prompt
+            .matches("Session work file: /mem/sessions/6lal8v/Timem.md")
+            .count(),
+        1,
+        "the pointer line must not be repeated when the work file is already visible: {second_prompt}"
     );
     assert_eq!(
         second_prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
@@ -7528,7 +7532,7 @@ fn session_work_file_content_block_survives_compaction() {
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
-    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
         "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
@@ -8734,4 +8738,809 @@ fn rate_limited_failover_consumes_a_newer_host_route_first() {
     assert!(!model
         .seen_endpoints
         .contains(&"endpoint-b-stale".to_string()));
+}
+
+struct ReasoningRejectThenSucceedModel {
+    continuations: Vec<bool>,
+}
+
+impl ModelClient for ReasoningRejectThenSucceedModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_non_streaming_call".to_string())
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+        _on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        let has_continuation = request
+            .native_exchanges
+            .first()
+            .and_then(|exchange| exchange.calls.first())
+            .map(|call| call.assistant_continuation.is_some())
+            .unwrap_or(false);
+        self.continuations.push(has_continuation);
+        if self.continuations.len() == 1 {
+            return Err("model_http_400: unknown parameter: reasoning_content".to_string());
+        }
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_downgrade".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "downgraded retry finished"}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn reasoning_content_rejection_downgrades_and_retries_without_the_field() {
+    let dir = tmp_dir("reasoning_reject_downgrade");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+
+    // Seed one completed native exchange carrying the continuation metadata a
+    // reasoning-preserving catalog entry would replay on the next request.
+    core.append_delta(vec![("user_question".to_string(), "seed".to_string())]);
+    core.native_exchanges.push(crate::NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: String::new(),
+        calls: vec![crate::NativeToolCall {
+            assistant_continuation: Some(crate::AssistantContinuation {
+                catalog_id: String::new(),
+                model: "test-model".to_string(),
+                reasoning_content: "SECRET CONTINUATION".to_string(),
+            }),
+            id: "call_seed".to_string(),
+            name: "self_tool".to_string(),
+            arguments: serde_json::json!({"type": "cwd"}),
+            raw_arguments: String::new(),
+        }],
+        results: Vec::new(),
+    });
+
+    let mut model = ReasoningRejectThenSucceedModel {
+        continuations: Vec::new(),
+    };
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "answer in one shot",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // First attempt carried the continuation, the provider rejected it, and
+    // the immediate retry succeeded without the field.
+    assert_eq!(model.continuations, vec![true, false]);
+    assert_eq!(outcome.text, "downgraded retry finished");
+    // The downgrade is latched for the rest of the session.
+    assert!(!core.reasoning_input_supported);
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn work_file_pointer() -> &'static str {
+    "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content."
+}
+
+fn work_file_block(version: &str) -> String {
+    format!(
+        "{}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- {}\n[END SESSION INSTRUCTION]",
+        work_file_pointer(),
+        version
+    )
+}
+
+#[test]
+fn session_work_file_changed_content_updates_block_without_repeating_pointer() {
+    let dir = tmp_dir("work_file_changed_visible");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let block_a = work_file_block("first version");
+    let block_b = work_file_block("second version");
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"first"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"second"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn one",
+            session: "work_file_changed_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block_a.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(first.text, "first");
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn two",
+            session: "work_file_changed_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block_b.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(second.text, "second");
+
+    let second_prompt = &model.prompts[1];
+    assert_eq!(
+        second_prompt
+            .matches("Session work file: /mem/sessions/6lal8v/Timem.md")
+            .count(),
+        1,
+        "a content update must not repeat the pointer line: {second_prompt}"
+    );
+    assert!(
+        second_prompt.contains("second version"),
+        "changed work file content must be admitted: {second_prompt}"
+    );
+    assert!(
+        second_prompt.contains("first version"),
+        "the historical copy remains visible: {second_prompt}"
+    );
+    assert_eq!(
+        second_prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
+        2,
+        "a changed content version adds one new block: {second_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_pointer_is_injected_once_without_content() {
+    let dir = tmp_dir("work_file_pointer_only");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let pointer = work_file_pointer();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"first"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"second"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn one",
+            session: "work_file_pointer_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(pointer),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(first.text, "first");
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn two",
+            session: "work_file_pointer_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(pointer),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(second.text, "second");
+
+    let second_prompt = &model.prompts[1];
+    assert_eq!(
+        second_prompt
+            .matches("Session work file: /mem/sessions/6lal8v/Timem.md")
+            .count(),
+        1,
+        "a pointer-only work file must not repeat on every turn: {second_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_is_reinjected_after_context_clear() {
+    let dir = tmp_dir("work_file_clear_reinject");
+    let audit = dir.join("audit.json");
+    let block = work_file_block("clear version");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"first"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"second"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn one",
+            session: "work_file_clear_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(first.text, "first");
+
+    core.clear_dynamic_context();
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn two",
+            session: "work_file_clear_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(second.text, "second");
+
+    let second_prompt = &model.prompts[1];
+    assert_eq!(
+        second_prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
+        1,
+        "a cleared context must receive the work file once: {second_prompt}"
+    );
+    assert_eq!(
+        second_prompt
+            .matches("Session work file: /mem/sessions/6lal8v/Timem.md")
+            .count(),
+        1,
+        "a cleared context must receive the pointer once: {second_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_restored_context_is_not_duplicated() {
+    let dir = tmp_dir("work_file_restore_dedupe");
+    let audit = dir.join("audit.json");
+    let block = work_file_block("restored version");
+    let mut original = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut original_model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"origin"}"#,
+        1_000,
+        false,
+    ))]);
+
+    let origin = run_session_turn_with_model_client(
+        &mut original,
+        &mut config,
+        TurnInput {
+            input: "origin turn",
+            session: "work_file_restore_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut original_model,
+    );
+    assert_eq!(origin.text, "origin");
+
+    let snapshot = original.export_dynamic_context();
+    let mut restored = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    restored.import_dynamic_context(snapshot);
+    let mut restored_model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"restored"}"#,
+        1_100,
+        false,
+    ))]);
+
+    let resumed = run_session_turn_with_model_client(
+        &mut restored,
+        &mut config,
+        TurnInput {
+            input: "restored turn",
+            session: "work_file_restore_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut restored_model,
+    );
+    assert_eq!(resumed.text, "restored");
+
+    let prompt = &restored_model.prompts[0];
+    assert_eq!(
+        prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
+        1,
+        "a restored copy must suppress the incoming duplicate: {prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_compaction_reinjects_latest_accepted_version() {
+    let dir = tmp_dir("work_file_compact_latest");
+    let audit = dir.join("audit.json");
+    let block_a = work_file_block("first version");
+    let block_b = work_file_block("second version");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"setup"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留工作文件要点。","keywords":"checkpoint keywords"}}"#,
+            3_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"compacted"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+
+    let setup = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "setup turn",
+            session: "work_file_compact_latest_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block_a.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(setup.text, "setup");
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "compact turn",
+            session: "work_file_compact_latest_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block_b.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "compacted");
+    assert!(
+        model.prompts[2].contains("second version"),
+        "compaction must re-inject the latest accepted work file: {}",
+        model.prompts[2]
+    );
+    let pointer_count = model.prompts[2]
+        .matches("Session work file: /mem/sessions/6lal8v/Timem.md")
+        .count()
+        + model.prompts[2]
+            .matches("session work file: /mem/sessions/6lal8v/Timem.md")
+            .count();
+    assert_eq!(
+        pointer_count, 1,
+        "compaction must not duplicate the work-file pointer: {}",
+        model.prompts[2]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+const STATIC_INSTRUCTION_MARKER: &str = "unique_static_instruction_marker_7c1d";
+const STATIC_WORK_FILE_MARKER: &str = "unique_static_work_file_marker_7c1d";
+const STATIC_TOOL_REPO_MARKER: &str = "unique_static_tool_repo_marker_7c1d";
+const STATIC_WORKER_ROLE_MARKER: &str = "unique_static_worker_role_marker_7c1d";
+const DYNAMIC_UPLOAD_MARKER: &str = "unique_dynamic_upload_marker_7c1d";
+const DYNAMIC_IMAGE_MARKER: &str = "unique_dynamic_image_marker_7c1d";
+
+fn static_runtime_context() -> String {
+    format!(
+        "work_directory_instructions:\nThese instructions were loaded from files in the current working directory. Follow them while working in that directory.\n\n[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\" directory=\"/tmp/project\"]\n{STATIC_INSTRUCTION_MARKER}\n[END PROJECT INSTRUCTION file=\"AGENTS.md\"]\n\n\
+Session work file: /mem/sessions/static/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/static/Timem.md\"]\n{STATIC_WORK_FILE_MARKER}\n[END SESSION INSTRUCTION]\n\n\
+uploaded files:\n{DYNAMIC_UPLOAD_MARKER}\n\n\
+The user attached image file(s): {DYNAMIC_IMAGE_MARKER}\n\n\
+TIMEM_WORKER_ROLE_CONTEXT: {{\"name\":\"Reviewer\",\"description\":\"{STATIC_WORKER_ROLE_MARKER}\"}}\n\n\
+Previously accumulated reusable scripts are available at: /tmp/tools\n{STATIC_TOOL_REPO_MARKER}\nThe tool directories have semantic names."
+    )
+}
+
+fn begin_turn_prompt(core: &mut AgentCore, input: &str, context: &str) -> String {
+    match core.begin_turn(input, Some(context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    }
+}
+
+fn work_file_pointer_count(prompt: &str, path: &str) -> usize {
+    prompt
+        .matches(&format!("Session work file: {path}"))
+        .count()
+        + prompt
+            .matches(&format!("session work file: {path}"))
+            .count()
+}
+
+#[test]
+fn static_runtime_context_is_one_anchor_per_visible_context() {
+    let dir = tmp_dir("static_runtime_anchor");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let context = static_runtime_context();
+
+    let first = begin_turn_prompt(&mut core, "first", &context);
+    assert_eq!(
+        first.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "{first}"
+    );
+    assert_eq!(
+        work_file_pointer_count(&first, "/mem/sessions/static/Timem.md"),
+        1,
+        "{first}"
+    );
+    assert_eq!(first.matches(STATIC_WORK_FILE_MARKER).count(), 1, "{first}");
+    assert_eq!(first.matches(STATIC_TOOL_REPO_MARKER).count(), 1, "{first}");
+    assert_eq!(
+        first.matches(STATIC_WORKER_ROLE_MARKER).count(),
+        1,
+        "{first}"
+    );
+    assert_eq!(first.matches(DYNAMIC_UPLOAD_MARKER).count(), 1, "{first}");
+    assert_eq!(first.matches(DYNAMIC_IMAGE_MARKER).count(), 1, "{first}");
+
+    let second = begin_turn_prompt(&mut core, "second", &context);
+    assert_eq!(
+        second.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "work instructions must not repeat: {second}"
+    );
+    assert_eq!(
+        work_file_pointer_count(&second, "/mem/sessions/static/Timem.md"),
+        1,
+        "the work-file pointer must not repeat: {second}"
+    );
+    assert_eq!(
+        second.matches(STATIC_WORK_FILE_MARKER).count(),
+        1,
+        "the unchanged work-file block must not repeat: {second}"
+    );
+    assert_eq!(
+        second.matches(STATIC_TOOL_REPO_MARKER).count(),
+        1,
+        "the tool-repo hint must not repeat: {second}"
+    );
+    assert_eq!(
+        second.matches(STATIC_WORKER_ROLE_MARKER).count(),
+        1,
+        "the full worker-role instruction must appear once: {second}"
+    );
+    assert_eq!(
+        second.matches("(also used in the above)").count(),
+        1,
+        "the worker role must be referenced once for the new turn: {second}"
+    );
+    assert_eq!(
+        second.matches(DYNAMIC_UPLOAD_MARKER).count(),
+        2,
+        "per-turn uploaded-file context must still ride every turn: {second}"
+    );
+    assert_eq!(
+        second.matches(DYNAMIC_IMAGE_MARKER).count(),
+        2,
+        "per-turn image context must still ride every turn: {second}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn static_runtime_context_is_reanchored_after_context_clear() {
+    let dir = tmp_dir("static_runtime_clear");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let context = static_runtime_context();
+
+    let _ = begin_turn_prompt(&mut core, "first", &context);
+    core.clear_dynamic_context();
+    let prompt = begin_turn_prompt(&mut core, "after clear", &context);
+
+    assert_eq!(
+        prompt.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        work_file_pointer_count(&prompt, "/mem/sessions/static/Timem.md"),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_WORK_FILE_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_TOOL_REPO_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_WORKER_ROLE_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(prompt.matches(DYNAMIC_UPLOAD_MARKER).count(), 1, "{prompt}");
+    assert_eq!(prompt.matches(DYNAMIC_IMAGE_MARKER).count(), 1, "{prompt}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn static_runtime_context_survives_restore_without_duplicates() {
+    let dir = tmp_dir("static_runtime_restore");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let context = static_runtime_context();
+
+    let _ = begin_turn_prompt(&mut core, "first", &context);
+    let snapshot = core.export_dynamic_context();
+    let mut restored = test_core("STATIC", test_profile(), &dir);
+    restored.import_dynamic_context(snapshot);
+    let prompt = begin_turn_prompt(&mut restored, "second", &context);
+
+    assert_eq!(
+        prompt.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        work_file_pointer_count(&prompt, "/mem/sessions/static/Timem.md"),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_WORK_FILE_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_TOOL_REPO_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches(STATIC_WORKER_ROLE_MARKER).count(),
+        1,
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt.matches("(also used in the above)").count(),
+        1,
+        "{prompt}"
+    );
+    // Restored context still carries the first turn's per-turn notes; the
+    // new turn adds one more copy. They must not be collapsed like anchors.
+    assert_eq!(prompt.matches(DYNAMIC_UPLOAD_MARKER).count(), 2, "{prompt}");
+    assert_eq!(prompt.matches(DYNAMIC_IMAGE_MARKER).count(), 2, "{prompt}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tool_repo_hint_is_injected_once_per_visible_context() {
+    let dir = tmp_dir("tool_repo_hint_once");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let context = "Previously accumulated reusable scripts are available at: /tmp/tools\nunique_tool_repo_marker_9f3a\nThe tool directories have semantic names.";
+
+    let first = begin_turn_prompt(&mut core, "first", context);
+    assert_eq!(first.matches("unique_tool_repo_marker_9f3a").count(), 1);
+    let second = begin_turn_prompt(&mut core, "second", context);
+    assert_eq!(
+        second.matches("unique_tool_repo_marker_9f3a").count(),
+        1,
+        "{second}"
+    );
+
+    core.clear_dynamic_context();
+    let after_clear = begin_turn_prompt(&mut core, "third", context);
+    assert_eq!(
+        after_clear.matches("unique_tool_repo_marker_9f3a").count(),
+        1,
+        "{after_clear}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn dynamic_upload_after_work_instructions_is_not_swallowed_by_trailing_marker() {
+    let dir = tmp_dir("work_instruction_trailing_marker");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let context = format!(
+        "work_directory_instructions:\nThese instructions were loaded from files in the current working directory. Follow them while working in that directory.\n\n[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\" directory=\"/tmp/project\"]\n{STATIC_INSTRUCTION_MARKER}\n[END PROJECT INSTRUCTION file=\"AGENTS.md\"]\n\nuploaded files:\n{DYNAMIC_UPLOAD_MARKER}\n[END PROJECT INSTRUCTION file=\"uploaded.md\"]"
+    );
+
+    let first = begin_turn_prompt(&mut core, "first", &context);
+    assert_eq!(
+        first.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "the project instruction must be present: {first}"
+    );
+    assert_eq!(
+        first.matches(DYNAMIC_UPLOAD_MARKER).count(),
+        1,
+        "the uploaded file must be present: {first}"
+    );
+
+    let second = begin_turn_prompt(&mut core, "second", &context);
+    assert_eq!(
+        second.matches(STATIC_INSTRUCTION_MARKER).count(),
+        1,
+        "the project instruction must stay one-time: {second}"
+    );
+    assert_eq!(
+        second.matches(DYNAMIC_UPLOAD_MARKER).count(),
+        2,
+        "a trailing marker inside an uploaded file must not swallow the new dynamic context: {second}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn removed_static_context_is_not_resurrected_by_compaction() {
+    let dir = tmp_dir("static_runtime_removed");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    core.update_session_work_file(Some("/mem/sessions/static/Timem.md".to_string()));
+    let context = static_runtime_context();
+    let _ = begin_turn_prompt(&mut core, "first", &context);
+
+    // The Host explicitly removes the work file and sends only dynamic
+    // context. None of the previous static anchors may survive compaction.
+    core.update_session_work_file(None);
+    let next_context = format!("uploaded files:\n{DYNAMIC_UPLOAD_MARKER}");
+    let _ = begin_turn_prompt(&mut core, "second", &next_context);
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+
+    let step = core.apply_model_response(llm(
+        r#"{"context_compress":{"summary":"drop removed static context","keywords":"checkpoint keywords"}}"#,
+        3_000,
+        false,
+    ));
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    for marker in [
+        STATIC_INSTRUCTION_MARKER,
+        STATIC_WORK_FILE_MARKER,
+        STATIC_TOOL_REPO_MARKER,
+        STATIC_WORKER_ROLE_MARKER,
+    ] {
+        assert!(
+            !prompt.contains(marker),
+            "removed static anchor {marker} was resurrected: {prompt}"
+        );
+    }
+    assert!(
+        !prompt.contains("/mem/sessions/static/Timem.md"),
+        "removed work-file path was resurrected: {prompt}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_pointer_path_parses_iterative_condense_copy() {
+    // The pointer line's path/body boundary is ". You SHOULD "; the
+    // iterative-condense copy (dfe2e87e) and the older occasional-update
+    // copy must both parse, or pointer dedup silently breaks.
+    let iterative = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    assert_eq!(
+        crate::session_work_file_pointer_path(iterative),
+        Some("/mem/sessions/6lal8v/Timem.md")
+    );
+    let legacy = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    assert_eq!(
+        crate::session_work_file_pointer_path(legacy),
+        Some("/mem/sessions/6lal8v/Timem.md")
+    );
 }

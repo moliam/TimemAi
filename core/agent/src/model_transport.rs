@@ -265,6 +265,20 @@ async fn execute_with_redirects(
                 None => break,
             }
         }
+        if !is_sse {
+            // Providers that ignore `stream: true` answer with one complete
+            // JSON body. Its reasoning never passes through the SSE delta
+            // pipeline, so synthesize the equivalent reasoning delta once the
+            // body is complete: session capture and the visible thinking
+            // chain then behave identically for stream and non-stream
+            // providers. Bodies without plaintext reasoning (models without
+            // thinking) synthesize nothing.
+            if let Some(observer) = on_content.as_deref_mut() {
+                if let Some(event) = synthesized_reasoning_delta(&response_body) {
+                    observer(&event);
+                }
+            }
+        }
         let response_bytes = response_body.len();
         return Ok(NativeHttpResponse {
             status,
@@ -277,6 +291,51 @@ async fn execute_with_redirects(
             stream_error: None,
         });
     }
+}
+
+/// Flatten one complete non-SSE JSON response body into the reasoning delta
+/// event the session capture expects. Supports the two wire shapes that carry
+/// plaintext reasoning: OpenAI-compatible `message.reasoning_content` and
+/// Anthropic `content[].thinking` blocks. Returns `None` for bodies without
+/// plaintext reasoning (including OpenAI Responses, whose reasoning items are
+/// opaque), so models without thinking never fabricate an empty chain.
+pub(crate) fn synthesized_reasoning_delta(body: &[u8]) -> Option<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if let Some(reasoning) = parsed
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": reasoning}}]
+        }));
+    }
+    let anthropic_thinking = parsed
+        .pointer("/content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(serde_json::Value::as_str) != Some("thinking") {
+                        return None;
+                    }
+                    block
+                        .get("thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<String>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    if anthropic_thinking.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": "content_block_delta",
+        "delta": {"type": "thinking_delta", "thinking": anthropic_thinking}
+    }))
 }
 
 async fn wait_for_progress<F, T>(

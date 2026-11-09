@@ -8,6 +8,7 @@
 // It covers the direct-event delivery path that unit tests cannot reach.
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const URL = process.env.TIMEM_E2E_URL || "http://127.0.0.1:23400/";
@@ -53,7 +54,18 @@ async function waitFor(check, message, timeout = 15000) {
   throw new Error("TIMEOUT: " + message);
 }
 
-const chrome = spawn("/usr/bin/google-chrome", [
+const chromeCandidates = [
+  process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+].filter(Boolean);
+const chromePath = chromeCandidates.find((candidate) => existsSync(candidate));
+if (!chromePath) {
+  throw new Error(`Chrome/Chromium not found; checked: ${chromeCandidates.join(", ")}`);
+}
+const chrome = spawn(chromePath, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
   "--remote-debugging-port=0", "--user-data-dir=" + await mkdtemp(tmpdir() + "/timem-e2e-chrome-"),
   URL,
