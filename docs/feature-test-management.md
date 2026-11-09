@@ -1075,4 +1075,5 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：工作尾部同时可能出现模型等待/流式状态与后台本地工具状态，右侧模型请求计数又固定带 `✦`，导致本地任务运行时仍看到星号，无法判断是模型还是本地在工作。
 - 规则：只有 Host 的 `waiting_model` 活跃投影，或 preview 的 `response.status === "streaming"`，才显示模型星标；模型与后台本地任务同时活跃时模型优先。模型未工作时才显示本地扳手。
 - 展示：工作尾部模型请求计数改为 `AI N`，不再复用 `✦`，让星号只承担“模型正在工作”的语义；`waiting_model` 的 tooltip/aria 改为“模型正在工作 / Model is working”。
-- 测试看护：`activity_groups.test.ts` 覆盖等待、流式、中间态与空闲的纯相位；`stream-preview-acceptance.mjs` 在真实 Chrome 覆盖本地-only、`waiting_model + background_running`、`streaming + background_running`，并断言计数不再包含 `✦`；`stream_reveal.test.ts` 守卫相位接线与计数文案。
+- 预览结算：`intermediate` 是响应解析后的状态转换，不是流式 tick。Host 的 150ms 预览节流现在对 `final`、`intermediate` 与思考帧立即 flush 并按序广播；否则前台工具启动后可能长时间没有 preview 事件，客户端会停在旧 `streaming` 帧，误亮模型星标并重复显示临时预览。前台工具运行后，结算帧到达即回到本地扳手。
+- 测试看护：`activity_groups.test.ts` 覆盖等待、流式、中间态与空闲的纯相位；`stream-preview-acceptance.mjs` 在真实 Chrome 覆盖本地-only、`waiting_model + background_running`、`streaming + background_running`、`intermediate + running` 前台工具，并断言计数不再包含 `✦`；`stream_reveal.test.ts` 守卫相位接线与计数文案；`web_host_tests::settled_intermediate_preview_bypasses_broadcast_throttle_without_later_events` 覆盖无后续事件时 intermediate 必须立即广播、且 pending streaming 先按序释放。

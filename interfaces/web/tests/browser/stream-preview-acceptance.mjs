@@ -974,6 +974,34 @@ async function main() {
       return !!calls && calls.textContent.startsWith('AI') && !calls.textContent.includes('✦');
     })()`), "the model request count must not reuse the status star");
 
+    const settledIntermediateEvent = toolEvent("settled-intermediate", 7, "run_bash", "date +%s");
+    Object.assign(settledIntermediateEvent.payload.payload, {
+      event: "execution_start",
+      status: "running",
+    });
+    const settledIntermediateSession = makeSession({
+      turns: [{
+        ...turn("turn-1"),
+        events: [settledIntermediateEvent],
+        preview: {
+          attempt: 1,
+          revision: 1,
+          chat: [],
+          response: { attempt: 1, revision: 1, text: "settled preview must not duplicate", status: "intermediate" },
+        },
+      }],
+    });
+    host.setSession(settledIntermediateSession);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('tool-active') &&
+        !!document.querySelector('.stream-working-wrench') &&
+        !document.querySelector('.stream-working-star') &&
+        !document.querySelector('.response-preview');
+    })()`), "settled intermediate preview with foreground work must show local phase without duplicate preview");
+    assert(await browser.evaluate(`document.querySelector('.stream-working-trailer')?.getAttribute('title') === '本地工作中'`), "settled intermediate foreground work must label local work");
+
     const waitingWithBackground = makeSession({
       turns: [{ ...turn("turn-1"), events: [backgroundEvent] }],
       turn_projection: waitingProjection,

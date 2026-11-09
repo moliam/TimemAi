@@ -23776,7 +23776,7 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
                     "attempt": attempt,
                     "revision": revision,
                     "text": text,
-                    "status": "intermediate"
+                    "status": "streaming"
                 }
             }),
         )
@@ -23860,6 +23860,96 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
 }
 
 #[test]
+fn settled_intermediate_preview_bypasses_broadcast_throttle_without_later_events() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "settle the intermediate preview").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_intermediate_preview";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |revision: u64, status: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": 1,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": 1,
+                    "revision": revision,
+                    "text": "partial answer",
+                    "status": status
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // A streaming frame opens the throttle window and broadcasts at once.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, "streaming"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+
+    // The parser settles the attempt as intermediate. This is a one-shot state
+    // transition, not another streaming tick; it must not wait for a later
+    // topic event, because the next event may be a long-running foreground tool
+    // with no preview traffic until it finishes.
+    response_preview::publish(&state, session_id, &worker_id, &preview(2, "intermediate"));
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        1,
+        "settled intermediate frame must broadcast immediately: {drained:?}"
+    );
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    let status = match &drained[0] {
+        WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+        _ => json!(null),
+    };
+    assert_eq!(status, json!("intermediate"));
+
+    // If a streaming frame is already withheld, the settled frame must flush it
+    // first so wire order remains monotonic.
+    response_preview::publish(&state, session_id, &worker_id, &preview(3, "streaming"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+    response_preview::publish(&state, session_id, &worker_id, &preview(4, "intermediate"));
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(drained.len(), 2);
+    let statuses = drained
+        .iter()
+        .map(|event| match event {
+            WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+            _ => json!(null),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec![json!("streaming"), json!("intermediate")]);
+}
+
+#[test]
 fn streaming_preview_interruption_frame_survives_terminal_flush() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -23902,7 +23992,7 @@ fn streaming_preview_interruption_frame_survives_terminal_flush() {
                     "attempt": attempt,
                     "revision": revision,
                     "text": "HTTP early response",
-                    "status": "intermediate"
+                    "status": "streaming"
                 }
             }),
         )

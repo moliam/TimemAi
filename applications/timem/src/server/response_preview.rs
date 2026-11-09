@@ -97,13 +97,17 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
     let web_turn_id = turn.turn_id.clone();
     // A settled Final frame is the answer itself, not a streaming tick. It must
     // reach the wire before the terminal turn event, whose flush drops withheld
-    // previews as stale. Track that before the payload is moved into the wire
-    // event.
-    let final_preview = preview
+    // previews as stale. A settled Intermediate frame is also a one-shot state
+    // transition: no later preview tick is guaranteed (a foreground tool may run
+    // for minutes), so withholding it would leave clients on the last streaming
+    // frame for the whole tool run. Track both before the payload is moved into
+    // the wire event.
+    let response_status = preview
         .get("response")
         .and_then(|response| response.get("status"))
-        .and_then(Value::as_str)
-        == Some("final");
+        .and_then(Value::as_str);
+    let final_preview = response_status == Some("final");
+    let settled_intermediate = response_status == Some("intermediate");
     // Thinking frames carry only a bounded reasoning tail and no answer text,
     // so bypass the 150ms answer-preview window to keep the strip fluid.
     let live_thinking = !final_preview
@@ -122,11 +126,12 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
         let now = now_ms();
         let throttle = &mut session.preview_throttle;
         let mut due: Vec<PendingPreview> = Vec::new();
-        if final_preview || live_thinking {
-            // Terminal frames never wait: flush any withheld streaming frame
-            // first so wire order stays monotonic, then publish the Final
-            // frame immediately. Otherwise the following terminal turn event
-            // would discard it as a stale pending preview.
+        if final_preview || settled_intermediate || live_thinking {
+            // Settled frames never wait: flush any withheld streaming frame
+            // first so wire order stays monotonic, then publish the settled
+            // frame immediately. Final must also precede the terminal turn
+            // event; Intermediate must not wait for a next topic event that a
+            // long-running foreground tool may not produce.
             if let Some(pending) = throttle.pending.take() {
                 due.push(pending);
             }
