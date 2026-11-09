@@ -66,7 +66,7 @@ if (!chromePath) {
   throw new Error(`Chrome/Chromium not found; checked: ${chromeCandidates.join(", ")}`);
 }
 const chrome = spawn(chromePath, [
-  "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+  "--headless=new", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling",  "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
   "--remote-debugging-port=0", "--user-data-dir=" + await mkdtemp(tmpdir() + "/timem-e2e-chrome-"),
   URL,
 ], { stdio: ["ignore", "pipe", "pipe"] });
