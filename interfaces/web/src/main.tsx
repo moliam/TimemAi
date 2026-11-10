@@ -2393,6 +2393,8 @@ function TimemApp() {
           mailbox_bytes: event.mailbox_bytes,
           mailbox_files: event.mailbox_files,
           favorite_bytes: event.favorite_bytes,
+          dialogue_bytes: event.dialogue_bytes,
+          process_bytes: event.process_bytes,
         });
         return;
       }
@@ -17357,6 +17359,13 @@ const SettingsCenter = memo(function SettingsCenter(
                             memStorageUsage.conversation_bytes,
                           )
                         : "…"}
+                      {memStorageUsage
+                        ? ` — dialogue ${formatFavoriteCapacityUsed(
+                            memStorageUsage.dialogue_bytes,
+                          )}, process trail ${formatFavoriteCapacityUsed(
+                            memStorageUsage.process_bytes,
+                          )} (reclaimed first; dialogue is kept)`
+                        : ""}
                       ; conversations and Mailbox together use{" "}
                       {memStorageUsage
                         ? formatFavoriteCapacityUsed(

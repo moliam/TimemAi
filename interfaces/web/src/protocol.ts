@@ -600,6 +600,8 @@ export type MemStorageUsage = {
   mailbox_bytes: number;
   mailbox_files: number;
   favorite_bytes: number;
+  dialogue_bytes: number;
+  process_bytes: number;
 };
 
 export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;

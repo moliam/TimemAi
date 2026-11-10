@@ -23372,6 +23372,8 @@ fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
         mailbox_bytes,
         mailbox_files,
         favorite_bytes,
+        dialogue_bytes,
+        process_bytes,
     } = event
     else {
         panic!("expected storage usage event")
@@ -23381,6 +23383,93 @@ fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
     assert_eq!(mailbox_bytes, expected_mailbox);
     assert_eq!(mailbox_files, 1);
     assert_eq!(favorite_bytes, expected_favorite);
+    // The sparse fixture holds no parseable dialogue lines, so every byte is
+    // reported as the process trail and the two tiers sum to the total.
+    assert_eq!(dialogue_bytes, 0);
+    assert_eq!(process_bytes, 3 * 1024 * 1024);
+    assert_eq!(dialogue_bytes + process_bytes, conversation_bytes);
+}
+
+#[test]
+fn storage_usage_query_splits_dialogue_and_process_tiers() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_tier_usage");
+    let store = current_session_store(&state).unwrap();
+    let session_id = "tier_usage_session";
+    let stored = agent_core::session_store::new_stored_session(
+        session_id,
+        session_id,
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session(session_id),
+    );
+    store.upsert_session(&stored).unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "t-1".to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
+                content: "user input".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::Assistant,
+                turn_id: "t-1".to_string(),
+                created_at_ms: 2,
+                kind: None,
+                command_id: None,
+                delivery_state: None,
+                content: "final answer".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "t-1".to_string(),
+                created_at_ms: 3,
+                kind: agent_core::session_store::ChatHistoryEventKind::Progress,
+                content: "p".repeat(5000),
+                extra: Default::default(),
+            },
+        )
+        .unwrap();
+
+    let event = handle_command(&state, TEST_PORT, ClientCommand::MemStorageUsageQuery)
+        .unwrap()
+        .unwrap();
+    let WireEvent::MemStorageUsage {
+        conversation_bytes,
+        dialogue_bytes,
+        process_bytes,
+        ..
+    } = event
+    else {
+        panic!("expected storage usage event")
+    };
+    assert!(
+        dialogue_bytes > 0,
+        "user/assistant lines must be counted as dialogue bytes"
+    );
+    assert!(
+        process_bytes > 0,
+        "process lines must count toward the process trail"
+    );
+    assert_eq!(
+        dialogue_bytes + process_bytes,
+        conversation_bytes,
+        "tiers must sum to the total conversation usage"
+    );
 }
 
 #[test]
@@ -23501,7 +23590,7 @@ fn mailbox_body_is_admitted_when_conversation_history_budget_is_exhausted() {
 }
 
 #[test]
-fn conversation_rolling_eviction_deletes_oldest_blocks_first() {
+fn conversation_rolling_eviction_reclaims_process_first_and_spares_dormant_dialogue() {
     let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_rolling_history");
     let store = current_session_store(&state).unwrap();
     // The settings command only accepts preset capacities, so the rolling
@@ -23512,58 +23601,108 @@ fn conversation_rolling_eviction_deletes_oldest_blocks_first() {
         .stable_bytes;
     assert_eq!(stable, 4 * 1024 * 1024);
 
-    for (session_id, turns) in [
-        ("roll_old", [("old-1", 1_000_i64), ("old-2", 1_100_i64)]),
-        ("roll_mid", [("mid-1", 2_000_i64), ("mid-2", 2_100_i64)]),
-        ("roll_new", [("new-1", 3_000_i64), ("new-2", 3_100_i64)]),
-    ] {
-        let stored = agent_core::session_store::new_stored_session(
-            session_id,
-            session_id,
-            "/work",
-            StoredSessionProfile::default(),
-            store.history_path_for_session(session_id),
-        );
-        store.upsert_session(&stored).unwrap();
-        for (turn_id, created_at_ms) in turns {
-            store
-                .append_history_record(
-                    session_id,
-                    &ChatHistoryRecord::Message {
-                        role: ChatHistoryRole::User,
-                        turn_id: turn_id.to_string(),
-                        created_at_ms,
-                        kind: None,
-                        command_id: None,
-                        delivery_state: None,
-                        content: "x".repeat(1024 * 1024),
-                    },
-                )
-                .unwrap();
-        }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let dormant_updated_at = now_ms - 20 * 24 * 60 * 60 * 1000;
+
+    // Dormant archive holding only dialogue: tiered eviction must never
+    // drain it, no matter how much pressure the active side generates.
+    let mut dormant = agent_core::session_store::new_stored_session(
+        "roll_dormant",
+        "roll_dormant",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("roll_dormant"),
+    );
+    dormant.updated_at_ms = dormant_updated_at;
+    store.upsert_session(&dormant).unwrap();
+    for (turn_id, created_at_ms) in [("d-1", now_ms - 100_000), ("d-2", now_ms - 90_000)] {
+        store
+            .append_history_record(
+                "roll_dormant",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    turn_id: turn_id.to_string(),
+                    created_at_ms,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: "x".repeat(1024 * 1024),
+                },
+            )
+            .unwrap();
     }
 
-    assert!(mem_maintenance::conversation_history_usage(&store).unwrap() > stable);
+    // Active session dominated by one large process record plus its dialogue.
+    let active = agent_core::session_store::new_stored_session(
+        "roll_active",
+        "roll_active",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("roll_active"),
+    );
+    store.upsert_session(&active).unwrap();
+    store
+        .append_history_record(
+            "roll_active",
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "a-1".to_string(),
+                created_at_ms: now_ms - 1_000,
+                kind: agent_core::session_store::ChatHistoryEventKind::Progress,
+                content: "p".repeat(2 * 1024 * 1024 + 500_000),
+                extra: std::collections::BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    store
+        .append_history_record(
+            "roll_active",
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "a-1".to_string(),
+                created_at_ms: now_ms,
+                kind: None,
+                command_id: None,
+                delivery_state: None,
+                content: "x".repeat(1024 * 1024),
+            },
+        )
+        .unwrap();
+
+    assert!(
+        mem_maintenance::conversation_history_usage(&store).unwrap() > stable,
+        "fixture must exceed the shared stable budget"
+    );
+
     let reclaimed =
         mem_maintenance::apply_conversation_rolling_eviction(&state, &store, Some(budget)).unwrap();
     assert!(reclaimed > 0);
-    assert!(
-        read_all_history_records(&store.history_path_for_session("roll_old"))
-            .unwrap()
-            .is_empty(),
-        "the archive holding the globally oldest block must be drained first"
+
+    // Phase A reclaimed the process record; the dormant dialogue is intact.
+    let dormant_records =
+        read_all_history_records(&store.history_path_for_session("roll_dormant")).unwrap();
+    assert_eq!(
+        dormant_records.len(),
+        2,
+        "dormant dialogue must never be drained by rolling eviction"
     );
-    assert!(
-        read_all_history_records(&store.history_path_for_session("roll_mid"))
-            .unwrap()
-            .is_empty(),
-        "the middle archive follows once the oldest one is exhausted"
+    let active_records =
+        read_all_history_records(&store.history_path_for_session("roll_active")).unwrap();
+    assert_eq!(
+        active_records.len(),
+        1,
+        "the process record goes first while the dialogue record stays"
     );
-    let newest = read_all_history_records(&store.history_path_for_session("roll_new")).unwrap();
-    assert_eq!(newest.len(), 2, "the newest blocks must survive");
-    assert!(newest
-        .iter()
-        .all(|record| record.turn_id().starts_with("new-")));
+    assert!(matches!(
+        &active_records[0],
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            ..
+        }
+    ));
     assert!(mem_maintenance::conversation_history_usage(&store).unwrap() <= stable);
 }
 

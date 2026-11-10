@@ -640,6 +640,27 @@ fn conversation_stable_budget(state: &AppState, total_bytes: u64) -> Result<u64,
         .saturating_sub(mailbox_conversation_reserve(state)?))
 }
 
+/// Dormancy threshold after which a session's archive stops being trimmed by
+/// rolling eviction: busy sessions reclaim their own history first, while
+/// dormant conversation content is preserved for the user (or an explicit
+/// export/warning flow) instead of being silently drained.
+const CONVERSATION_DORMANT_AFTER_DAYS: i64 = 14;
+
+/// Ids of sessions with a running or pending turn: eviction never touches
+/// their archives so a live turn is never disturbed.
+fn running_session_ids(state: &AppState) -> Result<BTreeSet<String>, String> {
+    Ok(state
+        .sessions
+        .lock()
+        .map_err(|_| "session_state_poisoned".to_string())?
+        .iter()
+        .filter_map(|(id, session)| {
+            (session.active_turn_id.is_some() || session.pending_turn_id.is_some())
+                .then_some(id.clone())
+        })
+        .collect())
+}
+
 pub(super) fn apply_conversation_capacity(
     state: &AppState,
     store: &SessionStore,
@@ -652,32 +673,42 @@ pub(super) fn apply_conversation_capacity(
     apply_conversation_stable_capacity(state, store, stable_bytes)
 }
 
+/// Capacity pass triggered by an explicit capacity change (and reused by the
+/// idle pass). Reclaims in reverse value order: process records oldest-first
+/// across every archive, then oldest complete turns of non-running sessions
+/// that are still active. Running sessions are never touched, and dormant
+/// conversation content is never drained automatically.
 pub(super) fn apply_conversation_stable_capacity(
     state: &AppState,
     store: &SessionStore,
     stable_bytes: u64,
 ) -> Result<u64, String> {
-    let active = state
-        .sessions
-        .lock()
-        .map_err(|_| "session_state_poisoned".to_string())?
-        .iter()
-        .filter_map(|(id, session)| {
-            (session.active_turn_id.is_some() || session.pending_turn_id.is_some())
-                .then_some(id.clone())
-        })
-        .collect::<BTreeSet<_>>();
+    let running = running_session_ids(state)?;
     let mut sessions = store.list_sessions_resilient()?.sessions;
     sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
     // Fail closed: an unreadable history must abort the pass instead of
     // under-reporting usage and leaving the shared quota overcommitted.
     let mut used = conversation_history_usage(store)?;
     let mut removed = 0u64;
-    for session in sessions {
+    for session in &sessions {
         if used <= stable_bytes {
             break;
         }
-        if active.contains(&session.session_id) {
+        if running.contains(&session.session_id) {
+            continue;
+        }
+        let excess = used.saturating_sub(stable_bytes);
+        let reclaimed = store.prune_process_records_oldest(&session.session_id, excess)?;
+        used = used.saturating_sub(reclaimed);
+        removed = removed.saturating_add(reclaimed);
+    }
+    let active_cutoff =
+        now_ms_i64().saturating_sub(CONVERSATION_DORMANT_AFTER_DAYS.saturating_mul(MILLIS_PER_DAY));
+    for session in &sessions {
+        if used <= stable_bytes {
+            break;
+        }
+        if running.contains(&session.session_id) || session.updated_at_ms < active_cutoff {
             continue;
         }
         let reclaimed = store
@@ -763,12 +794,17 @@ pub(super) async fn run_idle_temporary_maintenance(
         .map_err(|_| "temporary_maintenance_worker_stopped".to_string())?
 }
 
-/// Evicts whole oldest turns from the oldest sessions until the shared history
-/// budget is satisfied. Unlike the idle-only pass this tolerates active
-/// sessions: eviction always starts at the oldest end of a file, so the turn a
-/// session is currently appending stays in place. This is what keeps history
-/// storage rolling — new records are always admitted by removing old archives
-/// instead of refusing the newest write.
+/// Rolling eviction keeps conversation history within the shared budget by
+/// reclaiming content in reverse value order:
+/// 1. process records (tool/progress trail) oldest-first across all archives;
+/// 2. oldest complete turns of active sessions only — a busy session trims
+///    its own archive instead of draining dormant ones;
+///
+/// Running sessions are left untouched so a live turn is never disturbed, and
+/// dormant conversation content is never removed automatically: when the
+/// budget still cannot be met, the reclaimed amount is reported short so the
+/// excess can be surfaced (settings usage, warnings) instead of silently
+/// destroying dialogue.
 pub(super) fn apply_conversation_rolling_eviction(
     state: &AppState,
     store: &SessionStore,
@@ -778,67 +814,50 @@ pub(super) fn apply_conversation_rolling_eviction(
         return Ok(0);
     };
     let stable_bytes = conversation_stable_budget(state, total_bytes)?;
+    // Fail closed: an unreadable history must abort the pass instead of
+    // under-reporting usage and leaving the shared quota overcommitted.
     let mut used = conversation_history_usage(store)?;
     if used <= stable_bytes {
         return Ok(0);
     }
-    // Block granularity is one complete Turn. Ordering is global across
-    // archives: the session that owns the globally oldest block is drained
-    // first, so old blocks always give way before new ones.
-    let mut blocks: Vec<(i64, String, u64)> = Vec::new();
-    for session in store.list_sessions_resilient()?.sessions {
-        if let Some(archive_ms) = store.oldest_history_turn_ms(&session.session_id)? {
-            let file_bytes = std::fs::metadata(store.history_path_for_session(&session.session_id))
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            blocks.push((archive_ms, session.session_id, file_bytes));
+    let running = running_session_ids(state)?;
+    let sessions = store.list_sessions_resilient()?.sessions;
+    let mut reclaimed_total = 0u64;
+    // Phase A: process records (tool/progress trail) oldest-first across
+    // every archive; they dominate storage and are never the conversation.
+    for session in &sessions {
+        if used <= stable_bytes {
+            break;
         }
-    }
-    blocks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-    let mut removed = 0u64;
-    let mut guard = 0usize;
-    while used > stable_bytes && !blocks.is_empty() {
-        guard += 1;
-        if guard > 100_000 {
-            return Err("mem_conversation_rolling_eviction_stalled".to_string());
-        }
-        let (oldest_ms, session_id, file_bytes) = blocks[0].clone();
-        let excess = used.saturating_sub(stable_bytes);
-        // Blocks older than every block of the next archive are unambiguously
-        // the oldest, so one rewrite drops them all. A single archive, or
-        // equal archive times, falls back to a bounded byte step.
-        let reclaimed = match blocks.get(1).map(|(archive_ms, _, _)| *archive_ms) {
-            Some(cutoff) if cutoff > oldest_ms => {
-                let reclaimed = store.prune_history_turns_before(&session_id, cutoff)?;
-                if reclaimed == 0 {
-                    store.prune_oldest_history_turns(&session_id, 1)?
-                } else {
-                    reclaimed
-                }
-            }
-            _ => {
-                let step = excess.min((file_bytes / 2).max(1));
-                store.prune_oldest_history_turns(&session_id, step)?
-            }
-        };
-        if reclaimed == 0 {
-            // Only malformed or incomplete blocks remain in this archive.
-            blocks.remove(0);
+        if running.contains(&session.session_id) {
             continue;
         }
+        let excess = used.saturating_sub(stable_bytes);
+        let reclaimed = store.prune_process_records_oldest(&session.session_id, excess)?;
         used = used.saturating_sub(reclaimed);
-        removed = removed.saturating_add(reclaimed);
-        match store.oldest_history_turn_ms(&session_id)? {
-            Some(archive_ms) => {
-                blocks[0] = (archive_ms, session_id, file_bytes.saturating_sub(reclaimed));
-                blocks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
-            }
-            None => {
-                blocks.remove(0);
-            }
-        }
+        reclaimed_total = reclaimed_total.saturating_add(reclaimed);
     }
-    Ok(removed)
+    // Phase B: active sessions trim their own oldest complete turns, so a
+    // busy workload reclaims its own archive instead of draining others.
+    let active_cutoff =
+        now_ms_i64().saturating_sub(CONVERSATION_DORMANT_AFTER_DAYS.saturating_mul(MILLIS_PER_DAY));
+    let mut active: Vec<_> = sessions
+        .iter()
+        .filter(|session| {
+            session.updated_at_ms >= active_cutoff && !running.contains(&session.session_id)
+        })
+        .collect();
+    active.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+    for session in active {
+        if used <= stable_bytes {
+            break;
+        }
+        let excess = used.saturating_sub(stable_bytes);
+        let reclaimed = store.prune_oldest_history_turns(&session.session_id, excess)?;
+        used = used.saturating_sub(reclaimed);
+        reclaimed_total = reclaimed_total.saturating_add(reclaimed);
+    }
+    Ok(reclaimed_total)
 }
 
 fn apply_conversation_stable_capacity_if_configured(
@@ -846,24 +865,7 @@ fn apply_conversation_stable_capacity_if_configured(
     store: &SessionStore,
     max_bytes: Option<u64>,
 ) -> Result<(), String> {
-    let Some(total_bytes) = max_bytes else {
-        return Ok(());
-    };
-    let stable_bytes = conversation_stable_budget(state, total_bytes)?;
-    // The periodic pass runs only when no Session is active, so no active-work
-    // exclusion is required after the idle check.
-    let mut sessions = store.list_sessions_resilient()?.sessions;
-    sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
-    let mut used = conversation_history_usage(store)?;
-    for session in sessions {
-        if used <= stable_bytes {
-            break;
-        }
-        let reclaimed = store
-            .prune_oldest_history_turns(&session.session_id, used.saturating_sub(stable_bytes))?;
-        used = used.saturating_sub(reclaimed);
-    }
-    Ok(())
+    apply_conversation_rolling_eviction(state, store, max_bytes).map(|_| ())
 }
 
 pub(super) fn checkpoint_and_get_temporary_maintenance_trigger(

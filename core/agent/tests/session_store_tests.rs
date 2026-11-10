@@ -1,7 +1,8 @@
 use agent_core::session_store::{
-    chat_history_prompt_format_hint, new_stored_session, read_all_history_records,
-    read_history_page_from_path, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
-    SessionResumeNotice, SessionStore, StoredSessionProfile, StoredSessionState,
+    chat_history_prompt_format_hint, conversation_record_tier, new_stored_session,
+    read_all_history_records, read_history_page_from_path, ChatHistoryEventKind, ChatHistoryRecord,
+    ChatHistoryRole, ChatHistoryTier, SessionResumeNotice, SessionStore, StoredSessionProfile,
+    StoredSessionState,
 };
 
 #[test]
@@ -1643,4 +1644,151 @@ fn corrupt_persisted_history_index_falls_back_to_full_rebuild() {
         .map(|record| record.turn_id().to_string())
         .collect();
     assert_eq!(turn_ids, vec!["turn_0", "turn_1"]);
+}
+
+#[test]
+fn conversation_record_tier_classifies_dialogue_recovery_and_process() {
+    let dialogue = |role: ChatHistoryRole, kind: Option<&str>| ChatHistoryRecord::Message {
+        role,
+        turn_id: "turn_tier".to_string(),
+        created_at_ms: 1,
+        kind: kind.map(str::to_string),
+        command_id: None,
+        delivery_state: None,
+        content: "content".to_string(),
+    };
+    let event = |kind: ChatHistoryEventKind| ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "turn_tier".to_string(),
+        created_at_ms: 1,
+        kind,
+        content: "content".to_string(),
+        extra: BTreeMap::new(),
+    };
+    assert_eq!(
+        conversation_record_tier(&dialogue(ChatHistoryRole::User, Some("task"))),
+        ChatHistoryTier::Dialogue
+    );
+    assert_eq!(
+        conversation_record_tier(&dialogue(ChatHistoryRole::Assistant, None)),
+        ChatHistoryTier::Dialogue
+    );
+    assert_eq!(
+        conversation_record_tier(&dialogue(ChatHistoryRole::System, Some("runtime_restart"))),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::Progress)),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::Action)),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::ActionResult)),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::ContextCompress)),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::CommandDelivery)),
+        ChatHistoryTier::Process
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::FreeTalk)),
+        ChatHistoryTier::Recovery
+    );
+    assert_eq!(
+        conversation_record_tier(&event(ChatHistoryEventKind::Attachment)),
+        ChatHistoryTier::Recovery
+    );
+}
+
+#[test]
+fn prune_process_records_oldest_reclaims_oldest_process_lines_and_keeps_dialogue() {
+    let root = tmp_dir("prune_process_oldest");
+    let store = SessionStore::new(&root);
+    let session_id = "tier_prune";
+    let append = |record: &ChatHistoryRecord| {
+        store.append_history_record(session_id, record).unwrap();
+    };
+    append(&ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 900,
+        kind: ChatHistoryEventKind::Progress,
+        content: "p".repeat(4000),
+        extra: BTreeMap::new(),
+    });
+    append(&ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 1_000,
+        kind: Some("task".to_string()),
+        command_id: None,
+        delivery_state: None,
+        content: "user input".to_string(),
+    });
+    append(&ChatHistoryRecord::Message {
+        role: ChatHistoryRole::Assistant,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 2_000,
+        kind: None,
+        command_id: None,
+        delivery_state: None,
+        content: "final answer".to_string(),
+    });
+    append(&ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 3_000,
+        kind: ChatHistoryEventKind::Action,
+        content: "a".repeat(3000),
+        extra: BTreeMap::new(),
+    });
+
+    // Reclaim just past the oldest process line: only the progress record goes.
+    let reclaimed = store
+        .prune_process_records_oldest(session_id, 4000)
+        .unwrap();
+    assert!(reclaimed >= 4000, "must reclaim the oldest process line");
+    let history_path = store.history_path_for_session(session_id);
+    let records = read_all_history_records(&history_path).unwrap();
+    assert_eq!(
+        records.len(),
+        3,
+        "user input, final answer and the newer action record stay"
+    );
+    assert!(!records.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event {
+            kind: ChatHistoryEventKind::Progress,
+            ..
+        }
+    )));
+
+    // Over-reclaiming stops at the last process record: dialogue never goes.
+    let reclaimed_all = store
+        .prune_process_records_oldest(session_id, u64::MAX / 2)
+        .unwrap();
+    assert!(reclaimed_all > 0);
+    let records = read_all_history_records(&history_path).unwrap();
+    assert_eq!(records.len(), 2, "only the dialogue pair survives");
+    assert!(records.iter().all(|record| matches!(
+        record,
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User | ChatHistoryRole::Assistant,
+            ..
+        }
+    )));
+    // Nothing process-tier is left: further calls reclaim nothing.
+    assert_eq!(
+        store
+            .prune_process_records_oldest(session_id, u64::MAX / 2)
+            .unwrap(),
+        0
+    );
 }

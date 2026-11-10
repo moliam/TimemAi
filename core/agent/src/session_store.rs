@@ -147,6 +147,46 @@ pub enum ChatHistoryEventKind {
     CommandDelivery,
 }
 
+/// Value tier of one chat-history record for conversation eviction ordering.
+///
+/// Dialogue is the user-visible conversation surface (user submissions and
+/// assistant final answers). Recovery keeps records whose semantics are not
+/// clearly disposable, so tiered eviction never removes them automatically.
+/// Process is the tool/work trail that dominates storage and is always the
+/// first thing eviction reclaims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatHistoryTier {
+    Dialogue,
+    Recovery,
+    Process,
+}
+
+/// Classifies one history record for tiered conversation eviction. Malformed
+/// lines never reach this function: parse failures are retained as-is.
+pub fn conversation_record_tier(record: &ChatHistoryRecord) -> ChatHistoryTier {
+    match record {
+        ChatHistoryRecord::Message { role, .. } => match role {
+            ChatHistoryRole::User | ChatHistoryRole::Assistant => ChatHistoryTier::Dialogue,
+            ChatHistoryRole::System => ChatHistoryTier::Process,
+        },
+        ChatHistoryRecord::Event { kind, .. } => match kind {
+            ChatHistoryEventKind::FreeTalk | ChatHistoryEventKind::Attachment => {
+                ChatHistoryTier::Recovery
+            }
+            _ => ChatHistoryTier::Process,
+        },
+    }
+}
+
+/// Returns true when the JSONL line holds dialogue-tier content (user
+/// submissions and assistant final answers). Malformed lines are not
+/// dialogue, so usage scanners treat them as non-dialogue storage.
+pub fn chat_history_line_is_dialogue(line: &str) -> bool {
+    parse_chat_history_record_line(line)
+        .map(|record| conversation_record_tier(&record) == ChatHistoryTier::Dialogue)
+        .unwrap_or(false)
+}
+
 fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
     match record {
         ChatHistoryRecord::Event {
@@ -1094,6 +1134,98 @@ impl SessionStore {
     ) -> Result<u64, String> {
         validate_session_id(session_id)?;
         self.prune_history_turns_with(session_id, None, Some(before_ms))
+    }
+
+    /// Removes oldest process-tier records line-by-line until at least
+    /// `bytes_to_remove` bytes have been reclaimed. Unlike turn-block pruning
+    /// this works at single-record granularity: dialogue and recovery records
+    /// and malformed lines are always retained, so a turn keeps its
+    /// user/assistant content while its process trail is archived away first.
+    pub fn prune_process_records_oldest(
+        &self,
+        session_id: &str,
+        bytes_to_remove: u64,
+    ) -> Result<u64, String> {
+        validate_session_id(session_id)?;
+        if bytes_to_remove == 0 {
+            return Ok(0);
+        }
+        let path = self.history_path_for_session(session_id);
+        let reclaimed = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
+            if !path.exists() {
+                return Ok::<u64, String>(0);
+            }
+            let bytes = fs::read(&path).map_err(|_| "chat_history_read_failed".to_string())?;
+            let classify = |raw: &[u8]| -> Option<i64> {
+                std::str::from_utf8(raw)
+                    .ok()
+                    .map(str::trim_end)
+                    .and_then(parse_chat_history_record_line)
+                    .filter(|record| conversation_record_tier(record) == ChatHistoryTier::Process)
+                    .map(|record| record.created_at_ms())
+            };
+            let mut records: Vec<(usize, Vec<u8>, Option<i64>)> = Vec::new();
+            let mut start = 0usize;
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte != b'\n' {
+                    continue;
+                }
+                let raw = bytes[start..=index].to_vec();
+                let created_at_ms = classify(&raw);
+                records.push((records.len(), raw, created_at_ms));
+                start = index + 1;
+            }
+            if start < bytes.len() {
+                let raw = bytes[start..].to_vec();
+                let created_at_ms = classify(&raw);
+                records.push((records.len(), raw, created_at_ms));
+            }
+            let mut candidates: Vec<(i64, usize, u64)> = records
+                .iter()
+                .filter_map(|(index, raw, created_at_ms)| {
+                    created_at_ms.map(|value| (value, *index, raw.len() as u64))
+                })
+                .collect();
+            candidates.sort_by_key(|left| (left.0, left.1));
+            let mut remove = BTreeSet::new();
+            let mut reclaimed = 0u64;
+            for (_, index, size) in candidates {
+                if reclaimed >= bytes_to_remove {
+                    break;
+                }
+                reclaimed = reclaimed.saturating_add(size);
+                remove.insert(index);
+            }
+            if remove.is_empty() {
+                return Ok(0);
+            }
+            let retained = records
+                .into_iter()
+                .filter_map(|(index, raw, _)| (!remove.contains(&index)).then_some(raw))
+                .collect::<Vec<_>>();
+            let retained_bytes = retained.into_iter().flatten().collect::<Vec<_>>();
+            atomic_write_file(&path, &retained_bytes)
+                .map_err(|_| "chat_history_replace_failed".to_string())?;
+            Ok(reclaimed)
+        })??;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned".to_string())?
+            .remove(&path);
+        invalidate_persisted_history_index(&path);
+        self.temporary_event_summaries
+            .lock()
+            .map_err(|_| "chat_history_summary_poisoned".to_string())?
+            .remove(&path);
+        let _ = fs::remove_file(temporary_event_summary_path(&path));
+        Ok(reclaimed)
     }
 
     /// Archive time of the oldest complete Turn block in this session. `None`

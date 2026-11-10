@@ -36,6 +36,9 @@ describe("mailbox capacity settings contract", () => {
     expect(source).toContain('data-testid="mailbox-storage-usage"');
     expect(source).toContain("Conversations currently use");
     expect(source).toContain("conversations and Mailbox together use");
+    expect(source).toContain("dialogue ${formatFavoriteCapacityUsed(");
+    expect(source).toContain("process trail ${formatFavoriteCapacityUsed(");
+    expect(source).toContain("(reclaimed first; dialogue is kept)");
     expect(source).toContain(
       "across ${memStorageUsage.mailbox_files} body files",
     );

@@ -1162,6 +1162,8 @@ enum WireEvent {
         mailbox_bytes: u64,
         mailbox_files: u64,
         favorite_bytes: u64,
+        dialogue_bytes: u64,
+        process_bytes: u64,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -6020,6 +6022,7 @@ fn handle_command_with_id(
             let favorite_bytes = ChatLibrary::new(&memory_dir).capacity()?.used_bytes;
             let store = current_session_store(state)?;
             let conversation_bytes = conversation_history_usage(&store)?;
+            let (dialogue_bytes, process_bytes) = conversation_tier_usage(&store)?;
             let dir = mem_mail_dir(state)?;
             let _guard = state
                 .mem_mail_runtime
@@ -6034,6 +6037,8 @@ fn handle_command_with_id(
                 mailbox_bytes,
                 mailbox_files,
                 favorite_bytes,
+                dialogue_bytes,
+                process_bytes,
             }));
         }
         ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled } => {
@@ -9846,6 +9851,63 @@ fn mem_mail_index_usage(state: &AppState) -> Result<u64, String> {
         }
     }
     Ok(bytes)
+}
+
+static CONVERSATION_TIER_USAGE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, u64)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Splits conversation usage into dialogue bytes (user submissions and
+/// assistant final answers) and everything else (the process trail). Scans
+/// are cached per file length, so repeated settings opens stay cheap.
+fn conversation_tier_usage(store: &SessionStore) -> Result<(u64, u64), String> {
+    let sessions = store.list_sessions_resilient()?.sessions;
+    let mut total = 0u64;
+    let mut dialogue = 0u64;
+    for session in &sessions {
+        let path = store.history_path_for_session(&session.session_id);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let file_len = metadata.len();
+        total = total.saturating_add(file_len);
+        {
+            let cache = CONVERSATION_TIER_USAGE_CACHE
+                .lock()
+                .map_err(|_| "conversation_tier_usage_cache_poisoned".to_string())?;
+            if let Some((cached_len, cached_dialogue)) = cache.get(&path) {
+                if *cached_len == file_len {
+                    dialogue = dialogue.saturating_add(*cached_dialogue);
+                    continue;
+                }
+            }
+        }
+        let scanned = scan_dialogue_bytes(&path)
+            .map_err(|_| "conversation_tier_usage_scan_failed".to_string())?;
+        let mut cache = CONVERSATION_TIER_USAGE_CACHE
+            .lock()
+            .map_err(|_| "conversation_tier_usage_cache_poisoned".to_string())?;
+        cache.insert(path.clone(), (file_len, scanned));
+        dialogue = dialogue.saturating_add(scanned);
+    }
+    Ok((dialogue, total.saturating_sub(dialogue)))
+}
+
+fn scan_dialogue_bytes(path: &std::path::Path) -> std::io::Result<u64> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut dialogue = 0u64;
+    loop {
+        line.clear();
+        if std::io::BufRead::read_line(&mut reader, &mut line)? == 0 {
+            break;
+        }
+        if agent_core::session_store::chat_history_line_is_dialogue(line.trim_end()) {
+            dialogue = dialogue.saturating_add(line.len() as u64);
+        }
+    }
+    Ok(dialogue)
 }
 
 fn mem_mail_storage_usage(state: &AppState) -> Result<(u64, u64, u64), String> {
