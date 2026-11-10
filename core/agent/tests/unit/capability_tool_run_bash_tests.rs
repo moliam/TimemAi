@@ -2577,7 +2577,8 @@ fn exit_listener_fires_once_with_terminal_update_for_background_jobs() {
     store.spawn_background("printf hi", &dir, "listener_sess", "turn_l");
     let (running, updates) = store.consume_completed_for_session("listener_sess");
     // Race: consume may run before or after exit; retry until finished.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // Throttled CI runners can delay the exit bookkeeping well past 10s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut updates = updates;
     let mut running = running;
     while updates.is_empty() && deadline > std::time::Instant::now() {

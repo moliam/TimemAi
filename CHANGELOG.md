@@ -1,5 +1,69 @@
 # Changelog
 
+## [3.0.2] - 2026-11-09
+
+### Added
+
+- Chain-of-thought context replay: native tool-call turns uniformly carry
+  reasoning back into the prompt (`model_reasoning` role mapping), and
+  non-streaming responses synthesize a reasoning delta from the full JSON
+  body (OpenAI-compatible `reasoning_content` and Anthropic thinking blocks).
+  Providers that reject `reasoning_content` degrade dynamically and the
+  refusal is remembered for the session. Settings gains a menuconfig-style
+  surface with a chain-of-thought toggle (enabled by default).
+- Queued timer badge with a live countdown; a queued prompt whose timeout
+  expires enters the current conversation immediately.
+- `run_bash` accepts `command` as an alias of the `cmd` parameter.
+
+### Changed
+
+- Prompt-context governance rework: precise per-delta visibility filtering
+  and compression re-injection; the session work file injection wording now
+  describes iterative update/condense semantics.
+- Protocol: chain-of-thought segments carry a distinct heading
+  (`## ASSISTANT (thinking)` / `<ASSISTANT kind="thinking">`) separated from
+  the final reply, and Markdown assistant section headings are standardized
+  to protocol role names. Consumers that parse assistant sections must
+  recognize the thinking heading.
+- The Host publishes settled previews immediately: `final`, `intermediate`,
+  and thinking frames bypass the 150 ms broadcast throttle and flush in
+  order, so the working trailer and star attribution reflect real
+  model/local-work state without lag.
+- Debug browse renders large-file previews with a header truncation notice
+  instead of refusing the request.
+
+### Fixed
+
+- Long-session compaction retries on every turn while the provider-reported
+  usage or the dynamic estimate exceeds the prompt budget, so observed
+  over-budget prompts can no longer ride a stale compressed-context latch.
+- Global title tooltips survive scroll bursts and streaming re-renders:
+  scroll re-anchors the tip under the pointer via the active element's live
+  rect, and pointermove re-activates hints when a re-render replaces the
+  hovered node.
+- The web session stream suppresses a provisional answer preview whose text
+  repeats already-retained narration; mailbox detail rows stay visible;
+  markdown tables and plain-text fences wrap instead of overflowing; the
+  upgrade panel no longer doubles the `v` in version labels.
+- `run_bash` safety scanning no longer flags `&` inside a heredoc body when
+  whitespace precedes the delimiter, and the CLI preflight rejects unknown
+  web options before any workspace side effect.
+- Session Insights merges resource sampling into one pipeline and refreshes
+  the statistics page on probe completion.
+
+### Tests
+
+- Endpoint acceptance hardening for platform symmetry: catalog e2e gains
+  Chrome discovery, import/share e2e covers macOS Chrome, and the browser
+  WS fixture handles 64-bit frame lengths.
+- Browser acceptances gain slow-runner budgets: stream preview determinism
+  (network-outage abortive resets, settled-preview flush) and runner-adaptive
+  assertions for the tool self-test entrypoint.
+- Chain-of-thought guards: exactly-once cross-turn attachment, refusal-probe
+  exact matching, and context persistence across turns.
+- The global title tooltip scroll survival is covered by a real-Chrome
+  acceptance; `run_bash` alias and heredoc scanning have regression guards.
+
 ## [3.0.1] - 2026-11-08
 
 ### Fixed

@@ -190,7 +190,7 @@ async function startBrowser(url) {
   const profile = await mkdtemp(join(tmpdir(), "timem-image-warning-"));
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+    "--headless=new", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling",  "--no-sandbox", "--disable-dev-shm-usage",
     "--lang=zh-CN", "--accept-lang=zh-CN",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",

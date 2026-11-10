@@ -262,7 +262,7 @@ const profile = await mkdtemp(join(tmpdir(), "timem-cpu-bench-"));
 const child = spawn(chrome, [
   "--remote-debugging-port=0",
   `--user-data-dir=${profile}`,
-  "--headless=new",
+  "--headless=new", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling",
   "--no-sandbox",
   "--disable-dev-shm-usage",
   "--no-first-run",

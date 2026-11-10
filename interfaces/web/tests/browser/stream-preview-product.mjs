@@ -299,7 +299,7 @@ async function startBrowser(url) {
   const profile = await mkdtemp(join(tmpdir(), "timem-stop-ui-"));
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
-    "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+    "--headless=new", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling",  "--no-sandbox", "--disable-dev-shm-usage",
       "--lang=en-US", "--accept-lang=en-US",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
@@ -526,7 +526,7 @@ async function main() {
       appendStreaming("\n\n" + Array.from({length:180}, (_,i) => `Paragraph ${i} streaming text.`).join("\n\n"));
       // streamReveal renders at a fixed pace; on throttled runners
       // 180 paragraphs can exceed 60s, so give the reveal a wider window.
-      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 120000);
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 300000);
       await browser.call("Browser.grantPermissions", {origin:"http://127.0.0.1:18987", permissions:["clipboardReadWrite", "clipboardSanitizedWrite"]});
       await browser.evaluate(`(() => { const node=document.querySelector('.response-preview .markdown-body p');const r=document.createRange();r.selectNodeContents(node);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r); })()`);
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
@@ -535,14 +535,16 @@ async function main() {
       // Establish a fresh live-edge -> reading-away transition, rather than
       // accepting an indicator left over from an earlier layout/selection.
       await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=sc.scrollHeight; })()`);
-      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return sc.scrollHeight-sc.clientHeight > 500 && sc.scrollHeight-sc.clientHeight-sc.scrollTop < 8 && !!document.querySelector('.thread-working-away.at-live-edge'); })()`), "live-edge scroll precondition missing");
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return sc.scrollHeight-sc.clientHeight > 500 && sc.scrollHeight-sc.clientHeight-sc.scrollTop < 8 && !!document.querySelector('.thread-working-away.at-live-edge'); })()`), "live-edge scroll precondition missing", 60000);
       // Setting scrollTop is synchronous, but the scroll event that turns off
       // follow-latest is not. Wait for the UI to acknowledge reading away from
       // the bottom before injecting the next model chunk.
       const before = await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=100;return sc.scrollTop; })()`);
-      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return Math.abs(sc.scrollTop-100)<8 && !!document.querySelector('.thread-working-away.away-from-bottom'); })()`), "reading-away scroll event was not processed");
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return Math.abs(sc.scrollTop-100)<8 && !!document.querySelector('.thread-working-away.away-from-bottom'); })()`), "reading-away scroll event was not processed", 60000);
       appendStreaming("\n\nCONTINUED_AFTER_COPY");
-      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('CONTINUED_AFTER_COPY')`), "stream did not continue after copy");
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('CONTINUED_AFTER_COPY')`), // The continued chunk renders through the same paced streamReveal queue as
+      // the 180-paragraph body, so it needs the same wide window on slow runners.
+      "stream did not continue after copy", 300000);
       const after = await browser.evaluate(`document.querySelector('.response-preview').closest('.chat-scroll').scrollTop`);
       assert(Math.abs(after-before)<8, `stream moved reading position: ${before} -> ${after}`);
       assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early response"), "stream update changed clipboard");
@@ -648,7 +650,7 @@ async function main() {
       // The retract event rides the websocket asynchronously; a synchronous
       // check races event delivery on slow runners (macOS flake). Converge
       // with waitFor instead of asserting the instantaneous snapshot.
-      await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
+      await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews", 30000);
     }
     const persistedFinal = async (dir) => {
       for (const entry of await readdir(dir, {withFileTypes:true})) {
