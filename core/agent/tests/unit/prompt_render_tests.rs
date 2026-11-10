@@ -494,7 +494,7 @@ fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape(
 #[test]
 fn higher_reasoning_intensity_trailer_replaces_the_normal_response_trailer() {
     let prompt = format!("body\n\n{RESPONSE_TRAILER}");
-    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt, ToolCallMode::Inline);
     assert_eq!(
         upgraded,
         format!("body\n\n{REASONING_INTENSITY_UPGRADE_TRAILER}")
@@ -507,7 +507,7 @@ fn higher_reasoning_intensity_trailer_replaces_the_normal_response_trailer() {
 #[test]
 fn higher_reasoning_intensity_native_trailer_preserves_finish_protocol() {
     let prompt = format!("body\n\n{NATIVE_RESPONSE_TRAILER}");
-    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt, ToolCallMode::Native);
     assert!(upgraded.ends_with(NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER));
     assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
     assert!(upgraded.contains("call the task_finished tool"));
@@ -1120,4 +1120,62 @@ fn prompt_structure_documentation_matches_rendered_assistant_headings() {
     assert!(xml_out.contains("<ASSISTANT kind=\"thinking\">"));
     assert!(xml_out.contains("<ASSISTANT kind=\"context_compression_summary\">"));
     assert!(xml_out.contains("</ASSISTANT>"));
+}
+
+#[test]
+fn native_static_prompt_owns_the_completion_trailer_and_rounds_stay_append_only() {
+    let capabilities = CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    );
+    let rendered_static = render_static_prompt_for_mode(
+        "STATIC",
+        &capabilities,
+        &JsonSuiteV1,
+        "TIMEM_ASSISTANT",
+        ToolCallMode::Native,
+    );
+    let static_end = rendered_static
+        .find("[END SYSTEM PROMPT]")
+        .expect("static prompt boundary");
+    assert!(
+        rendered_static[..static_end].contains(NATIVE_RESPONSE_TRAILER),
+        "the constant completion trailer must live in the cacheable static prefix"
+    );
+
+    let delta = |id: &str, time_ms: i64, text: &str| PromptDelta {
+        delta_id: id.to_string(),
+        time_ms,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: id.to_string(),
+            slice_id: format!("ps_{}_s001", id.trim_start_matches("pd_")),
+            component_id: format!("component_{id}"),
+            prompt_type: "user_question".to_string(),
+            time_ms,
+            text: text.to_string(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+
+    let first_deltas = vec![delta("pd_1", 100, "first question")];
+    let first = render_prompt_with_rendered_static_for_mode(
+        &rendered_static,
+        &first_deltas,
+        &JsonSuiteV1,
+        ToolCallMode::Native,
+    );
+    let mut appended_deltas = first_deltas;
+    appended_deltas.push(delta("pd_2", 200, "second question"));
+    let appended = render_prompt_with_rendered_static_for_mode(
+        &rendered_static,
+        &appended_deltas,
+        &JsonSuiteV1,
+        ToolCallMode::Native,
+    );
+
+    assert!(
+        appended.starts_with(&first),
+        "native rounds must extend the previous request byte-for-byte so prefix caches hit"
+    );
 }

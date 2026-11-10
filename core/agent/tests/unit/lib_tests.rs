@@ -53,7 +53,13 @@ fn native_interruption_note_is_not_rendered_as_an_action_result() {
     assert!(prompt[..note].contains("old interrupted work"), "{prompt}");
     assert!(note < new_user, "{prompt}");
     assert_eq!(prompt.matches(note_text).count(), 1);
-    assert!(prompt.ends_with(prompt_render::NATIVE_RESPONSE_TRAILER));
+    let static_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .expect("static prompt boundary");
+    assert!(
+        prompt[..static_end].contains(prompt_render::NATIVE_RESPONSE_TRAILER),
+        "native trailer belongs to the cacheable static prefix"
+    );
 
     let note_delta_start = prompt[..note]
         .rfind("[BEGIN DELTA ")

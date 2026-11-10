@@ -1634,6 +1634,7 @@ fn apply_higher_than_h0_trailer(
     if upgrade.is_some() {
         request.rendered_prompt = crate::prompt_render::apply_reasoning_intensity_upgrade_trailer(
             &request.rendered_prompt,
+            request.resolved_mode,
         );
     }
     upgrade

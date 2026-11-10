@@ -88,12 +88,16 @@ pub(crate) fn formatted_response_trailer() -> String {
     RESPONSE_TRAILER.to_string()
 }
 
-pub(crate) fn apply_reasoning_intensity_upgrade_trailer(rendered_prompt: &str) -> String {
+pub(crate) fn apply_reasoning_intensity_upgrade_trailer(
+    rendered_prompt: &str,
+    tool_call_mode: ToolCallMode,
+) -> String {
     let (body, trailer) = split_formatted_response_trailer(rendered_prompt);
     let upgraded_trailer = match trailer.as_deref() {
         Some(CONTEXT_COMPRESS_REQUIRED_TRAILER) => REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
         Some(MANUAL_CONTEXT_COMPRESS_TRAILER) => REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
         Some(NATIVE_RESPONSE_TRAILER) => NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
+        _ if tool_call_mode == ToolCallMode::Native => NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
         _ => REASONING_INTENSITY_UPGRADE_TRAILER,
     };
     format!("{}\n\n{}", body.trim_end(), upgraded_trailer)
@@ -386,6 +390,17 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
         &with_caps,
         protocol_suite.response_schema_summary(),
     );
+    // The everyday completion trailer is constant, so it belongs to the
+    // cacheable static prefix. Keeping it out of the dynamic tail makes each
+    // request a strict extension of the previous one, which is what
+    // prompt-prefix caches require; compression and reasoning-upgrade
+    // trailers stay request-local because they intentionally replace the
+    // prompt.
+    let static_prompt = if tool_call_mode == ToolCallMode::Native {
+        format!("{static_prompt}\n\n{NATIVE_RESPONSE_TRAILER}")
+    } else {
+        static_prompt
+    };
 
     protocol_suite
         .prompt_boundaries()
@@ -414,14 +429,8 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
     append_rendered_deltas_for_mode(&mut out, deltas, protocol_suite, tool_call_mode);
-    out.push_str(
-        "
-
-",
-    );
-    if tool_call_mode == ToolCallMode::Native {
-        out.push_str(NATIVE_RESPONSE_TRAILER);
-    } else {
+    if tool_call_mode != ToolCallMode::Native {
+        out.push_str("\n\n");
         out.push_str(&formatted_response_trailer());
     }
     out

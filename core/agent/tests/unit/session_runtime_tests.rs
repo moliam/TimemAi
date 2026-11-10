@@ -6279,12 +6279,15 @@ impl ModelClient for NativeRoundTripModel {
             });
         }
         self.business_calls += 1;
+        let static_end = request
+            .rendered_prompt
+            .find("[END SYSTEM PROMPT]")
+            .unwrap_or(0);
         self.observed_native_prompt_contract = request
             .rendered_prompt
             .starts_with("[BEGIN SYSTEM PROMPT]\n")
-            && request
-                .rendered_prompt
-                .ends_with(crate::prompt_render::NATIVE_RESPONSE_TRAILER)
+            && request.rendered_prompt[..static_end]
+                .contains(crate::prompt_render::NATIVE_RESPONSE_TRAILER)
             && !request
                 .rendered_prompt
                 .contains("# ASSISTANT Response Protocol")
