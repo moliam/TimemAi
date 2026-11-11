@@ -14604,10 +14604,15 @@ fn worker_model_service_route_for_session(
         if active_endpoint_id == Some(endpoint_id.as_str()) {
             continue;
         }
-        let endpoint = endpoints
+        // A stored chain can reference an endpoint deleted after it was set.
+        // A vanished standby must not poison the whole route: skip it so the
+        // active config keeps working and failover stays available.
+        let Some(endpoint) = endpoints
             .iter()
             .find(|endpoint| endpoint.id == *endpoint_id)
-            .ok_or_else(|| "model_endpoint_not_found".to_string())?;
+        else {
+            continue;
+        };
         let mut fallback = config.clone();
         project_endpoint_onto_config(&mut fallback, endpoint)?;
         apply_session_endpoint_input_override(&mut fallback, &session.runtime, endpoint_id);
@@ -14757,29 +14762,39 @@ fn apply_model_endpoint_chain(
     {
         return Err("model_endpoint_chain_invalid".to_string());
     }
-    let endpoints = {
+    // Stored chains can reference endpoints that were deleted after the
+    // session persisted them. Prune stale references so a deleted standby
+    // cannot wedge every later submission, and persist the surviving chain so
+    // the session self-heals. Fail closed only when nothing resolves.
+    let (pruned_ids, endpoints) = {
         let mem = state
             .mem
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
-        endpoint_ids
-            .iter()
-            .map(|endpoint_id| {
-                mem.model_endpoints
-                    .iter()
-                    .find(|item| &item.id == endpoint_id)
-                    .cloned()
-                    .ok_or_else(|| "model_endpoint_not_found".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?
+        let mut pruned_ids = Vec::with_capacity(endpoint_ids.len());
+        let mut endpoints = Vec::with_capacity(endpoint_ids.len());
+        for endpoint_id in endpoint_ids {
+            if let Some(endpoint) = mem
+                .model_endpoints
+                .iter()
+                .find(|item| &item.id == endpoint_id)
+            {
+                pruned_ids.push(endpoint_id.clone());
+                endpoints.push(endpoint.clone());
+            }
+        }
+        (pruned_ids, endpoints)
     };
+    if endpoints.is_empty() {
+        return Err("model_endpoint_not_found".to_string());
+    }
     let active = {
         let health = state
             .model_endpoint_health
             .lock()
             .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
         let Some(active) =
-            first_available_chain_endpoint(endpoint_ids, &endpoints, &health, now_ms())
+            first_available_chain_endpoint(&pruned_ids, &endpoints, &health, now_ms())
         else {
             return Err("model_endpoint_not_found".to_string());
         };
@@ -14797,7 +14812,7 @@ fn apply_model_endpoint_chain(
             session.runtime.settings.config.clone(),
         )
     };
-    candidate.runtime.model_endpoint_ids = endpoint_ids.to_vec();
+    candidate.runtime.model_endpoint_ids = pruned_ids;
     candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
     let mut failover = Vec::new();
     for endpoint in &endpoints {

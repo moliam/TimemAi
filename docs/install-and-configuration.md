@@ -189,6 +189,10 @@ rather than reviving an old endpoint through legacy migration. Editing an
 endpoint preserves the rest of its chain. A deleted binding is shown as
 `接入点已删除` and blocks new requests until another endpoint is selected; cached
 credentials are not a fallback.
+Chain entries that reference an endpoint deleted after the chain was stored are
+pruned at the next chain application and the surviving chain is persisted, so a
+deleted standby cannot wedge new requests. A chain whose entries are all gone
+keeps failing closed until a valid endpoint is selected.
 
 Below the model ID, the Web header renders only `推理：` and a Session-scoped
 reasoning selector; it does not render the API protocol there. Its choices come

@@ -549,6 +549,13 @@ and `probe_transport_error_keeps_cooldown_and_stamps_the_retry_anchor` keep a
 probe that ends in a transport error on the same bounded retry cadence instead
 of re-probing on every scanner tick, while leaving the rate-limit judgement
 unchanged.
+`deleted_standby_endpoint_is_pruned_from_the_chain_and_route` proves a stored
+chain that references an endpoint deleted after it was set: route building skips
+the vanished standby, and the next chain apply prunes the stale id and persists
+the surviving chain so the Session self-heals instead of wedging every later
+submission. `endpoint_chain_apply_fails_closed_when_no_chain_endpoint_exists`
+keeps the fail-closed rejection when no chain entry resolves and proves the
+failed apply leaves the stored chain untouched.
 
 `session_reasoning_effort_applies_at_the_next_api_request_without_mutating_
 endpoints` proves that the Web header selection is Session-owned, rejects levels

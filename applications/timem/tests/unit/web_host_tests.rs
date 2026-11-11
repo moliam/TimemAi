@@ -17039,6 +17039,116 @@ fn rate_limit_failover_projects_the_committed_current_endpoint() {
 }
 
 #[test]
+fn deleted_standby_endpoint_is_pruned_from_the_chain_and_route() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_chain_prune"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, _entered_rx) = std::sync::mpsc::channel();
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        upsert_model_endpoint(&state, endpoint).unwrap();
+    }
+    let chain = [
+        "endpoint-boundary-a".to_string(),
+        "endpoint-boundary-b".to_string(),
+    ];
+    apply_model_endpoint_chain(&state, &session_id, &chain).unwrap();
+    delete_model_endpoints(&state, &["endpoint-boundary-b".to_string()]).unwrap();
+
+    // The stored chain still references the deleted standby. Route building
+    // must skip the vanished entry instead of failing the whole session.
+    let session = state.sessions.lock().unwrap()[&session_id].clone();
+    let route = worker_model_service_route_for_session(&state, &session).unwrap();
+    assert!(route.failover.is_empty());
+
+    // The submit path refreshes the bound chain: the stale id is pruned and
+    // the surviving chain is persisted so the session self-heals.
+    apply_model_endpoint_chain(&state, &session_id, &chain).unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime.model_endpoint_ids,
+            vec!["endpoint-boundary-a".to_string()]
+        );
+        assert_eq!(
+            session.runtime_profile.model_endpoint_ids,
+            vec!["endpoint-boundary-a".to_string()]
+        );
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn endpoint_chain_apply_fails_closed_when_no_chain_endpoint_exists() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_chain_fail_closed"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, _entered_rx) = std::sync::mpsc::channel();
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    apply_model_endpoint_chain(&state, &session_id, &["endpoint-boundary-a".to_string()]).unwrap();
+
+    assert_eq!(
+        apply_model_endpoint_chain(
+            &state,
+            &session_id,
+            &[
+                "endpoint-missing-x".to_string(),
+                "endpoint-missing-y".to_string()
+            ],
+        )
+        .unwrap_err(),
+        "model_endpoint_not_found"
+    );
+    // The failed apply must not touch the stored chain.
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime
+            .model_endpoint_ids,
+        vec!["endpoint-boundary-a".to_string()]
+    );
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn endpoint_auto_probe_waits_for_the_bounded_retry_interval() {
     let now = 1_800_000_000_000u128;
     let threshold = MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis();
