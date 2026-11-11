@@ -79,3 +79,22 @@ describe("composer write-through scheduler", () => {
     expect(h.commits).toEqual(["first", "second"]);
   });
 });
+
+describe("composer write-through pending flag", () => {
+  it("reports pending typing until it is committed or dropped", () => {
+    const h = harness(300);
+    expect(h.wt.hasPending()).toBe(false);
+    h.wt.onInput("typed");
+    expect(h.wt.hasPending()).toBe(true);
+    h.advance(300);
+    expect(h.commits).toEqual(["typed"]);
+    expect(h.wt.hasPending()).toBe(false);
+    // A drop (submit clear / authoritative refill) also clears the flag.
+    h.wt.onInput("more");
+    expect(h.wt.hasPending()).toBe(true);
+    h.wt.reset();
+    expect(h.wt.hasPending()).toBe(false);
+    h.advance(300);
+    expect(h.commits).toEqual(["typed"]);
+  });
+});

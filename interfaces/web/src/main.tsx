@@ -10174,6 +10174,12 @@ function TimemThread({
     // overwrite the very text the panel was seeded from, so a stale draft
     // racing the expand click can no longer blank it.
     if (composerExpanded) return;
+    // Uncommitted typing is always newer than any store draft. Adopting while
+    // typing is in flight desyncs the live-text ref from the visible field:
+    // Enter then submits the stale ref (ghost "empty continue" prompts) or
+    // silently no-ops while the field still shows text. Skip adoption until
+    // the write-through commits; it re-runs this effect on the commit.
+    if (composerWriteThroughRef.current?.hasPending()) return;
     // Adopt authoritative draft changes (restore, rejection refill, submit
     // clear) into the live-text ref, but skip our own write-through echo: the
     // local field may already hold newer keystrokes than the committed copy.
@@ -10896,20 +10902,27 @@ function TimemThread({
       releaseSessionDraftSubmission(submittingDraftSessionIdsRef, sessionId);
     }
     if (rejectedDrafts.size > 0) {
+      // The refilled draft is authoritative for the active session: land it
+      // through the same path as other external drafts so pending typing is
+      // dropped and the live-text ref matches the store immediately. Waiting
+      // for the adoption effect would let a pending write-through commit
+      // overwrite the refilled text and desync the field again.
+      let refilledActiveText: string | null = null;
       setDraftsBySession((current) => {
         let next = current;
         for (const [sessionId, rejectedText] of rejectedDrafts) {
           const newerDraft = draftForSession(next, sessionId);
-          next = setSessionDraft(
-            next,
-            sessionId,
-            newerDraft.trim()
-              ? `${rejectedText}\n\n${newerDraft}`
-              : rejectedText,
-          );
+          const refilledText = newerDraft.trim()
+            ? `${rejectedText}\n\n${newerDraft}`
+            : rejectedText;
+          if (sessionId === activeSessionIdRef.current)
+            refilledActiveText = refilledText;
+          next = setSessionDraft(next, sessionId, refilledText);
         }
         return next;
       });
+      if (refilledActiveText !== null)
+        applyAuthoritativeComposerText(refilledActiveText);
     }
     // Consume unmatched ids too: they may belong to another mounted Thread.
     for (const commandId of rejectedSubmitCommandIds) consumed.add(commandId);
@@ -11056,7 +11069,15 @@ function TimemThread({
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
-    const liveDraft = composerLiveTextRef.current;
+    // The visible field is the submit-time source of truth: reads through the
+    // live-text ref can diverge from the DOM (stale adoption, dropped events),
+    // which produced ghost "empty continue" prompts and silent no-op submits.
+    // While the expanded editor is open its text is authoritative instead.
+    const visibleDraft = composerExpanded
+      ? composerLiveTextRef.current
+      : (composerTextareaRef.current?.value ?? composerLiveTextRef.current);
+    composerLiveTextRef.current = visibleDraft;
+    const liveDraft = visibleDraft;
     if (activeSession && activeSession.state !== "working" && !liveDraft.trim()) {
       if (!window.confirm(t("composer.emptyContinueConfirm"))) return;
       onSendForSession(
@@ -11117,10 +11138,14 @@ function TimemThread({
 
   const submitDraftAsSupplement = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
+    const visibleDraft = composerExpanded
+      ? composerLiveTextRef.current
+      : (composerTextareaRef.current?.value ?? composerLiveTextRef.current);
+    composerLiveTextRef.current = visibleDraft;
     const liveDrafts = setSessionDraft(
       draftsBySession,
       activeSessionId,
-      composerLiveTextRef.current,
+      visibleDraft,
     );
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,

@@ -15,6 +15,8 @@ export interface ComposerWriteThrough {
   onInput(text: string): void;
   flush(): void;
   reset(): void;
+  /** True while typed text has not reached the committed draft copy yet. */
+  hasPending(): boolean;
   dispose(): void;
 }
 
@@ -66,6 +68,7 @@ export function createComposerWriteThrough(
     // Drop pending typing without committing: an authoritative external value
     // is replacing the draft (submit cleared it, rejection refilled it).
     reset,
+    hasPending: () => latest !== null,
     dispose: reset,
   };
 }
