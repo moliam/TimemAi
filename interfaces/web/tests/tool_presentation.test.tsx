@@ -356,6 +356,24 @@ describe("readable timer lifecycle presentation", () => {
     expect(atHtml).toContain("任务");
   });
 
+  it("renders an event-driven trigger timer with its event", () => {
+    const trig = timerPresentation("timer", {
+      op: "new", prompt: "压缩后续读", mode: "trigger", trigger: "after_compression",
+    })!;
+    expect(trig.kind).toBe("new_trigger");
+    const html = renderToStaticMarkup(<TimerInvocation timer={trig} />);
+    expect(html).toContain("触发式");
+    expect(html).toContain("上下文压缩完成后");
+    expect(html).not.toContain("after_ms");
+    expect(html).toContain("压缩后续读");
+
+    const idle = timerPresentation("timer", {
+      op: "new", prompt: "空闲跟进", mode: "trigger", trigger: "session_idle",
+    })!;
+    const idleHtml = renderToStaticMarkup(<TimerInvocation timer={idle} />);
+    expect(idleHtml).toContain("会话空闲时");
+  });
+
   it("renders a delete row naming the timer", () => {
     const del = timerPresentation("timer", { op: "del", name: "build-check" })!;
     expect(del).toEqual({ kind: "delete", name: "build-check" });
@@ -376,6 +394,10 @@ describe("readable timer lifecycle presentation", () => {
     { op: "del" },                                   // delete without name
     { op: "del", name: "x", prompt: "y" },           // delete with create fields
     { op: "other", prompt: "p", after_ms: 1 },       // unknown op
+    { op: "new", prompt: "p", mode: "trigger" },                      // trigger without event
+    { op: "new", prompt: "p", mode: "trigger", trigger: "whenever" }, // unknown event
+    { op: "new", prompt: "p", mode: "trigger", trigger: "session_idle", after_ms: 1 }, // trigger + schedule
+    { op: "new", prompt: "p", trigger: "session_idle" },              // event without mode
   ])("falls back instead of guessing malformed timer inputs: %j", (value) => {
     expect(timerPresentation("timer", value)).toBeUndefined();
   });

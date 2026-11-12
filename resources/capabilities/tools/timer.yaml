@@ -11,7 +11,8 @@ description: |
   IMPORTANT: For very complex tasks and multi-agent cooperation, a repeated timer whose prompt carries the core direction, key objectives, and genuine user needs plays a critical role, helping keep the business on the right track. It can also continue work in case of a careless task finish because it can actively wake.
 
   ops:
-  - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
+  - new: create a timer. `prompt` is required. `mode` is "once" (default), "repeat",
+    or "trigger".
     `queue_timeout` (integer, minutes, default 0) controls delivery timing. 0 never queues:
     the fired prompt is delivered immediately; an active turn receives it as an immediate
     supplement and an otherwise idle session starts a new turn directly, even ahead of
@@ -22,6 +23,16 @@ description: |
     ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
     is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
     timer0, timer1, ... when omitted.
+    For "trigger", `trigger` selects the system event that fires the prompt and the
+    schedule fields (after_ms/at/interval_ms) are forbidden. A trigger timer stays
+    armed and fires EVERY time the event occurs until deleted via `del`:
+    - "session_idle": a turn just ended because the model called task_finished
+      (cancelled or failed turns do not fire it).
+    - "after_compression": this session's context compression just completed.
+    Trigger timers survive compression and restart like every timer.
+    WARNING: the turn started by a fired prompt also ends through task_finished (and can
+    compress), firing the same trigger again - a prompt that neither deletes its timer nor
+    bounds its work creates an endless wake loop.
   - del: delete a timer by `name`. No error if the name does not exist only via
     explicit error text.
 
@@ -40,7 +51,8 @@ input_schema: |
       "op": {"type":"string","enum":["new","del"],"description":"Timer operation."},
       "prompt": {"type":"string","description":"Prompt text delivered when the timer fires. Required for new."},
       "name": {"type":"string","description":"Optional stable handle name for new (auto-named timer0/timer1/... when omitted); required for del."},
-      "mode": {"type":"string","enum":["once","repeat"],"description":"once fires a single time (default); repeat refires every interval_ms."},
+      "mode": {"type":"string","enum":["once","repeat","trigger"],"description":"once fires a single time (default); repeat refires every interval_ms; trigger fires on a system event selected by `trigger`."},
+      "trigger": {"type":"string","enum":["session_idle","after_compression"],"description":"Required for mode=trigger, forbidden otherwise. session_idle fires after the model ends a turn via task_finished; after_compression fires after this session's context compression completes."},
       "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
       "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
       "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."},
@@ -49,4 +61,4 @@ input_schema: |
     "required": ["op"]
   }
 example_json: |
-  {"timer":{"op":"new","prompt":"check the long build result and report","after_ms":300000}}
+  {"timer":{"op":"new","prompt":"Compression just completed: verify the session work file still covers the active goal, then continue it.","mode":"trigger","trigger":"after_compression"}}

@@ -8090,8 +8090,9 @@ function timerRelativeTime(targetMs: number): string {
 type TimerEditForm = {
   prompt: string;
   name: string;
-  mode: "once" | "repeat";
+  mode: "once" | "repeat" | "trigger";
   trigger: "delay" | "at";
+  eventKind: "session_idle" | "after_compression";
   delayMinutes: string;
   atValue: string;
   intervalMinutes: string;
@@ -8112,8 +8113,14 @@ function timerToEditForm(timer: TimerInfo): TimerEditForm {
   return {
     prompt: timer.prompt,
     name: timer.name,
-    mode: timer.mode === "repeat" ? "repeat" : "once",
+    mode:
+      timer.mode === "repeat"
+        ? "repeat"
+        : timer.mode === "trigger"
+          ? "trigger"
+          : "once",
     trigger: timer.after_ms != null ? "delay" : "at",
+    eventKind: timer.trigger === "after_compression" ? "after_compression" : "session_idle",
     delayMinutes:
       timer.after_ms != null
         ? String(Math.max(1, Math.round(timer.after_ms / 60_000)))
@@ -8400,8 +8407,11 @@ function TimerPanel({
   const workFieldRef = useRef<HTMLTextAreaElement | null>(null);
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"once" | "repeat">("once");
+  const [mode, setMode] = useState<"once" | "repeat" | "trigger">("once");
   const [trigger, setTrigger] = useState<"delay" | "at">("delay");
+  const [eventKind, setEventKind] = useState<
+    "session_idle" | "after_compression"
+  >("session_idle");
   const [delayMinutes, setDelayMinutes] = useState("");
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
@@ -8412,6 +8422,7 @@ function TimerPanel({
     setName("");
     setMode("once");
     setTrigger("delay");
+    setEventKind("session_idle");
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
@@ -8432,22 +8443,24 @@ function TimerPanel({
     else createToggleRef.current?.focus({ preventScroll: true });
   }, [createOpen]);
   const triggerValid =
-    trigger === "delay"
+    mode === "trigger" ||
+    (trigger === "delay"
       ? Number(delayMinutes) > 0
-      : !!atValue && !Number.isNaN(new Date(atValue).getTime());
-  const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
+      : !!atValue && !Number.isNaN(new Date(atValue).getTime()));
+  const intervalValid = mode !== "repeat" || Number(intervalMinutes) > 0;
   const canCreate =
     !!session && !!prompt.trim() && triggerValid && intervalValid;
   const editTriggerValid =
     editForm == null
       ? false
-      : editForm.trigger === "delay"
-        ? Number(editForm.delayMinutes) > 0
-        : !!editForm.atValue &&
-          !Number.isNaN(new Date(editForm.atValue).getTime());
+      : editForm.mode === "trigger" ||
+        (editForm.trigger === "delay"
+          ? Number(editForm.delayMinutes) > 0
+          : !!editForm.atValue &&
+            !Number.isNaN(new Date(editForm.atValue).getTime()));
   const editIntervalValid =
     editForm == null ||
-    editForm.mode === "once" ||
+    editForm.mode !== "repeat" ||
     Number(editForm.intervalMinutes) > 0;
   const canEditSave =
     editForm != null &&
@@ -8465,15 +8478,24 @@ function TimerPanel({
       prompt: editForm.prompt.trim(),
       name: editForm.name.trim(),
       mode: editForm.mode,
-      ...(editForm.trigger === "delay"
+      ...(editForm.mode === "trigger"
         ? {
-            after_ms: Math.round(Number(editForm.delayMinutes) * 60_000),
+            trigger: editForm.eventKind,
+            after_ms: null,
             at: null,
+            interval_ms: null,
           }
-        : { after_ms: null, at: new Date(editForm.atValue).toISOString() }),
-      ...(editForm.mode === "repeat"
-        ? { interval_ms: Math.round(Number(editForm.intervalMinutes) * 60_000) }
-        : { interval_ms: null }),
+        : {
+            ...(editForm.trigger === "delay"
+              ? {
+                  after_ms: Math.round(Number(editForm.delayMinutes) * 60_000),
+                  at: null,
+                }
+              : { after_ms: null, at: new Date(editForm.atValue).toISOString() }),
+            ...(editForm.mode === "repeat"
+              ? { interval_ms: Math.round(Number(editForm.intervalMinutes) * 60_000) }
+              : { interval_ms: null }),
+          }),
       queue_timeout_minutes: queueTimeoutMinutesFromInput(editForm.queueTimeoutMinutes),
     };
     if (!sendCommand.current(command)) return;
@@ -8503,12 +8525,16 @@ function TimerPanel({
       prompt: prompt.trim(),
       mode,
       ...(name.trim() ? { name: name.trim() } : {}),
-      ...(trigger === "delay"
-        ? { after_ms: Math.round(Number(delayMinutes) * 60_000) }
-        : { at: new Date(atValue).toISOString() }),
-      ...(mode === "repeat"
-        ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
-        : {}),
+      ...(mode === "trigger"
+        ? { trigger: eventKind }
+        : {
+            ...(trigger === "delay"
+              ? { after_ms: Math.round(Number(delayMinutes) * 60_000) }
+              : { at: new Date(atValue).toISOString() }),
+            ...(mode === "repeat"
+              ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
+              : {}),
+          }),
       queue_timeout_minutes: queueTimeoutMinutesFromInput(queueTimeoutMinutes),
     };
     if (!sendCommand.current(command)) return;
@@ -8565,7 +8591,9 @@ function TimerPanel({
                 <span className="timer-item-meta">
                   {timer.mode === "repeat"
                     ? t("timer.modeRepeat")
-                    : t("timer.modeOnce")}
+                    : timer.mode === "trigger"
+                      ? t("timer.modeTrigger")
+                      : t("timer.modeOnce")}
                 </span>
                 {(timer.queue_timeout_minutes ?? 0) > 0 && (
                   <span className="timer-item-origin queued" title={t("timer.queueHint")}>
@@ -8605,30 +8633,65 @@ function TimerPanel({
                         onChange={(event) =>
                           setEditForm({
                             ...editForm,
-                            mode: event.target.value as "once" | "repeat",
+                            mode: event.target.value as
+                              | "once"
+                              | "repeat"
+                              | "trigger",
                           })
                         }
                       >
                         <option value="once">{t("timer.modeOnce")}</option>
                         <option value="repeat">{t("timer.modeRepeat")}</option>
+                        <option value="trigger">
+                          {t("timer.modeTrigger")}
+                        </option>
                       </select>
                     </label>
-                    <label>
-                      {t("timer.triggerLabel")}
-                      <select
-                        value={editForm.trigger}
-                        onChange={(event) =>
-                          setEditForm({
-                            ...editForm,
-                            trigger: event.target.value as "delay" | "at",
-                          })
-                        }
-                      >
-                        <option value="delay">{t("timer.triggerDelay")}</option>
-                        <option value="at">{t("timer.triggerAt")}</option>
-                      </select>
-                    </label>
+                    {editForm.mode !== "trigger" && (
+                      <label>
+                        {t("timer.triggerLabel")}
+                        <select
+                          value={editForm.trigger}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              trigger: event.target.value as "delay" | "at",
+                            })
+                          }
+                        >
+                          <option value="delay">
+                            {t("timer.triggerDelay")}
+                          </option>
+                          <option value="at">{t("timer.triggerAt")}</option>
+                        </select>
+                      </label>
+                    )}
                   </div>
+                  {editForm.mode === "trigger" ? (
+                    <div className="timer-create-row">
+                      <label>
+                        {t("timer.eventLabel")}
+                        <select
+                          value={editForm.eventKind}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              eventKind: event.target.value as
+                                | "session_idle"
+                                | "after_compression",
+                            })
+                          }
+                        >
+                          <option value="session_idle">
+                            {t("timer.eventSessionIdle")}
+                          </option>
+                          <option value="after_compression">
+                            {t("timer.eventAfterCompression")}
+                          </option>
+                        </select>
+                      </label>
+                    </div>
+                  ) : (
                   <div className="timer-create-row">
                     {editForm.trigger === "delay" ? (
                       <label>
@@ -8679,6 +8742,7 @@ function TimerPanel({
                       </label>
                     )}
                   </div>
+                  )}
                   <label className="timer-queue-field">
                     <input
                       type="number"
@@ -8760,24 +8824,38 @@ function TimerPanel({
               )}
               <div
                 className={`timer-item-schedule${timer.parked_reason ? " parked" : ""}`}
-                title={new Date(timer.next_fire_ms).toLocaleString()}
+                title={
+                  timer.mode === "trigger"
+                    ? t("timer.triggerArmed")
+                    : new Date(timer.next_fire_ms).toLocaleString()
+                }
               >
                 {timer.mode === "repeat"
                   ? t("timer.modeRepeat")
-                  : t("timer.modeOnce")}
-                {timer.mode === "repeat" && timer.interval_ms
-                  ? ` · ${t("timer.everyMinutes", {
-                      minutes: Math.max(
-                        1,
-                        Math.round(timer.interval_ms / 60_000),
-                      ),
-                    })}`
-                  : ""}
+                  : timer.mode === "trigger"
+                    ? t("timer.modeTrigger")
+                    : t("timer.modeOnce")}
+                {timer.mode === "trigger"
+                  ? ` · ${
+                      timer.trigger === "after_compression"
+                        ? t("timer.eventAfterCompression")
+                        : t("timer.eventSessionIdle")
+                    }`
+                  : timer.mode === "repeat" && timer.interval_ms
+                    ? ` · ${t("timer.everyMinutes", {
+                        minutes: Math.max(
+                          1,
+                          Math.round(timer.interval_ms / 60_000),
+                        ),
+                      })}`
+                    : ""}
                 {" · "}
                 {timer.enabled
-                  ? t("timer.nextFire", {
-                      time: timerRelativeTime(timer.next_fire_ms),
-                    })
+                  ? timer.mode === "trigger"
+                    ? t("timer.triggerArmed")
+                    : t("timer.nextFire", {
+                        time: timerRelativeTime(timer.next_fire_ms),
+                      })
                   : timer.parked_reason
                     ? t("timer.parked")
                     : t("timer.paused")}
@@ -8882,13 +8960,15 @@ function TimerPanel({
             <select
               value={mode}
               onChange={(event) =>
-                setMode(event.target.value as "once" | "repeat")
+                setMode(event.target.value as "once" | "repeat" | "trigger")
               }
             >
               <option value="once">{t("timer.modeOnce")}</option>
               <option value="repeat">{t("timer.modeRepeat")}</option>
+              <option value="trigger">{t("timer.modeTrigger")}</option>
             </select>
           </label>
+          {mode !== "trigger" && (
           <label>
             {t("timer.triggerLabel")}
             <select
@@ -8901,7 +8981,30 @@ function TimerPanel({
               <option value="at">{t("timer.triggerAt")}</option>
             </select>
           </label>
+          )}
         </div>
+        {mode === "trigger" ? (
+          <div className="timer-create-row">
+            <label>
+              {t("timer.eventLabel")}
+              <select
+                value={eventKind}
+                onChange={(event) =>
+                  setEventKind(
+                    event.target.value as "session_idle" | "after_compression",
+                  )
+                }
+              >
+                <option value="session_idle">
+                  {t("timer.eventSessionIdle")}
+                </option>
+                <option value="after_compression">
+                  {t("timer.eventAfterCompression")}
+                </option>
+              </select>
+            </label>
+          </div>
+        ) : (
         <div className="timer-create-row">
           {trigger === "delay" ? (
             <label>
@@ -8937,6 +9040,7 @@ function TimerPanel({
             </label>
           )}
         </div>
+        )}
         <label className="timer-queue-field">
           <input
             type="number"
@@ -8954,6 +9058,9 @@ function TimerPanel({
           </div>
         )}
         <div className="timer-form-hint">{t("timer.scheduleHint")}</div>
+        {mode === "trigger" && (
+          <div className="timer-form-hint">{t("timer.triggerHint")}</div>
+        )}
         <div className="timer-create-actions">
           <button
             type="submit"

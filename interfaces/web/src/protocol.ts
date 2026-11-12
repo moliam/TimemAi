@@ -220,7 +220,9 @@ export type TimerInfo = {
   timer_id: string;
   name: string;
   prompt: string;
-  mode: "once" | "repeat" | string;
+  mode: "once" | "repeat" | "trigger" | string;
+  /** Event that fires a mode "trigger" timer; absent for time-based modes. */
+  trigger?: "session_idle" | "after_compression" | string | null;
   after_ms?: number | null;
   at?: string | null;
   interval_ms?: number | null;
@@ -1106,7 +1108,9 @@ export type ClientCommand =
       session_id: string;
       prompt: string;
       name?: string;
-      mode?: "once" | "repeat";
+      mode?: "once" | "repeat" | "trigger";
+      /** Event for mode "trigger": session_idle | after_compression. */
+      trigger?: "session_idle" | "after_compression";
       after_ms?: number;
       at?: string;
       interval_ms?: number;
@@ -1127,7 +1131,9 @@ export type ClientCommand =
       timer_id: string;
       prompt: string;
       name?: string;
-      mode?: "once" | "repeat";
+      mode?: "once" | "repeat" | "trigger";
+      /** Event for mode "trigger": session_idle | after_compression. Providing any schedule field (mode/trigger/after_ms/at/interval_ms) replaces the whole schedule. */
+      trigger?: "session_idle" | "after_compression";
       after_ms?: number | null;
       at?: string | null;
       interval_ms?: number | null;

@@ -212,10 +212,13 @@ async function startHost() {
             timer_id: `timer-created-${authoritativeTimers.length}`,
             name: command.name || `timer${authoritativeTimers.length}`,
             prompt: command.prompt, mode: command.mode || "once",
+            trigger: command.trigger ?? null,
             after_ms: command.after_ms ?? null, at: command.at ?? null,
             interval_ms: command.interval_ms ?? null, created_by: "user",
             created_at_ms: Date.now(), enabled: true,
-            next_fire_ms: Date.now() + (command.after_ms ?? 60000),
+            next_fire_ms: command.mode === "trigger"
+              ? Number.MAX_SAFE_INTEGER
+              : Date.now() + (command.after_ms ?? 60000),
             last_fired_ms: null,
           },
         ];
@@ -609,12 +612,69 @@ async function main() {
     assert(repeatCreated.mode === "repeat" && repeatCreated.interval_ms === 900000,
       `repeat interval_ms wrong: ${JSON.stringify(repeatCreated)}`);
 
+    // Event-driven trigger mode: calendar fields collapse to an event select,
+    // and the command carries the event instead of a schedule.
+    await click(`document.querySelector('.timer-create-toggle').click()`);
+    await waitFor(() => exists(".timer-create-form"), "form must reopen for trigger mode");
+    await browser.evaluate(
+      `document.querySelector('.timer-create-form select').value = 'trigger';
+       document.querySelector('.timer-create-form select').dispatchEvent(new Event('change', { bubbles: true }));`,
+    );
+    await waitFor(() => browser.evaluate(
+      `[...document.querySelectorAll('.timer-create-form label')].some((node) => node.textContent?.includes('触发事件'))`,
+    ), "trigger mode must reveal the event select");
+    assert(
+      await browser.evaluate(
+        `![...document.querySelectorAll('.timer-create-form label')].some((node) => node.textContent?.includes('重复间隔'))`,
+      ),
+      "trigger mode must hide the interval field",
+    );
+    assert(
+      await browser.evaluate(
+        `![...document.querySelectorAll('.timer-create-form label')].some((node) => node.textContent?.includes('首次触发'))`,
+      ),
+      "trigger mode must hide the first-fire select",
+    );
+    await setNativeValue(".timer-create-form textarea", "压缩后核对工作文件");
+    await browser.evaluate(
+      `(() => { const selects = [...document.querySelectorAll('.timer-create-form select')];
+        const el = selects.find((node) => node.value === 'session_idle');
+        el.value = 'after_compression';
+        el.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+    );
+    await waitFor(() => browser.evaluate(
+      `document.querySelector('.timer-create-submit')?.disabled === false`,
+    ), "trigger form should be submittable once the event is picked");
+    await click(`document.querySelector('.timer-create-submit').click()`);
+    await waitFor(() => (lastCommand("timer_create")?.prompt === "压缩后核对工作文件"), "trigger create not sent");
+    const triggerCreated = lastCommand("timer_create");
+    assert(
+      triggerCreated.mode === "trigger" && triggerCreated.trigger === "after_compression"
+        && triggerCreated.after_ms === undefined && triggerCreated.at === undefined
+        && triggerCreated.interval_ms === undefined,
+      `trigger create payload wrong: ${JSON.stringify(triggerCreated)}`,
+    );
+    await waitFor(() => browser.evaluate(
+      `[...document.querySelectorAll('.timer-item')].some((node) => node.textContent?.includes('压缩后核对工作文件'))`,
+    ), "trigger timer item did not render");
+    // Clean up the trigger timer so the delete section below keeps its
+    // first-button assumptions.
+    browser.setDialogAccept(true);
+    await click(`[...document.querySelectorAll('.timer-delete')].pop().click()`);
+    await waitFor(() => browser.evaluate(
+      `![...document.querySelectorAll('.timer-item')].some((node) => node.textContent?.includes('压缩后核对工作文件'))`,
+    ), "trigger timer item not removed after confirmed delete");
+
     // Delete: wait for the repeat timer to render before sampling, so the
     // before/after comparison cannot race the timers_updated round-trip.
     const contains = (selector, text) => browser.evaluate(
       `[...document.querySelectorAll(${JSON.stringify(selector)})].some((node) => node.textContent?.includes(${JSON.stringify(text)}) === true)`,
     );
     await waitFor(() => contains(".timer-item", "循环巡检"), "repeat timer item did not render");
+    // timer_delete may already exist from the trigger-scenario cleanup above, so
+    // assertions here must use a count baseline instead of lastCommand().
+    const deleteCommandCount = () => [...host.commands].filter((c) => c.type === "timer_delete").length;
+    const deletesBefore = deleteCommandCount();
     const beforeDelete = await browser.evaluate(`document.querySelectorAll('.timer-item').length`);
     // Dismissing the confirm must not delete nor send any command.
     browser.setDialogAccept(false);
@@ -625,7 +685,7 @@ async function main() {
       await browser.evaluate(`document.querySelectorAll('.timer-item').length === ${beforeDelete}`),
       "dismissed confirm must keep the timer",
     );
-    assert(lastCommand("timer_delete") == null, "dismissed confirm must not send timer_delete");
+    assert(deleteCommandCount() === deletesBefore, "dismissed confirm must not send timer_delete");
     const dismissedMessage = browser.dialogs[dismissedDialogCount] ?? "";
     assert(dismissedMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dismissedMessage)}`);
     // Accepting the confirm deletes the same timer.
@@ -635,7 +695,7 @@ async function main() {
     await waitFor(() => browser.evaluate(
       `document.querySelectorAll('.timer-item').length === ${beforeDelete - 1}`,
     ), "timer item not removed after confirmed delete");
-    assert(lastCommand("timer_delete") !== null, "timer_delete command not sent after confirm");
+    assert(deleteCommandCount() === deletesBefore + 1, "timer_delete command not sent after confirm");
     const dialogMessage = browser.dialogs[dialogCountBefore] ?? "";
     assert(dialogMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dialogMessage)}`);
 

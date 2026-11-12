@@ -2982,6 +2982,7 @@ fn clear_context_restates_runtime_known_state_once() {
         after_ms: Some(3_600_000),
         at: None,
         interval_ms: None,
+        trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "user".to_string(),
     }]);

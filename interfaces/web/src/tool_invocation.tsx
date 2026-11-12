@@ -134,12 +134,14 @@ export function TimerInvocation({ timer }: { timer: TimerPresentation }) {
       {t("tools.timerDelete")}：{timer.name}
     </span>;
   const name = timer.name ? `（${timer.name}）` : "";
-  const mode = timer.kind === "new_once" ? t("tools.timerOnce") : t("tools.timerRepeat");
+  const mode = timer.kind === "new_once" ? t("tools.timerOnce") : timer.kind === "new_trigger" ? t("tools.timerTrigger") : t("tools.timerRepeat");
   const schedule = timer.kind === "new_once"
     ? timer.afterMs !== undefined
       ? timerDelayLabel(timer.afterMs)
       : t("tools.timerAtTime", { time: formatTimerAt(timer.at ?? "") })
-    : timerEveryLabel(timer.intervalMs);
+    : timer.kind === "new_trigger"
+      ? timer.triggerEvent === "after_compression" ? t("tools.timerEventAfterCompression") : t("tools.timerEventSessionIdle")
+      : timerEveryLabel(timer.intervalMs);
   return <span
     className="timer-tool-preview tool-invocation-preview"
     title={[`${t("tools.timerNew")}${name}，${mode}，${schedule}`, `${t("tools.timerTask")}: ${timer.prompt}`].join("\n")}

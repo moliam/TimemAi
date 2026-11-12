@@ -36,10 +36,14 @@ fn execute_new(
     let at = str_field(action, "at");
     let interval_ms = u64_field(action, "interval_ms");
     let queue_timeout_minutes = action.input_u64("queue_timeout").unwrap_or(0);
+    let trigger = str_field(action, "trigger");
 
     // The tool validates shape only; the host parses `at` with its clock.
     match mode.as_str() {
         "once" => {
+            if !trigger.is_empty() {
+                return failed("trigger_requires_trigger_mode");
+            }
             if interval_ms.is_some() {
                 return failed("interval_requires_repeat");
             }
@@ -51,6 +55,9 @@ fn execute_new(
             }
         }
         "repeat" => {
+            if !trigger.is_empty() {
+                return failed("trigger_requires_trigger_mode");
+            }
             if interval_ms.is_none() {
                 return failed("interval_required");
             }
@@ -64,6 +71,14 @@ fn execute_new(
                 return failed("after_ms_invalid");
             }
         }
+        "trigger" => {
+            if !matches!(trigger.as_str(), "session_idle" | "after_compression") {
+                return failed("trigger_invalid");
+            }
+            if after_ms.is_some() || !at.is_empty() || interval_ms.is_some() {
+                return failed("schedule_not_allowed_for_trigger");
+            }
+        }
         _ => return failed("mode_invalid"),
     }
 
@@ -75,6 +90,11 @@ fn execute_new(
         after_ms,
         at: if at.is_empty() { None } else { Some(at) },
         interval_ms,
+        trigger: if trigger.is_empty() {
+            None
+        } else {
+            Some(trigger)
+        },
         queue_timeout_minutes,
         created_by: "model".to_string(),
     };
@@ -94,13 +114,19 @@ fn execute_new(
                 added.name,
                 added.mode,
                 added.prompt,
-                if added.queue_timeout_minutes > 0 {
-                    format!(
-                        " Queue delivery: when the session is busy at fire time the prompt waits in the session queue for up to {} minute(s), then is delivered directly",
-                        added.queue_timeout_minutes
-                    )
-                } else {
-                    String::new()
+                match added.trigger.as_deref() {
+                    Some("session_idle") => " It stays armed and fires every time a turn ends through task_finished; the fired turn itself ends that way too, so the prompt must delete this timer once done or keep each firing bounded.".to_string(),
+                    Some("after_compression") => " It stays armed and fires every time this session's context compression completes; the fired turn itself can compress, so the prompt must delete this timer once done or keep each firing bounded.".to_string(),
+                    _ => {
+                        if added.queue_timeout_minutes > 0 {
+                            format!(
+                                " Queue delivery: when the session is busy at fire time the prompt waits in the session queue for up to {} minute(s), then is delivered directly",
+                                added.queue_timeout_minutes
+                            )
+                        } else {
+                            String::new()
+                        }
+                    }
                 },
                 core.timers().len()
             )))

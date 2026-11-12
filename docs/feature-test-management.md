@@ -910,6 +910,17 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试：timer-ui-acceptance e2e 浏览器驱动新增原生对话框接管（`Page.javascriptDialogOpening` → `handleJavaScriptDialog`，闭包开关控制接受/取消、记录文案）——验证「取消：定时器保留且不产生 timer_delete 命令、文案点名 timer」与「确认：条目移除且命令送达」，1440/390 × 明暗全过。示意演示页删除同步加同款确认。
 - 验证：vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 已重建。
 
+## 2026-11 Timer 触发式模式（session_idle / after_compression）
+
+- 触发背景：用户要求在时间型（once/repeat）之外增加事件驱动触发：`session_idle`＝模型以 task_finished 正常收尾后（取消/失败不触发），`after_compression`＝本会话主上下文压缩完成后（子 worker 压缩不触发）；触发后 prompt 作为输入进入上下文。
+- 语义：`TimerSpec.trigger: Option<String>`（serde default 兼容旧 timers.json），`mode="trigger"` 仅允许 `trigger ∈ {session_idle, after_compression}` 且禁止 after_ms/at/interval_ms；触发式 timer 永久布防（next_fire_ms=u64::MAX，墙钟调度器排除），每次事件投递一次（沿用各自 queue_timeout 与既有投递路径），仅显式删除移除。工具/宿主/命令三处一致校验：`trigger_invalid` / `schedule_not_allowed_for_trigger` / `trigger_requires_trigger_mode`。
+- Core：timer 工具 op=new 支持 mode/trigger，成功消息写明事件语义与自唤醒循环警告；timer.yaml schema/描述/示例同步（example_json 必须单个 JSON 值）。`active_timers_confirmation_line` 以 `[名|trigger|model]` 呈现。
+- Host：TurnFinished arm 在 `finished_by_task_summary` 时 fire `session_idle`；Topics arm 对主 worker 的 `core.context.compress phase=completed` fire `after_compression`；`fire_trigger_timers` 复用 `deliver_timer_fire`，投递成功仅记 last_fired_ms 保持布防，失败按既有语义 park。timer_create/timer_update 命令与 `validate_user_timer_input`/`create_session_timer`/`update_session_timer` 全链透传 trigger，schedule 整体替换语义覆盖 trigger。
+- 已知边界（文档+工具消息明示）：session_idle 存在自唤醒循环——被触发回合自己的收尾（或压缩）会再次命中同一事件；prompt 必须 del 定时器或保证有界动作。模型删除用户创建 timer 时 Host 合并的竞态保护（created_by=="user" 永不被 Core 集合剔除）意味着删除只作用于 Core 投影，用户仍需面板删除——既有语义未改。
+- Web：TimerInfo/timer_create/timer_update 增 trigger 字段；面板创建与编辑表单支持「触发式」模式（事件选择下拉，隐藏日历字段，`timerToEditForm` 正确回填 trigger 不再折叠为 once）；列表行显示模式/事件与「布防中：事件发生即触发」（u64::MAX 不再渲染为时间）；tool_presentation 新增 `new_trigger`（白名单+严格校验+非法回退）；TimerInvocation 以「触发式+事件」渲染；i18n zh/en。
+- 测试看护：agent_core 工具测试 +2（事件校验矩阵、布防/确认行）；web_host_tests +9（输入校验、事件化调度与 update 清除、命令线格式含 trigger、事件选择与 armed 保持、真实 worker session_idle 端到端、取消不触发、真实压缩主题触发、子 worker 不触发、fire_due 排除）；tool_presentation.test +1 组与 4 条非法输入。共 timem lib 528、agent_core lib timer 12、vitest 967。浏览器 `timer-ui-acceptance` 扩展触发式场景：表单交互（事件下拉、隐藏日历字段）、timer_create 载荷断言（mode/trigger、无日历字段）、条目渲染与确认删除清理；delete 段断言改用 timer_delete 计数基线以容忍前置清理命令。
+- 验证：cargo fmt/clippy/architecture_guard、timem --lib 全量、agent_core timer、tsc+pnpm build、vitest 967 全绿；dist 重建一致；浏览器 timer-ui-acceptance 6 视口/主题全绿；`git diff --check` 通过。
+
 ## 2026-11 测试基建平台对称加固与 catalog e2e 断言链修复
 
 - 触发背景：macOS 把关暴露三类平台/环境条件型测试缺陷（WS 帧 64KiB 编码、Chrome 发现路径、宿主代理劫持），Linux 侧对称排查加固。

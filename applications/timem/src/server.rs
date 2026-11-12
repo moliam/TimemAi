@@ -1527,6 +1527,9 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
+        /// Event kind for mode "trigger": session_idle | after_compression.
+        #[serde(default)]
+        trigger: Option<String>,
         #[serde(default)]
         queue_timeout_minutes: u64,
     },
@@ -1553,6 +1556,9 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
+        /// Event kind for mode "trigger": session_idle | after_compression.
+        #[serde(default)]
+        trigger: Option<String>,
         #[serde(default)]
         queue_timeout_minutes: Option<u64>,
     },
@@ -4537,6 +4543,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
+            trigger,
             queue_timeout_minutes,
         } => {
             create_session_timer(
@@ -4548,6 +4555,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
+                trigger,
                 queue_timeout_minutes,
             )?;
         }
@@ -4617,6 +4625,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
+            trigger,
             queue_timeout_minutes,
         } => {
             update_session_timer(
@@ -4629,6 +4638,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
+                trigger,
                 queue_timeout_minutes,
             )?;
         }
@@ -8945,6 +8955,12 @@ fn load_session_timers(state: &AppState, session_id: &str) -> Vec<WebTimer> {
 /// Concrete first-fire instant from a spec. The Host owns the clock, so the
 /// ISO `at` string is parsed here (chrono), never inside Core.
 fn compute_next_fire_ms(spec: &TimerSpec, now_ms_value: u128) -> Result<u64, String> {
+    if spec.mode == "trigger" {
+        // Trigger timers fire from system events, never from the wall clock.
+        // The far-future value keeps the persisted shape intact while making
+        // the time-based scheduler a no-op for them.
+        return Ok(u64::MAX);
+    }
     if let Some(after_ms) = spec.after_ms {
         return Ok(now_ms_value as u64 + after_ms);
     }
@@ -9126,6 +9142,7 @@ fn validate_user_timer_input(
     after_ms: Option<u64>,
     at: Option<&str>,
     interval_ms: Option<u64>,
+    trigger: Option<&str>,
 ) -> Result<(), String> {
     match mode {
         "once" => {
@@ -9141,7 +9158,22 @@ fn validate_user_timer_input(
                 return Err("interval_invalid".to_string());
             }
         }
+        "trigger" => {
+            // Event-driven timers carry no calendar; the event kind is the
+            // whole schedule and must be a known event.
+            match trigger {
+                Some("session_idle") | Some("after_compression") => {}
+                _ => return Err("trigger_invalid".to_string()),
+            }
+            if after_ms.is_some() || at.is_some() || interval_ms.is_some() {
+                return Err("schedule_not_allowed_for_trigger".to_string());
+            }
+            return Ok(());
+        }
         _ => return Err("mode_invalid".to_string()),
+    }
+    if trigger.is_some() {
+        return Err("trigger_requires_trigger_mode".to_string());
     }
     if after_ms.is_some() == at.is_some() {
         return Err("schedule_invalid".to_string());
@@ -9162,6 +9194,7 @@ fn create_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
+    trigger: Option<String>,
     queue_timeout_minutes: u64,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
@@ -9172,7 +9205,16 @@ fn create_session_timer(
     let at = at
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    validate_user_timer_input(&mode, after_ms, at.as_deref(), interval_ms)?;
+    let trigger = trigger
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_user_timer_input(
+        &mode,
+        after_ms,
+        at.as_deref(),
+        interval_ms,
+        trigger.as_deref(),
+    )?;
     let now = now_ms();
     let mut spec = TimerSpec {
         timer_id: unique_web_id("timer"),
@@ -9185,6 +9227,7 @@ fn create_session_timer(
         after_ms,
         at,
         interval_ms,
+        trigger,
         queue_timeout_minutes,
         created_by: "user".to_string(),
     };
@@ -9285,7 +9328,7 @@ fn toggle_session_timer(
 }
 
 /// Edits keep unspecified fields untouched, so a prompt-only client keeps the
-/// old contract. Providing any schedule field (mode/after_ms/at/interval_ms)
+/// old contract. Providing any schedule field (mode/after_ms/at/interval_ms/trigger)
 /// replaces the whole schedule: omitted members are cleared, the combined
 /// input is validated before anything mutates, and the next fire is
 /// recomputed from now. Name and delivery changes never touch the calendar;
@@ -9302,6 +9345,7 @@ fn update_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
+    trigger: Option<String>,
     queue_timeout_minutes: Option<u64>,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
@@ -9311,9 +9355,15 @@ fn update_session_timer(
     if prompt.len() > 8000 {
         return Err("timer_prompt_too_long".to_string());
     }
-    let schedule_update =
-        mode.is_some() || after_ms.is_some() || at.is_some() || interval_ms.is_some();
+    let schedule_update = mode.is_some()
+        || after_ms.is_some()
+        || at.is_some()
+        || interval_ms.is_some()
+        || trigger.is_some();
     let at = at
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let trigger = trigger
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     {
@@ -9346,7 +9396,13 @@ fn update_session_timer(
         if schedule_update {
             // Validate before mutating so a rejected edit leaves no partial
             // in-memory change behind.
-            validate_user_timer_input(&new_mode, after_ms, at.as_deref(), interval_ms)?;
+            validate_user_timer_input(
+                &new_mode,
+                after_ms,
+                at.as_deref(),
+                interval_ms,
+                trigger.as_deref(),
+            )?;
         }
         let mut changed = false;
         if timer.spec.prompt != prompt {
@@ -9369,12 +9425,14 @@ fn update_session_timer(
             && (timer.spec.mode != new_mode
                 || timer.spec.after_ms != after_ms
                 || timer.spec.at != at
-                || timer.spec.interval_ms != interval_ms)
+                || timer.spec.interval_ms != interval_ms
+                || timer.spec.trigger != trigger)
         {
             timer.spec.mode = new_mode;
             timer.spec.after_ms = after_ms;
             timer.spec.at = at;
             timer.spec.interval_ms = interval_ms;
+            timer.spec.trigger = trigger;
             timer.next_fire_ms = compute_next_fire_ms(&timer.spec, now_ms())?;
             changed = true;
         }
@@ -9387,6 +9445,73 @@ fn update_session_timer(
     publish_timer_topic_notice(state, session_id, "updated");
     publish_timers_updated(state, session_id);
     Ok(())
+}
+
+/// Fires every armed trigger timer matching `trigger` right now. Trigger
+/// timers stay armed: the next occurrence of the event fires them again, so
+/// only an explicit delete (or session deletion) removes them. A failed
+/// delivery parks the timer exactly like the wall-clock scheduler does.
+fn fire_trigger_timers(state: &AppState, session_id: &str, trigger: &str) {
+    let due: Vec<(String, String, u64)> = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        let Some(session) = sessions.get(session_id) else {
+            return;
+        };
+        session
+            .timers
+            .iter()
+            .filter(|timer| {
+                timer.enabled
+                    && timer.spec.mode == "trigger"
+                    && timer.spec.trigger.as_deref() == Some(trigger)
+            })
+            .map(|timer| {
+                (
+                    timer.spec.timer_id.clone(),
+                    format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
+                    timer.spec.queue_timeout_minutes,
+                )
+            })
+            .collect()
+    };
+    if due.is_empty() {
+        return;
+    }
+    for (timer_id, fire_text, queue_timeout_minutes) in due {
+        let delivered = deliver_timer_fire(
+            state,
+            session_id,
+            &timer_id,
+            &fire_text,
+            queue_timeout_minutes,
+        );
+        {
+            let Ok(mut sessions) = state.sessions.lock() else {
+                continue;
+            };
+            let Some(session) = sessions.get_mut(session_id) else {
+                continue;
+            };
+            let Some(index) = session
+                .timers
+                .iter()
+                .position(|timer| timer.spec.timer_id == timer_id)
+            else {
+                continue;
+            };
+            if delivered {
+                session.timers[index].last_fired_ms = Some(now_ms());
+            } else {
+                session.timers[index].enabled = false;
+                session.timers[index].parked_reason = Some("delivery_failed".to_string());
+            }
+        }
+        let _ = persist_timers(state, session_id);
+        sync_worker_timers(state, session_id);
+        publish_timers_updated(state, session_id);
+    }
 }
 
 /// Fires due timers every TIMER_SCHEDULER_INTERVAL. Idle sessions start a
@@ -9423,7 +9548,11 @@ fn fire_due_timers(state: &AppState) {
                 session
                     .timers
                     .iter()
-                    .filter(|timer| timer.enabled && u128::from(timer.next_fire_ms) <= now)
+                    .filter(|timer| {
+                        timer.enabled
+                            && timer.spec.mode != "trigger"
+                            && u128::from(timer.next_fire_ms) <= now
+                    })
                     .map(|timer| {
                         (
                             session.session_id.clone(),
@@ -17798,6 +17927,15 @@ fn handle_scoped_worker_event(
         }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
+                // The session's primary context compression just completed:
+                // this is the after_compression trigger boundary. Subworker
+                // contexts compress independently and must not fire it.
+                if event.topic.name == CORE_TOPIC_CONTEXT_COMPRESS
+                    && event.payload.get("phase").and_then(Value::as_str) == Some("completed")
+                    && is_primary_worker(state, session_id, worker_id)
+                {
+                    fire_trigger_timers(state, session_id, "after_compression");
+                }
                 if event.topic.name == CORE_TOPIC_MODEL_REPAIR {
                     if let Some(issue) = event.payload.get("issue").and_then(Value::as_str) {
                         if let Some(debug) = state.debug.as_ref() {
@@ -18555,6 +18693,14 @@ fn handle_scoped_worker_event(
                 || resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
             if priority_handoff_ready {
                 dispatch_next_turn_intent_if_ready(state, session_id);
+            }
+            // The model ended the turn through task_finished: this is the
+            // session_idle trigger boundary. Fires nothing unless an armed
+            // session_idle trigger timer exists; delivery rides the normal
+            // timer path (new turn when idle, supplement when a queued intent
+            // already opened the next turn).
+            if finished_by_task_summary {
+                fire_trigger_timers(state, session_id, "session_idle");
             }
         }
         CoreSessionWorkerEvent::WorkerStopped => {

@@ -20229,6 +20229,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
             after_ms: Some(1000),
             at: None,
             interval_ms: if mode == "repeat" { Some(60_000) } else { None },
+            trigger: None,
             queue_timeout_minutes: u64::MAX,
             created_by: "user".to_string(),
         },
@@ -20250,6 +20251,7 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
         after_ms: Some(1500),
         at: None,
         interval_ms: None,
+        trigger: None,
         queue_timeout_minutes: 0,
         created_by: "user".into(),
     };
@@ -20273,35 +20275,626 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
 
 #[test]
 fn web_timer_user_input_validation() {
-    assert!(validate_user_timer_input("once", Some(1000), None, None).is_ok());
-    assert!(validate_user_timer_input("once", None, Some("2026-01-01T00:00:00Z"), None).is_ok());
+    assert!(validate_user_timer_input("once", Some(1000), None, None, None).is_ok());
     assert!(
-        validate_user_timer_input("once", Some(1000), None, Some(50))
+        validate_user_timer_input("once", None, Some("2026-01-01T00:00:00Z"), None, None).is_ok()
+    );
+    assert!(
+        validate_user_timer_input("once", Some(1000), None, Some(50), None)
             .unwrap_err()
             .contains("interval_requires_repeat")
     );
-    assert!(validate_user_timer_input("repeat", Some(1000), None, None)
-        .unwrap_err()
-        .contains("interval_required"));
     assert!(
-        validate_user_timer_input("repeat", Some(1000), None, Some(0))
+        validate_user_timer_input("repeat", Some(1000), None, None, None)
+            .unwrap_err()
+            .contains("interval_required")
+    );
+    assert!(
+        validate_user_timer_input("repeat", Some(1000), None, Some(0), None)
             .unwrap_err()
             .contains("interval_invalid")
     );
-    assert!(validate_user_timer_input("hourly", Some(1000), None, None)
-        .unwrap_err()
-        .contains("mode_invalid"));
-    assert!(validate_user_timer_input("once", None, None, None)
+    assert!(
+        validate_user_timer_input("hourly", Some(1000), None, None, None)
+            .unwrap_err()
+            .contains("mode_invalid")
+    );
+    assert!(validate_user_timer_input("once", None, None, None, None)
         .unwrap_err()
         .contains("schedule_invalid"));
-    assert!(
-        validate_user_timer_input("once", Some(1000), Some("2026-01-01T00:00:00Z"), None)
-            .unwrap_err()
-            .contains("schedule_invalid")
-    );
-    assert!(validate_user_timer_input("once", Some(0), None, None)
+    assert!(validate_user_timer_input(
+        "once",
+        Some(1000),
+        Some("2026-01-01T00:00:00Z"),
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("schedule_invalid"));
+    assert!(validate_user_timer_input("once", Some(0), None, None, None)
         .unwrap_err()
         .contains("after_ms_invalid"));
+}
+
+#[test]
+fn web_timer_trigger_input_validation() {
+    // Valid event-driven specs.
+    assert!(validate_user_timer_input("trigger", None, None, None, Some("session_idle")).is_ok());
+    assert!(
+        validate_user_timer_input("trigger", None, None, None, Some("after_compression")).is_ok()
+    );
+    // The event kind is mandatory and must be a known event.
+    assert!(validate_user_timer_input("trigger", None, None, None, None)
+        .unwrap_err()
+        .contains("trigger_invalid"));
+    assert!(
+        validate_user_timer_input("trigger", None, None, None, Some("whenever"))
+            .unwrap_err()
+            .contains("trigger_invalid")
+    );
+    // Trigger timers carry no calendar.
+    assert!(
+        validate_user_timer_input("trigger", Some(1000), None, None, Some("session_idle"))
+            .unwrap_err()
+            .contains("schedule_not_allowed_for_trigger")
+    );
+    assert!(validate_user_timer_input(
+        "trigger",
+        None,
+        Some("2030-01-01T00:00:00Z"),
+        None,
+        Some("session_idle")
+    )
+    .unwrap_err()
+    .contains("schedule_not_allowed_for_trigger"));
+    assert!(
+        validate_user_timer_input("trigger", None, None, Some(50), Some("session_idle"))
+            .unwrap_err()
+            .contains("schedule_not_allowed_for_trigger")
+    );
+    // An event kind on a time-based mode is rejected.
+    assert!(
+        validate_user_timer_input("once", Some(1000), None, None, Some("session_idle"))
+            .unwrap_err()
+            .contains("trigger_requires_trigger_mode")
+    );
+    assert!(validate_user_timer_input(
+        "repeat",
+        Some(1000),
+        None,
+        Some(60_000),
+        Some("session_idle")
+    )
+    .unwrap_err()
+    .contains("trigger_requires_trigger_mode"));
+}
+
+#[test]
+fn web_timer_trigger_timer_scheduling_is_event_owned() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("idle-watch".into()),
+        "wake".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("session_idle".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.mode, "trigger");
+        assert_eq!(timer.spec.trigger.as_deref(), Some("session_idle"));
+        assert_eq!(timer.spec.after_ms, None);
+        assert_eq!(timer.spec.at, None);
+        assert_eq!(timer.spec.interval_ms, None);
+        assert_eq!(timer.next_fire_ms, u64::MAX);
+        assert!(timer.enabled);
+    }
+    // compute_next_fire_ms keeps trigger mode permanently non-schedulable.
+    let spec = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .clone();
+    assert_eq!(compute_next_fire_ms(&spec, 1_000).unwrap(), u64::MAX);
+    // The wall-clock scheduler must never fire a trigger timer, even when an
+    // old snapshot or resume path clamped next_fire_ms to the past.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert!(timer.enabled);
+        assert_eq!(timer.last_fired_ms, None);
+        assert_eq!(timer.parked_reason, None);
+    }
+    // A schedule replacement clears the event kind and restores a calendar.
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "wake",
+        None,
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.mode, "once");
+        assert_eq!(timer.spec.trigger, None);
+        assert!(timer.next_fire_ms > now_ms() as u64);
+    }
+    // Deleting a trigger timer works like any other timer.
+    delete_session_timer(&state, "session_a", &timer_id).unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .timers
+        .is_empty());
+}
+
+#[test]
+fn fire_trigger_timers_matches_event_and_parks_failed_delivery() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("idle-watch".into()),
+        "wake".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("session_idle".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("compress-watch".into()),
+        "check".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("after_compression".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    // A disabled timer is invisible to its event: it stays parked-free.
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("idle-off".into()),
+        "quiet".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("session_idle".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    let idle_off_id = state.sessions.lock().unwrap()["session_a"].timers[2]
+        .spec
+        .timer_id
+        .clone();
+    toggle_session_timer(&state, "session_a", &idle_off_id, false).unwrap();
+
+    // A session_idle event selects only the armed session_idle timer: it
+    // fires (delivery is recorded), stays armed for the next occurrence, and
+    // is never parked by a successful delivery.
+    fire_trigger_timers(&state, "session_a", "session_idle");
+    let idle_fired_at = {
+        let sessions = state.sessions.lock().unwrap();
+        let idle = &sessions["session_a"].timers[0];
+        assert!(idle.enabled, "a trigger timer stays armed after firing");
+        assert_eq!(idle.parked_reason, None);
+        assert!(idle.last_fired_ms.is_some(), "the matching timer fired");
+        let compress = &sessions["session_a"].timers[1];
+        assert!(compress.enabled);
+        assert_eq!(compress.last_fired_ms, None);
+        assert_eq!(compress.parked_reason, None);
+        let idle_off = &sessions["session_a"].timers[2];
+        assert!(!idle_off.enabled);
+        assert_eq!(idle_off.last_fired_ms, None);
+        assert_eq!(idle_off.parked_reason, None);
+        idle.last_fired_ms
+    };
+    // An after_compression event fires only its own timer; the session_idle
+    // timer keeps its fire history and stays armed for the next idle event.
+    fire_trigger_timers(&state, "session_a", "after_compression");
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let idle = &sessions["session_a"].timers[0];
+        assert!(idle.enabled);
+        assert_eq!(idle.last_fired_ms, idle_fired_at);
+        let compress = &sessions["session_a"].timers[1];
+        assert!(compress.enabled);
+        assert!(compress.last_fired_ms.is_some());
+        assert_eq!(compress.parked_reason, None);
+        let idle_off = &sessions["session_a"].timers[2];
+        assert_eq!(idle_off.last_fired_ms, None);
+    }
+}
+
+#[test]
+fn timer_commands_accept_trigger_fields_on_the_wire() {
+    let state = routing_test_state();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TimerCreate {
+            session_id: "session_a".into(),
+            name: Some("c-watch".into()),
+            prompt: "after every compression, continue the work file".into(),
+            mode: Some("trigger".into()),
+            after_ms: None,
+            at: None,
+            interval_ms: None,
+            trigger: Some("after_compression".into()),
+            queue_timeout_minutes: 0,
+        },
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.mode, "trigger");
+        assert_eq!(timer.spec.trigger.as_deref(), Some("after_compression"));
+    }
+    // A trigger schedule mixed with calendar fields is rejected over the wire.
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TimerCreate {
+            session_id: "session_a".into(),
+            name: Some("bad".into()),
+            prompt: "p".into(),
+            mode: Some("trigger".into()),
+            after_ms: Some(1000),
+            at: None,
+            interval_ms: None,
+            trigger: Some("session_idle".into()),
+            queue_timeout_minutes: 0,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("schedule_not_allowed_for_trigger"),
+        "{error}"
+    );
+    // TimerUpdate can move an existing timer into trigger mode.
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TimerUpdate {
+            session_id: "session_a".into(),
+            timer_id,
+            prompt: "after every compression, continue the work file".into(),
+            name: None,
+            mode: Some("trigger".into()),
+            after_ms: None,
+            at: None,
+            interval_ms: None,
+            trigger: Some("session_idle".into()),
+            queue_timeout_minutes: None,
+        },
+    )
+    .unwrap();
+    let sessions = state.sessions.lock().unwrap();
+    let timer = &sessions["session_a"].timers[0];
+    assert_eq!(timer.spec.mode, "trigger");
+    assert_eq!(timer.spec.trigger.as_deref(), Some("session_idle"));
+    assert_eq!(timer.next_fire_ms, u64::MAX);
+}
+
+fn context_compress_completed_topic(session_id: &str, worker_id: &str) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_CONTEXT_COMPRESS,
+            json!({"name": CORE_TOPIC_CONTEXT_COMPRESS}),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": "completed",
+            "estimated_before_tokens": 200_000_u64,
+            "estimated_after_tokens": 80_000_u64,
+        }),
+    )
+    .with_worker_scope(test_context_id(session_id), worker_id.to_string())
+}
+
+fn primary_worker_id_of(state: &AppState, session_id: &str) -> String {
+    state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone()
+}
+
+fn turn_finished_outcome(summary: &str, finished: bool) -> TurnOutcome {
+    let mut outcome =
+        TurnOutcome::final_response(summary, UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = if finished {
+        Some(agent_core::TurnStopReason::TurnFinished)
+    } else {
+        Some(agent_core::TurnStopReason::CancelledByUser)
+    };
+    outcome
+}
+
+#[test]
+fn real_worker_turn_finished_fires_session_idle_trigger_timer() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        TimerPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+        "idle_trig",
+    );
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("idle-watch".into()),
+        "session idle wake job".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("session_idle".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    // A user turn is in flight when the model ends it through task_finished:
+    // the TurnFinished boundary (dispatched with the real worker scope) must
+    // fire the trigger timer.
+    start_web_turn(&state, &session_id, "long task").unwrap();
+    let worker_id = primary_worker_id_of(&state, &session_id);
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &test_context_id(&session_id),
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: turn_finished_outcome("task_finished summary as final answer", true),
+        },
+    );
+
+    // A session_idle timer stays armed by design (every idle boundary fires
+    // it again), so once the fired turn has run and reached the model the
+    // test deletes the timer - the documented way to end the wake chain.
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session
+                .timers
+                .first()
+                .map(|timer| timer.last_fired_ms.is_some())
+                .unwrap_or(false)
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "timer turn done")
+        },
+        "session_idle-fired turn to finish",
+    );
+    let timer_id = state.sessions.lock().unwrap()[&session_id].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    delete_session_timer(&state, &session_id, &timer_id).unwrap();
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready" && session.timers.is_empty()
+        },
+        "session to settle after the timer is deleted",
+    );
+    let sessions = state.sessions.lock().unwrap();
+    assert!(sessions[&session_id].timers.is_empty());
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt.contains("session idle wake job")),
+        "the trigger prompt must reach the model"
+    );
+}
+
+#[test]
+fn cancelled_turn_does_not_fire_session_idle_trigger_timer() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        TimerPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+        "idle_cancel",
+    );
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("idle-watch".into()),
+        "session idle wake job".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("session_idle".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    start_web_turn(&state, &session_id, "long task").unwrap();
+    handle_worker_event(
+        &state,
+        &session_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: turn_finished_outcome("cancelled run", false),
+        },
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions[&session_id].timers[0];
+        assert!(timer.enabled);
+        assert_eq!(timer.last_fired_ms, None);
+        assert_eq!(timer.parked_reason, None);
+    }
+    assert!(prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn real_worker_compression_completed_fires_after_compression_trigger_timer() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        TimerPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+        "compress_trig",
+    );
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("compress-watch".into()),
+        "post compression continuation job".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("after_compression".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    let worker_id = primary_worker_id_of(&state, &session_id);
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &test_context_id(&session_id),
+        &worker_id,
+        CoreSessionWorkerEvent::Topics(vec![context_compress_completed_topic(
+            &session_id,
+            &worker_id,
+        )]),
+    );
+
+    // The primary worker's compression boundary fires the timer; the fired
+    // turn reaches the model. The test then deletes the timer so no further
+    // compression can re-fire it.
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session
+                .timers
+                .first()
+                .map(|timer| timer.last_fired_ms.is_some())
+                .unwrap_or(false)
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "timer turn done")
+        },
+        "after_compression-fired turn to finish",
+    );
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt.contains("post compression continuation job")),
+        "the trigger prompt must reach the model"
+    );
+    let timer_id = state.sessions.lock().unwrap()[&session_id].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    delete_session_timer(&state, &session_id, &timer_id).unwrap();
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready" && session.timers.is_empty()
+        },
+        "session to settle after the timer is deleted",
+    );
+}
+
+#[test]
+fn child_worker_compression_does_not_fire_after_compression_trigger_timer() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        TimerPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+        "compress_child",
+    );
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("compress-watch".into()),
+        "post compression continuation job".into(),
+        Some("trigger".into()),
+        None,
+        None,
+        None,
+        Some("after_compression".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    let child_worker_id = format!("worker_child_{}", session_id);
+    let topic = context_compress_completed_topic(&session_id, &child_worker_id);
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &test_context_id(&session_id),
+        &child_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![topic]),
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions[&session_id].timers[0];
+        assert!(timer.enabled);
+        assert_eq!(timer.last_fired_ms, None);
+        assert_eq!(timer.parked_reason, None);
+    }
+    assert!(prompts.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -20315,6 +20908,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         "   ".to_string(),
         None,
         Some(1000),
+        None,
         None,
         None,
         0
@@ -20331,6 +20925,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -20342,6 +20937,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         None,
         Some("2030-01-01T00:00:00Z".to_string()),
+        None,
         None,
         u64::MAX,
     )
@@ -20363,6 +20959,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         "dup".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         0
@@ -20388,6 +20985,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         Some(60_000),
         None,
         None,
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -20398,6 +20996,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         "other".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         u64::MAX,
@@ -20415,6 +21014,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         "session_a",
         &timer_id,
         "work2",
+        None,
         None,
         None,
         None,
@@ -20443,6 +21043,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         None,
         None,
         None,
+        None,
     )
     .unwrap_err()
     .contains("name_exists"));
@@ -20460,6 +21061,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         Some(30_000),
         None,
         Some(120_000),
+        None,
         Some(5),
     )
     .unwrap();
@@ -20491,6 +21093,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         None,
         None,
         None,
+        None,
     )
     .unwrap_err()
     .contains("schedule_invalid"));
@@ -20512,6 +21115,7 @@ fn web_timer_toggle_and_delete() {
         "p".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         u64::MAX,
@@ -20569,6 +21173,7 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         after_ms: Some(2000),
         at: None,
         interval_ms: None,
+        trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
     };
@@ -20613,6 +21218,7 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         Some(60_000),
         None,
         None,
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -20625,6 +21231,7 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         "session_a",
         &timer_id,
         "edited prompt",
+        None,
         None,
         None,
         None,
@@ -20648,6 +21255,7 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         after_ms: Some(2000),
         at: None,
         interval_ms: None,
+        trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
     };
@@ -20676,6 +21284,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         "do the thing".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         u64::MAX,
@@ -20711,6 +21320,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         Some(60_000),
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -20763,6 +21373,7 @@ fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
         "deliver me as a turn".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         u64::MAX,
@@ -21012,6 +21623,7 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
         Some(1000),
         None,
         None,
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -21108,6 +21720,7 @@ fn real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary(
         "deliver at deadline".into(),
         None,
         Some(60_000),
+        None,
         None,
         None,
         1,
@@ -21316,6 +21929,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         Some(1000),
         None,
         None,
+        None,
         u64::MAX,
     )
     .unwrap();
@@ -21339,6 +21953,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         None,
         None,
         None,
+        None,
         None
     )
     .unwrap_err()
@@ -21349,6 +21964,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         "session_a",
         &timer_id,
         &"x".repeat(8001),
+        None,
         None,
         None,
         None,
@@ -21369,12 +21985,13 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         None,
         None,
         None,
+        None,
         None
     )
     .unwrap_err()
     .contains("timer_not_found"));
     assert!(update_session_timer(
-        &state, "missing", &timer_id, "p", None, None, None, None, None, None
+        &state, "missing", &timer_id, "p", None, None, None, None, None, None, None,
     )
     .unwrap_err()
     .contains("session_not_found"));
@@ -21384,6 +22001,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         "session_a",
         &timer_id,
         "  revised prompt  ",
+        None,
         None,
         None,
         None,
@@ -21405,6 +22023,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         "session_a",
         &timer_id,
         "revised prompt",
+        None,
         None,
         None,
         None,
@@ -21433,6 +22052,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         "urgent job".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         0,
@@ -21479,6 +22099,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         "patient job".into(),
         None,
         Some(1000),
+        None,
         None,
         None,
         u64::MAX,

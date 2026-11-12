@@ -106,9 +106,10 @@ export function isMemorySearch(action: string, input: unknown): boolean {
 export type TimerPresentation =
   | { kind: "new_once"; name?: string; prompt: string; afterMs?: number; at?: string }
   | { kind: "new_repeat"; name?: string; prompt: string; intervalMs: number; afterMs?: number; at?: string }
+  | { kind: "new_trigger"; name?: string; prompt: string; triggerEvent: "session_idle" | "after_compression" }
   | { kind: "delete"; name: string };
 
-const TIMER_KNOWN = new Set(["op", "prompt", "name", "mode", "after_ms", "at", "interval_ms"]);
+const TIMER_KNOWN = new Set(["op", "prompt", "name", "mode", "trigger", "after_ms", "at", "interval_ms"]);
 
 export function timerPresentation(
   action: string,
@@ -145,8 +146,15 @@ export function timerPresentation(
     return { kind: "delete", name };
   }
   if (input.op !== "new" || !input.prompt) return;
-  if ((afterMs === undefined) === (at === undefined)) return; // exactly one
   const mode = input.mode === undefined ? "once" : input.mode;
+  if (mode === "trigger") {
+    // Event-driven timers carry no calendar; the event kind is mandatory.
+    if (afterMs !== undefined || at !== undefined || intervalMs !== undefined) return;
+    const triggerEvent = input.trigger;
+    if (triggerEvent !== "session_idle" && triggerEvent !== "after_compression") return;
+    return { kind: "new_trigger", name, prompt: input.prompt, triggerEvent };
+  }
+  if ((afterMs === undefined) === (at === undefined)) return; // exactly one
   if (mode === "once") {
     if (intervalMs !== undefined) return;
     return { kind: "new_once", name, prompt: input.prompt, afterMs, at };

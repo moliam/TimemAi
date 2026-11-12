@@ -589,6 +589,12 @@ pub struct TimerSpec {
     /// Refire period in milliseconds; present only for mode "repeat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
+    /// Event that fires a mode "trigger" timer: "session_idle" (a primary
+    /// turn ended through task_finished) or "after_compression" (the
+    /// session's primary context compression completed). Absent for the
+    /// time-based modes, which forbid it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
     /// Maximum minutes a fired prompt may wait in the session message queue
     /// before being dispatched immediately out of queue order. 0 (also the
     /// serde default): never queue — deliver at once; an active turn

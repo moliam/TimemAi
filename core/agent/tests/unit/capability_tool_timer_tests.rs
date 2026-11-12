@@ -112,6 +112,89 @@ fn timer_new_repeat_with_at_and_interval() {
 }
 
 #[test]
+fn timer_new_trigger_event_kind_is_validated_and_schedule_forbidden() {
+    let (mut core, dir) = setup("trigger_validation");
+    // missing event kind
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "trigger"})
+    )
+    .contains("trigger_invalid"));
+    // unknown event kind
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "whenever"})
+    )
+    .contains("trigger_invalid"));
+    // schedule fields are forbidden in trigger mode
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "after_ms": 1000})
+    )
+    .contains("schedule_not_allowed_for_trigger"));
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "interval_ms": 50})
+    )
+    .contains("schedule_not_allowed_for_trigger"));
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "at": "2030-01-01T00:00:00Z"})
+    )
+    .contains("schedule_not_allowed_for_trigger"));
+    // an event kind on a time-based mode
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "after_ms": 1000, "trigger": "session_idle"})
+    )
+    .contains("trigger_requires_trigger_mode"));
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 5000, "trigger": "session_idle"})
+    )
+    .contains("trigger_requires_trigger_mode"));
+    // nothing was recorded
+    assert!(core.timers().is_empty());
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_new_trigger_stays_armed_event_owned() {
+    let (mut core, dir) = setup("trigger_basic");
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "continue after compression", "mode": "trigger",
+               "trigger": "after_compression", "name": "compress-watch"}),
+    );
+    assert!(!out.contains("error"), "{out}");
+    assert!(out.contains("stays armed"), "{out}");
+    let timers = core.timers();
+    assert_eq!(timers.len(), 1);
+    assert_eq!(timers[0].name, "compress-watch");
+    assert_eq!(timers[0].mode, "trigger");
+    assert_eq!(timers[0].trigger.as_deref(), Some("after_compression"));
+    assert_eq!(timers[0].after_ms, None);
+    assert_eq!(timers[0].at, None);
+    assert_eq!(timers[0].interval_ms, None);
+    assert_eq!(timers[0].created_by, "model");
+    // The confirmation line carries the event-driven mode.
+    let line = core.active_timers_confirmation_line();
+    assert!(line.contains("[compress-watch|trigger|model]"), "{line}");
+    // A second trigger timer with the other event kind.
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "wake when idle", "mode": "trigger", "trigger": "session_idle"}),
+    );
+    assert!(!out.contains("error"), "{out}");
+    let timers = core.timers();
+    assert_eq!(timers.len(), 2);
+    assert_eq!(timers[1].trigger.as_deref(), Some("session_idle"));
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
     let (mut core, dir) = setup("auto_name");
     run(
@@ -301,6 +384,7 @@ fn timer_confirmation_line_marks_created_by() {
         after_ms: Some(5000),
         at: None,
         interval_ms: Some(900000),
+        trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "user".into(),
     };
