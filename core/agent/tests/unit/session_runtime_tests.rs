@@ -9337,6 +9337,43 @@ fn static_runtime_context_is_one_anchor_per_visible_context() {
 }
 
 #[test]
+fn large_instruction_and_work_file_deltas_bypass_the_tool_result_gate() {
+    let dir = tmp_dir("instruction_delta_beyond_tool_budget");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    // Several selected instruction files legitimately exceed the per-tool-output
+    // budget (default 16 KiB, hard cap 30 KiB). The injected delta rides the
+    // plain `runtime_note` kind exactly so the tool-result gate never applies;
+    // its only bounds are the loader's per-file cap and context dedupe.
+    let instruction_filler = "a".repeat(32 * 1024);
+    let work_file_filler = "b".repeat(18 * 1024);
+    let context = format!(
+        "work_directory_instructions:\nThese instructions were loaded from Claude/Codex-compatible instruction files for the current working directory. Follow them while working in that directory.\n\n\
+         [BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\" directory=\"/tmp/project\"]\n{STATIC_INSTRUCTION_MARKER}\n{instruction_filler}\nINSTRUCTION_TAIL_MARKER_9q\n[END PROJECT INSTRUCTION file=\"AGENTS.md\"]\n\n\
+         Session work file: /mem/sessions/large/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability.\n\n\
+         [BEGIN SESSION INSTRUCTION file=\"/mem/sessions/large/Timem.md\"]\n{STATIC_WORK_FILE_MARKER}\n{work_file_filler}\nWORK_FILE_TAIL_MARKER_8w\n[END SESSION INSTRUCTION]"
+    );
+    let prompt = begin_turn_prompt(&mut core, "first", &context);
+    assert!(
+        prompt.contains(&instruction_filler),
+        "instruction content beyond the tool-output budget must reach the model"
+    );
+    assert!(
+        prompt.contains("INSTRUCTION_TAIL_MARKER_9q"),
+        "the instruction delta tail must not be clipped"
+    );
+    assert!(
+        prompt.contains(&work_file_filler),
+        "session work-file content beyond the tool-output budget must reach the model"
+    );
+    assert!(
+        prompt.contains("WORK_FILE_TAIL_MARKER_8w"),
+        "the session work-file delta tail must not be clipped"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn static_runtime_context_is_reanchored_after_context_clear() {
     let dir = tmp_dir("static_runtime_clear");
     let mut core = test_core("STATIC", test_profile(), &dir);

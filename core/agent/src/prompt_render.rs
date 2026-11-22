@@ -453,7 +453,26 @@ pub(crate) fn append_rendered_deltas_for_mode(
         let mut last_role: Option<VisiblePromptRole> = None;
         let mut last_was_action_result = false;
         let mut last_was_raw_xml = false;
-        for slice in slices {
+        let mut last_component_id = String::new();
+        let mut last_slice_index = 0usize;
+        for (index, slice) in slices.iter().enumerate() {
+            let next_joins = slices.get(index + 1).is_some_and(|next| {
+                !next.component_id.is_empty()
+                    && next.component_id == slice.component_id
+                    && next.slice_index == slice.slice_index + 1
+            });
+            // Slices produced by PROMPT_SLICE_TEXT_LIMIT splitting share the
+            // source component id. Adjacent slices continuing the same
+            // component must reassemble byte-for-byte, so they render without
+            // separators, trim, headings, or re-gating. A hidden slice breaks
+            // the adjacency and forces a fresh slice so a continuation can
+            // never bridge text the model cannot see.
+            let is_continuation = !slice.component_id.is_empty()
+                && slice.slice_index > 0
+                && last_component_id == slice.component_id
+                && last_slice_index + 1 == slice.slice_index;
+            last_component_id = slice.component_id.clone();
+            last_slice_index = slice.slice_index;
             if is_raw_xml_assistant_response(&slice.prompt_type, boundaries) {
                 if let Some(previous_role) = last_role.take() {
                     if let Some(close) =
@@ -491,6 +510,15 @@ pub(crate) fn append_rendered_deltas_for_mode(
                 last_role = Some(role);
                 last_was_action_result = false;
             }
+            if is_continuation {
+                if boundaries.uses_xml_role_elements() {
+                    out.push_str(&escape_xml_text(&slice.text));
+                } else {
+                    out.push_str(&slice.text);
+                }
+                last_was_action_result = is_action_result_prompt_type(&slice.prompt_type);
+                continue;
+            }
             // Semantic input kinds, not provider message roles: native transport
             // uses user messages for synthetic delta separators too.
             if matches!(
@@ -522,13 +550,31 @@ pub(crate) fn append_rendered_deltas_for_mode(
             }
             out.push('\n');
             if is_action_result {
-                out.push_str(truncate_action_result_for_prompt(&slice.text).trim());
+                let piece = truncate_action_result_for_prompt(&slice.text);
+                out.push_str(if next_joins {
+                    piece.as_str()
+                } else {
+                    piece.trim()
+                });
             } else if boundaries.uses_xml_role_elements() {
-                out.push_str(&escape_xml_text(slice.text.trim()));
+                out.push_str(&escape_xml_text(if next_joins {
+                    slice.text.as_str()
+                } else {
+                    slice.text.trim()
+                }));
             } else {
-                out.push_str(slice.text.trim());
+                out.push_str(if next_joins {
+                    slice.text.as_str()
+                } else {
+                    slice.text.trim()
+                });
             }
-            out.push('\n');
+            // A following same-component chunk reattaches verbatim, so this
+            // slice must not leave padding that would split the original
+            // content.
+            if !next_joins {
+                out.push('\n');
+            }
             last_was_action_result = is_action_result;
         }
         if last_was_raw_xml {

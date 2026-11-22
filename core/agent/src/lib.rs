@@ -6396,10 +6396,12 @@ impl AgentCore {
         let delta_id = format!("temp_repair_{}_{}", time_ms, self.repair_attempts);
         let chunks = slice_texts
             .into_iter()
-            .flat_map(|(prompt_type, text)| {
+            .enumerate()
+            .flat_map(|(source_index, (prompt_type, text))| {
+                let component_id = format!("temp_component_{}", source_index + 1);
                 split_prompt_component_text(&prompt_type, &text, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
-                    .map(move |chunk| (prompt_type.clone(), chunk))
+                    .map(move |chunk| (component_id.clone(), prompt_type.clone(), chunk))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -6407,7 +6409,7 @@ impl AgentCore {
         let slices = chunks
             .into_iter()
             .enumerate()
-            .map(|(idx, (prompt_type, text))| {
+            .map(|(idx, (component_id, prompt_type, text))| {
                 let slice_index = idx + 1;
                 PromptSlice {
                     delta_id: delta_id.clone(),
@@ -6416,7 +6418,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
-                    component_id: format!("temp_component_{slice_index}"),
+                    component_id,
                     prompt_type,
                     time_ms,
                     text,
@@ -6592,6 +6594,12 @@ Runtime tool_call ids:",
         // previously rode the result_of_llm_action fallback and are not all
         // bounded upstream (host-provided supplement context). Keep the byte
         // gate for them so the move cannot regress unbounded ingress.
+        // The host-injected supporting context (project instruction files and
+        // the session work file) rides the plain `runtime_note` kind on
+        // purpose: it is model-facing guidance, not tool output. Its bounds
+        // are the loader's per-file content cap and context dedupe — never
+        // this per-tool-output byte gate. Oversized components split into
+        // transport chunks that render contiguously byte-for-byte.
         if (is_result_class || prompt_components::is_runtime_sideband_kind(&kind))
             && !prompt_render::is_structured_action_result_envelope(&content)
         {

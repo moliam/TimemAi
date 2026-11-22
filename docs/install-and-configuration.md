@@ -405,7 +405,10 @@ instruction home for sandboxes and containers. In the Web header popover
 whether it stays resident in context; the `Timem.md` session work file is
 always resident. Selections are per-session, validated against the current
 candidate set (unknown paths fail closed), persisted with the session, and each
-instruction file body is capped at 64 KiB.
+instruction file body is capped at 64 KiB. The combined injected delta travels
+as a dedicated runtime note and deliberately bypasses the per-tool-output byte
+budget, so selected files keep reaching the model in full; the per-file cap and
+context dedupe are its only bounds.
 
 `TIMEM_BASH_APPROVAL` controls model-requested command approval:
 
