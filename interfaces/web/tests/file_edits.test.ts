@@ -33,6 +33,39 @@ describe("fileEditsPresentation", () => {
     expect(parsed![0].diff).toBeNull();
   });
 
+  it("parses missing-skip entries and hides capture-side no-change cards", () => {
+    const skipped = (reason: string, index: number) => ({
+      path: `f-${index}-${reason}.txt`,
+      op: "skipped",
+      diff: null,
+      added_lines: 0,
+      removed_lines: 0,
+      truncated: false,
+      skip_reason: reason,
+    });
+    // The strict whitelist must accept "missing" (an unknown reason would
+    // reject the whole payload), and the card itself stays hidden.
+    const parsed = fileEditsPresentation([skipped("missing", 0), validEntry]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed![0].op).toBe("modified");
+
+    const filtered = fileEditsPresentation([
+      { path: "same.txt", op: "unchanged", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: null },
+      skipped("missing", 1),
+      skipped("unreadable", 2),
+      skipped("not_captured", 3),
+      skipped("budget_exhausted", 4),
+      skipped("binary", 5),
+      skipped("too_large", 6),
+      validEntry,
+    ]);
+    expect(filtered!.map(item => item.skip_reason ?? item.op)).toEqual([
+      "binary",
+      "too_large",
+      "modified",
+    ]);
+  });
+
   it("rejects malformed payloads", () => {
     expect(fileEditsPresentation(undefined)).toBeUndefined();
     expect(fileEditsPresentation([])).toBeUndefined();
@@ -94,6 +127,13 @@ describe("file edits surfaces", () => {
     const gutter = styles.slice(gutterStart, gutterEnd + 1);
     expect(gutter).toContain("min-width: max-content;");
     expect(gutter).toContain("white-space: nowrap;");
+  });
+
+  it("keeps the diff tint across the full horizontal scroll range", () => {
+    const start = styles.indexOf(".file-edit-diff-table {");
+    const block = styles.slice(start, styles.indexOf("}", start) + 1);
+    expect(block).toContain("width: max-content;");
+    expect(block).toContain("min-width: 100%;");
   });
 
   it("keeps i18n catalogs in sync for both locales", () => {

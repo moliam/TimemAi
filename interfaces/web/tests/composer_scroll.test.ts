@@ -47,6 +47,16 @@ describe("fixed composer scroll ownership", () => {
     expect(styles).not.toMatch(/\.queued-message-list\.(?:collapsed|expanded)/);
   });
 
+  it("widens the chat measure and keeps composer, cwd, and turn widths in step", () => {
+    expect(styles).toMatch(/\.chat-scroll \{[^}]*max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\)/);
+    expect(styles).toMatch(/\.chat-scroll \{[^}]*max\(26px, calc\(\(100% - 980px\)\/2 \+ 22px\)\)/);
+    expect(styles).toMatch(/\.composer-wrap \{[^}]*max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\)/);
+    expect(styles).toMatch(/\.message \{[^}]*max-width: 900px;/);
+    expect(styles).toMatch(/\.working-indicator \{[^}]*max-width: 900px;/);
+    expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: 940px;/);
+    expect(styles).toMatch(/\.composer-cwd \{[^}]*max-width: 876px;/);
+  });
+
   it("uses the formal interface font for the CWD and debug paths", () => {
     expect(source).toContain('className="composer-cwd-inline"');
     expect(source).toContain('className="composer-cwd-inline composer-debug-inline composer-debug-link"');
