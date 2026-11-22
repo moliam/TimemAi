@@ -1161,6 +1161,13 @@ fn supervise_shell_job(
             thread::sleep(Duration::from_millis(20));
         }
     }
+    // A tool inside this command (for example `systemd-run --scope` or
+    // `script`) may have moved the terminal's foreground group into the job's
+    // process group. Once the job tree is empty that group is dead, and
+    // terminal Ctrl+C (SIGINT to the foreground group) would be dropped by
+    // the kernel. Hand the foreground back to the host process group; this is
+    // a no-op when stdin is not a terminal or the host already owns it.
+    report_terminal_foreground_restore();
     // Drain threads run concurrently while descendants are alive, preventing
     // pipe backpressure. Join only after kernel ownership reports no members.
     let capture_complete = join_output_drains(stdout_drain, stderr_drain);
@@ -2796,13 +2803,23 @@ pub fn execute_one_bash_structured(
     timeout_ms: i64,
     runtime: &mut dyn ActionRuntime,
 ) -> BashCommandOutput {
-    execute_one_bash_structured_with_prompt_after(
+    let output = execute_one_bash_structured_with_prompt_after(
         command,
         cwd,
         timeout_ms,
         runtime,
         LONG_RUNNING_COMMAND_PROMPT_AFTER,
-    )
+    );
+    report_terminal_foreground_restore();
+    output
+}
+
+fn report_terminal_foreground_restore() {
+    if let crate::os::TerminalForegroundRestore::Failed { error } =
+        crate::os::restore_terminal_foreground_to_current_group()
+    {
+        eprintln!("[shell_jobs] could not restore the terminal foreground group: {error}");
+    }
 }
 
 fn execute_one_bash_structured_with_prompt_after(

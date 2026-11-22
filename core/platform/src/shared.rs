@@ -457,6 +457,60 @@ fn parent_belongs_to_this_process(ppid: u32, self_pid: u32) -> bool {
         == Some(self_pid)
 }
 
+pub(super) fn terminal_foreground_pgid() -> Option<u32> {
+    if unsafe { libc::isatty(0) } != 1 {
+        return None;
+    }
+    let pgid = unsafe { libc::tcgetpgrp(0) };
+    (pgid >= 0).then_some(pgid as u32)
+}
+
+pub(super) fn restore_terminal_foreground_to_current_group() -> crate::api::TerminalForegroundRestore
+{
+    use crate::api::TerminalForegroundRestore;
+    if unsafe { libc::isatty(0) } != 1 {
+        return TerminalForegroundRestore::NotApplicable;
+    }
+    let foreground = unsafe { libc::tcgetpgrp(0) };
+    if foreground < 0 {
+        return TerminalForegroundRestore::Failed {
+            error: std::io::Error::last_os_error().to_string(),
+        };
+    }
+    let own = unsafe { libc::getpgrp() };
+    if foreground == own {
+        return TerminalForegroundRestore::NotApplicable;
+    }
+    // tcsetpgrp from a background process group raises SIGTTOU, whose default
+    // action stops the caller. Block it around the change; the previous mask
+    // is restored afterwards so unrelated handlers stay unaffected.
+    let change = with_sigttou_blocked(|| unsafe { libc::tcsetpgrp(0, own) });
+    if change == 0 {
+        TerminalForegroundRestore::Restored {
+            from_pgid: foreground as u32,
+        }
+    } else {
+        TerminalForegroundRestore::Failed {
+            error: std::io::Error::last_os_error().to_string(),
+        }
+    }
+}
+
+fn with_sigttou_blocked<T>(action: impl FnOnce() -> T) -> T {
+    unsafe {
+        let mut block: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut block);
+        libc::sigaddset(&mut block, libc::SIGTTOU);
+        let mut previous: libc::sigset_t = std::mem::zeroed();
+        let blocked = libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut previous) == 0;
+        let outcome = action();
+        if blocked {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        }
+        outcome
+    }
+}
+
 pub(super) fn configure_child_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);

@@ -85,6 +85,19 @@ pub fn run_web(args: Vec<String>) {
     // Best-effort orphan safety net. Exact ownership still requires a writable,
     // delegated resource-control subtree (cgroup v2 on Linux); unsupported
     // environments use process groups.
+    // A scope relocation, an inherited terminal, or a previously crashed
+    // instance can leave the terminal's foreground group owned by a dead
+    // process group; terminal Ctrl+C would never reach this process. Reclaim
+    // it once at startup so the advertised "Stop with Ctrl+C" contract holds.
+    match agent_core::os::restore_terminal_foreground_to_current_group() {
+        agent_core::os::TerminalForegroundRestore::Restored { from_pgid } => eprintln!(
+            "[timem] reclaimed the terminal foreground group from process group {from_pgid}; Ctrl+C reaches this process again"
+        ),
+        agent_core::os::TerminalForegroundRestore::Failed { error } => eprintln!(
+            "[timem] could not restore the terminal foreground group: {error}"
+        ),
+        agent_core::os::TerminalForegroundRestore::NotApplicable => {}
+    }
     let _process_safety_net = agent_core::os::ensure_process_safety_net();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,

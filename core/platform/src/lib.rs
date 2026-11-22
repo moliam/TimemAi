@@ -26,6 +26,11 @@ pub use process_job::*;
 mod tests;
 
 #[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/unit/terminal_foreground_tests.rs"]
+mod terminal_foreground_tests;
+
+#[cfg(test)]
 pub(crate) mod test_support {
     // Multi-threaded test binaries spawn real children concurrently. A child
     // in its pre-execve window briefly holds a copy of the whole fd table, so

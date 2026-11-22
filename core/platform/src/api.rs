@@ -627,6 +627,58 @@ pub fn configure_child_process_group(command: &mut Command) {
     let _ = command;
 }
 
+/// Foreground process group of the controlling terminal on stdin, when
+/// stdin is a terminal.
+pub fn terminal_foreground_pgid() -> Option<u32> {
+    platform_terminal_foreground_pgid()
+}
+
+#[cfg(unix)]
+fn platform_terminal_foreground_pgid() -> Option<u32> {
+    crate::shared::terminal_foreground_pgid()
+}
+
+#[cfg(not(unix))]
+fn platform_terminal_foreground_pgid() -> Option<u32> {
+    None
+}
+
+/// Outcome of [`restore_terminal_foreground_to_current_group`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalForegroundRestore {
+    /// stdin is not a terminal, or the current process group already owns the
+    /// foreground group; nothing needed changing.
+    NotApplicable,
+    /// The terminal's foreground group was moved back to the current process
+    /// group; `from_pgid` names the group that held it before (frequently a
+    /// now-dead command process group).
+    Restored { from_pgid: u32 },
+    /// The terminal rejected the change; `error` is the raw OS message.
+    Failed { error: String },
+}
+
+/// Move the controlling terminal's foreground group back to the current
+/// process group. Shell commands run in their own process groups, and tools
+/// such as `systemd-run --scope` or `script` relocate the terminal foreground
+/// group into it; after such a command exits, that group is dead and terminal
+/// Ctrl+C (SIGINT delivered to the foreground group) is dropped by the
+/// kernel. SIGTTOU is blocked for the duration of the change, so a background
+/// caller is neither stopped nor interrupted. Non-unix platforms report
+/// [`TerminalForegroundRestore::NotApplicable`].
+pub fn restore_terminal_foreground_to_current_group() -> TerminalForegroundRestore {
+    platform_restore_terminal_foreground_to_current_group()
+}
+
+#[cfg(unix)]
+fn platform_restore_terminal_foreground_to_current_group() -> TerminalForegroundRestore {
+    crate::shared::restore_terminal_foreground_to_current_group()
+}
+
+#[cfg(not(unix))]
+fn platform_restore_terminal_foreground_to_current_group() -> TerminalForegroundRestore {
+    TerminalForegroundRestore::NotApplicable
+}
+
 pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     return crate::shared::exit_signal(status);

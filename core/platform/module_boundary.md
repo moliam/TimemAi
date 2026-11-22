@@ -5,7 +5,7 @@ low-level process primitives shared across Timem hosts.
 
 ## Layout
 
-- `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling) and instance resource caps (kernel-enforced bounds on how much of the machine's total CPU capacity and total memory the current instance's managed job tree may consume).
+- `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling) and instance resource caps (kernel-enforced bounds on how much of the machine's total CPU capacity and total memory the current instance's managed job tree may consume). It also exposes controlling-terminal foreground observation plus a SIGTTOU-guarded reclaim of the terminal foreground group for the current process group.
 - `src/child_input.rs`: exclusively owned nonblocking child stdin; reports backpressure and errors without choosing deadlines or creating writer threads.
 - `src/child_output.rs`: exclusively owned child stdout/stderr pipes with bounded, interruptible reads; no job attribution or deadline policy.
 - `src/process_job.rs`: platform-neutral per-Job process-management facade and internal backend contract.
