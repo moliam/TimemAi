@@ -2125,6 +2125,7 @@ pub struct AgentCore {
     memo_deleted_this_turn: Option<String>,
     memo_deleted_trailer_shown: bool,
     pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
+    rendered_native_mcp_section: Option<String>,
 }
 impl AgentCore {
     pub fn new(
@@ -2258,6 +2259,7 @@ impl AgentCore {
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
+            rendered_native_mcp_section: None,
         };
         // Runtime startup: seed the disk pressure baseline from the real
         // sample immediately, so the first sampling window after a restart
@@ -2272,6 +2274,10 @@ impl AgentCore {
             && profile.resolved_mode != ToolCallMode::Native
         {
             self.materialize_native_exchanges();
+            // The native summary section rode the pre-materialization request
+            // tail, which the text replay does not preserve; force a fresh
+            // append if native mode returns.
+            self.rendered_native_mcp_section = None;
         }
         self.resolved_tool_call_mode = profile.resolved_mode;
         self.response_protocol = if profile.resolved_mode == ToolCallMode::Native {
@@ -3204,22 +3210,41 @@ impl AgentCore {
         )]);
     }
 
-    fn current_mcp_request_section(&self) -> Option<String> {
+    /// Native-mode compact MCP tool summary list. The full descriptions and
+    /// schemas already travel with the API tool definitions, so this section
+    /// is an in-band index only; `rendered_native_mcp_section` decides when
+    /// it rides a request (see `request_scoped_mcp_section`).
+    fn native_mcp_request_section(&self) -> Option<String> {
+        let summaries = self
+            .capabilities
+            .render_native_mcp_tool_summaries_markdown();
+        if summaries.trim().is_empty() {
+            return None;
+        }
+        Some(format!(
+            "## Current MCP Tools\n\nThese MCP tools are currently available in addition to the built-in tools. Their full descriptions and parameter schemas travel with the API tool definitions.\n\n{summaries}"
+        ))
+    }
+
+    /// The MCP section for one rendered request body. Native mode appends it
+    /// only while the MCP tool set differs from the last delivered request
+    /// (user feedback: the summary list must not re-appear on every round);
+    /// inline protocols ship no separate tool definitions, so their catalog
+    /// keeps following the registry state on every render.
+    fn request_scoped_mcp_section(&self) -> Option<String> {
         if self.resolved_tool_call_mode == ToolCallMode::Native {
-            // Native mode already ships full MCP descriptions and schemas as
-            // API tool definitions. The prompt only adds a compact, per-request
-            // summary list so the model sees which MCP tools exist without
-            // touching the cacheable static prefix.
-            let summaries = self
-                .capabilities
-                .render_native_mcp_tool_summaries_markdown();
-            if summaries.trim().is_empty() {
+            let current = self.native_mcp_request_section();
+            if current == self.rendered_native_mcp_section {
                 return None;
             }
-            return Some(format!(
-                "## Current MCP Tools\n\nThese MCP tools are currently available in addition to the built-in tools. Their full descriptions and parameter schemas travel with the API tool definitions.\n\n{summaries}"
-            ));
+            return current;
         }
+        self.current_mcp_request_section()
+    }
+
+    fn current_mcp_request_section(&self) -> Option<String> {
+        // Inline protocol: the prompt itself carries the MCP catalog, so the
+        // per-request section follows the latest registry state.
         let tools = self
             .capabilities
             .render_mcp_tool_catalog_markdown_for_protocol(self.response_protocol.name());
@@ -3260,7 +3285,7 @@ impl AgentCore {
             self.response_protocol.suite(),
             self.resolved_tool_call_mode,
         );
-        let Some(mcp_section) = self.current_mcp_request_section() else {
+        let Some(mcp_section) = self.request_scoped_mcp_section() else {
             return rendered;
         };
         let (body, trailer) = prompt_render::split_formatted_response_trailer(&rendered);
@@ -4477,7 +4502,7 @@ impl AgentCore {
                 || self.forced_compaction_refusals < MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
             {
                 self.current_round = self.current_round.saturating_sub(1);
-                let mut prompt = self.render_prompt();
+                let mut prompt = self.render_request_prompt();
                 let (body, response_trailer) =
                     prompt_render::split_formatted_response_trailer(&prompt);
                 prompt = body.trim_end().to_string();
@@ -4848,6 +4873,9 @@ impl AgentCore {
             }
         }
         if compacted_successfully {
+            // The compacted request history no longer carries the previously
+            // delivered MCP summary section; re-append the current set once.
+            self.rendered_native_mcp_section = None;
             // A successful compact gets a dedicated assistant checkpoint in both
             // native and protocol tool-call modes. Keep non-native user-visible
             // progress separate so only replacement context receives the summary
@@ -4947,7 +4975,7 @@ impl AgentCore {
                 };
             }
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             };
         }
@@ -4986,7 +5014,7 @@ impl AgentCore {
                     ));
                     self.append_delta_with_action_output_budget(slices);
                     return CoreStep::NeedModel {
-                        prompt: self.render_prompt(),
+                        prompt: self.render_request_prompt(),
                         rounds_remaining: self.remaining_rounds(),
                     };
                 }
@@ -5115,7 +5143,7 @@ impl AgentCore {
                             self.append_delta_with_action_output_budget(slices);
                         }
                         return CoreStep::NeedModel {
-                            prompt: self.render_prompt(),
+                            prompt: self.render_request_prompt(),
                             rounds_remaining: self.remaining_rounds(),
                         };
                     }
@@ -5203,7 +5231,7 @@ impl AgentCore {
                 };
             }
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             };
         }
@@ -5221,7 +5249,7 @@ impl AgentCore {
                 };
             }
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             };
         }
@@ -5245,7 +5273,7 @@ impl AgentCore {
                 };
             }
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             };
         }
@@ -5686,7 +5714,7 @@ impl AgentCore {
                 ),
             )]);
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             };
         };
@@ -5786,7 +5814,7 @@ impl AgentCore {
             };
         }
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.render_request_prompt(),
             rounds_remaining: self.remaining_rounds(),
         }
     }
@@ -5987,7 +6015,7 @@ impl AgentCore {
             };
         }
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.render_request_prompt(),
             rounds_remaining: self.remaining_rounds(),
         }
     }
@@ -6050,7 +6078,7 @@ impl AgentCore {
             "Runtime round budget continued by user.".to_string(),
         )]);
         CoreStep::NeedModel {
-            prompt: self.render_prompt(),
+            prompt: self.render_request_prompt(),
             rounds_remaining: self.remaining_rounds(),
         }
     }
@@ -6213,12 +6241,22 @@ impl AgentCore {
         );
     }
 
+    /// Prompt for the next model request. Rendering marks the native MCP
+    /// summary section as delivered, so unchanged tool sets stop re-appending
+    /// it on every round: the section travels once and then rides the cached
+    /// request history until the tool set changes again.
+    pub fn render_request_prompt(&mut self) -> String {
+        let prompt = self.render_prompt();
+        self.rendered_native_mcp_section = self.native_mcp_request_section();
+        prompt
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
         self.submit_process_aggregate_scopes_if_needed();
         self.submit_runtime_config_changed_notice_if_pending();
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
-        let rendered = self.render_prompt();
+        let rendered = self.render_request_prompt();
         let mut prompt = rendered.clone();
         if let Some(trailer) = self.take_memo_deleted_trailer() {
             let (body, response_trailer) =
@@ -6819,7 +6857,7 @@ Runtime tool_call ids:",
         )]);
         Some(ModelInputOverflowRecovery {
             step: CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt: self.render_request_prompt(),
                 rounds_remaining: self.remaining_rounds(),
             },
             removed_delta_id,

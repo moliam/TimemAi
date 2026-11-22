@@ -11819,3 +11819,90 @@ fn reasoning_input_downgrade_strips_continuations_from_later_requests() {
         .assistant_continuation
         .is_none());
 }
+
+#[test]
+fn native_mcp_summaries_stop_repeating_until_the_tool_set_changes() {
+    let memory_dir = tmp_dir("native_mcp_summary_once");
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG_SECTION_HEADING}}\n\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
+        profile("model"),
+        &memory_dir,
+    );
+    let demo_server = McpServerConfig {
+        id: "demo".to_string(),
+        name: "Demo MCP".to_string(),
+        enabled: true,
+        transport: McpTransportConfig::Stdio {
+            command: "unused".to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 1_000,
+    };
+    core.configure_mcp_with_instructions(
+        test_registry(),
+        McpRuntime::default(),
+        vec![demo_server],
+        vec![McpTool {
+            server_id: "demo".to_string(),
+            server_name: "Demo MCP".to_string(),
+            name: "echo".to_string(),
+            action_name: "mcp_demo_mcp__echo".to_string(),
+            description: "Echo a value".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }],
+        BTreeMap::new(),
+    )
+    .unwrap();
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "model".to_string(),
+        gateway: "https://gateway.example.test/v1".to_string(),
+        requested_mode: agent_core::ToolCallMode::Auto,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Probe,
+        reason: "test".to_string(),
+        probe_latency_ms: Some(1),
+        observed_tool_calls: 2,
+    });
+
+    let first = core.build_next_prompt();
+    assert!(
+        first.contains("## Current MCP Tools")
+            && first.contains("`mcp_demo_mcp__echo`: Echo a value"),
+        "the first request carries the MCP summary: {first}"
+    );
+    let second = core.build_next_prompt();
+    assert!(
+        !second.contains("## Current MCP Tools"),
+        "unchanged tool sets must not re-append the summary: {second}"
+    );
+
+    core.apply_mcp_update(
+        test_registry(),
+        McpRuntime::default(),
+        Vec::new(),
+        vec![McpTool {
+            server_id: "demo".to_string(),
+            server_name: "Demo MCP".to_string(),
+            name: "search".to_string(),
+            action_name: "mcp_demo_mcp__search".to_string(),
+            description: "Search dynamically".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }],
+    )
+    .unwrap();
+    let third = core.build_next_prompt();
+    assert!(
+        third.contains("## Current MCP Tools")
+            && third.contains("`mcp_demo_mcp__search`: Search dynamically"),
+        "a changed tool set re-appends the updated summary: {third}"
+    );
+    assert!(!third.contains("`mcp_demo_mcp__echo`"), "{third}");
+    assert!(!third.contains("MCP update:"), "{third}");
+    let fourth = core.build_next_prompt();
+    assert!(!fourth.contains("## Current MCP Tools"), "{fourth}");
+}
