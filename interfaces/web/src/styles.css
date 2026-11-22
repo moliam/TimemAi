@@ -5540,6 +5540,25 @@ body.workspace-modal-open .app-shell { user-select: none; }
   max-height: 200px;
   overflow: auto;
 }
+.stream-tool-command-shell,
+.tool-activity-code-shell { position: relative; }
+.stream-tool-code-collapse,
+.tool-activity-code-collapse {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  padding: 1px 9px;
+  font-size: 11px;
+  line-height: 17px;
+  border: 1px solid #3a4750;
+  border-radius: 999px;
+  background: #262626e6;
+  color: #9aabb3;
+  cursor: pointer;
+}
+.stream-tool-code-collapse:hover,
+.tool-activity-code-collapse:hover { color: #e1ebf0; border-color: #52646f; }
 .stream-tool-detail {
   margin: 6px 0 0;
   color: #9aabb3;
@@ -5557,6 +5576,10 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-bytes { color: #6a7d88; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
+:root[data-theme="light"] .stream-tool-code-collapse,
+:root[data-theme="light"] .tool-activity-code-collapse { border-color: #b9c8ce; background: #eef2f1e6; color: #52646f; }
+:root[data-theme="light"] .stream-tool-code-collapse:hover,
+:root[data-theme="light"] .tool-activity-code-collapse:hover { color: #24333a; border-color: #8fa3ac; }
 :root[data-theme="light"] .stream-tool-detail { color: #5c6f7a; }
 @media (prefers-reduced-motion: reduce) {
   .stream-tool-head,

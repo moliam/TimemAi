@@ -328,6 +328,7 @@ export const zh = {
     generateFailed: "ToolGen: 生成失败",
     reusableTool: "可复用工具",
     collapseOutput: "收起工具输出",
+    collapseCommand: "收起命令",
     expandOutput: "展开工具输出",
     runningBg: "后台运行中",
     collapseDetails: "收起详情",

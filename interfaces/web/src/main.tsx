@@ -13423,8 +13423,21 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const toggle = () => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
+    if (editsAutoOpen) {
+      // From the diff-only auto state, clicking the row expands the full
+      // command view instead of collapsing the auto-opened evidence.
+      setManuallyToggled(true);
+      setExpanded(true);
+      return;
+    }
     setManuallyToggled(true);
     setExpanded(current => !current);
+  };
+  const collapseCommand = () => {
+    // Dedicated collapse for the expanded command block: back to the
+    // diff-only auto state while the fold stays open.
+    setManuallyToggled(false);
+    setExpanded(true);
   };
   return (
     <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
@@ -13482,7 +13495,16 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
-          {!editsAutoOpen && code && <pre className="stream-tool-command">{code}</pre>}
+          {!editsAutoOpen && code && (
+            <div className="stream-tool-command-shell">
+              {hasEdits && (
+                <button type="button" className="stream-tool-code-collapse" onClick={collapseCommand}>
+                  {t("tools.collapseCommand")}
+                </button>
+              )}
+              <pre className="stream-tool-command">{code}</pre>
+            </div>
+          )}
           {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
           {!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
@@ -15152,6 +15174,12 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const code = activity.code?.trim();
   const hasExpandableDetail = !!detail || !!code || !!activity.edits?.length;
   const editsAutoOpen = hasEdits && !manuallyToggled;
+  const collapseCommand = () => {
+    // Dedicated collapse for the expanded command block: back to the
+    // diff-only auto state while the details fold stays open.
+    setManuallyToggled(false);
+    setOpen(true);
+  };
   const toolName = toolActivityDisplayName(
     activity.tool_name || activity.title,
     activity.tool_mode,
@@ -15257,6 +15285,14 @@ function ToolActivity({ activity }: { activity: Activity }) {
             event.preventDefault();
             return;
           }
+          if (editsAutoOpen) {
+            // From the diff-only auto state, clicking the summary expands the
+            // full command view instead of collapsing the auto-opened evidence.
+            event.preventDefault();
+            setManuallyToggled(true);
+            setOpen(true);
+            return;
+          }
           setManuallyToggled(true);
         }}
       >
@@ -15269,9 +15305,16 @@ function ToolActivity({ activity }: { activity: Activity }) {
           </div>
         )}
         {!editsAutoOpen && code && (
-          <MarkdownContent
-            text={fencedCode(activity.code_language ?? "text", code)}
-          />
+          <div className="tool-activity-code-shell">
+            {hasEdits && (
+              <button type="button" className="tool-activity-code-collapse" onClick={collapseCommand}>
+                {t("tools.collapseCommand")}
+              </button>
+            )}
+            <MarkdownContent
+              text={fencedCode(activity.code_language ?? "text", code)}
+            />
+          </div>
         )}
         {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
       </div>

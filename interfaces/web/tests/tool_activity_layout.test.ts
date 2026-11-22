@@ -199,7 +199,9 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   // Edits auto-open is the documented exception: preview stays visible while
   // the fold shows only the diff panel, never the command detail.
   expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview && <span");
-  expect(stream).toContain('{!editsAutoOpen && code && <pre className="stream-tool-command">{code}</pre>}');
+  expect(stream).toContain('{!editsAutoOpen && code && (');
+  expect(stream).toContain('<div className="stream-tool-command-shell">');
+  expect(stream).toContain('<pre className="stream-tool-command">{code}</pre>');
   expect(stream).toContain('{!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}');
   expect(stream).not.toContain("const command =");
   expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
@@ -208,6 +210,27 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(ordinary).toContain("{!editsAutoOpen && detail && (");
   expect(ordinary).toContain("{!editsAutoOpen && code && (");
   expect(ordinary).not.toContain(": invocationPreview && (");
+});
+
+it("gives expanded edit cards a dedicated command collapse back to the diff-only state", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+
+  // Row click from the diff-only auto state expands the command view.
+  expect(stream).toContain("if (editsAutoOpen) {");
+  expect(ordinary).toContain("if (editsAutoOpen) {");
+  // The expanded command block carries its own collapse button in both cards.
+  expect(stream).toContain("const collapseCommand = () => {");
+  expect(ordinary).toContain("const collapseCommand = () => {");
+  expect(stream).toContain('className="stream-tool-code-collapse" onClick={collapseCommand}');
+  expect(ordinary).toContain('className="tool-activity-code-collapse" onClick={collapseCommand}');
+  // The dedicated collapse keeps the fold open and restores the auto state.
+  expect(stream).toContain("setManuallyToggled(false);");
+  expect(ordinary).toContain("setManuallyToggled(false);");
+  expect(styles).toContain(".stream-tool-command-shell");
+  expect(styles).toContain(".tool-activity-code-shell");
+  expect(styles).toContain(".stream-tool-code-collapse");
+  expect(styles).toContain(".tool-activity-code-collapse");
 });
 
 it("uses terminal glyphs for Bash and reduces default Lucide stroke weight", () => {

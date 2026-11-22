@@ -331,6 +331,7 @@ export const en: Strings = {
     generateFailed: "ToolGen: generation failed",
     reusableTool: "reusable tool",
     collapseOutput: "Collapse tool output",
+    collapseCommand: "Collapse command",
     expandOutput: "Expand tool output",
     runningBg: "Running in background",
     collapseDetails: "Collapse details",
