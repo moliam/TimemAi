@@ -178,6 +178,15 @@ describe("file edits components render server-side", () => {
     expect(html).toContain("\u22124");
   });
 
+  it("shows unchanged row line numbers once instead of one per side", () => {
+    const diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n mid\n+new\n";
+    const html = renderToString(createElement(FileEditsPanel, {
+      edits: [{ ...validEntry, path: "f.txt", diff }],
+    }));
+    expect(html.match(/file-edit-gutter">1<\/span>/g)).toHaveLength(1);
+    expect(html.match(/file-edit-gutter">2<\/span>/g)).toHaveLength(1);
+  });
+
   it("renders all captured diff rows and marks runtime truncation as omitted", () => {
     const rows = Array.from({ length: 24 }, (_, index) => ` kept-${index}`);
     const diff = `--- a/long.txt\n+++ b/long.txt\n@@ -1,24 +1,24 @@\n${rows.join("\n")}\n`;

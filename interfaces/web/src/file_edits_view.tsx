@@ -157,10 +157,13 @@ function DiffRowView({ row }: { row: DiffRow }) {
   const content = row.kind === "hunk" || row.kind === "meta"
     ? row.text
     : redactSensitiveDisplayText(row.text) || "\u00A0";
+  // Unchanged rows share the same number on both sides; render it once in
+  // the old-side gutter instead of once per side.
+  const newLabel = row.kind === "ctx" ? "" : row.newNo !== undefined ? row.newNo : "";
   return (
     <div className={`file-edit-row file-edit-row-${row.kind}`}>
       <span className="file-edit-gutter">{row.oldNo !== undefined ? row.oldNo : ""}</span>
-      <span className="file-edit-gutter">{row.newNo !== undefined ? row.newNo : ""}</span>
+      <span className="file-edit-gutter">{newLabel}</span>
       <span className="file-edit-sign" aria-hidden="true">{sign}</span>
       <span className="file-edit-code">{content}</span>
     </div>
