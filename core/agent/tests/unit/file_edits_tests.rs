@@ -107,6 +107,151 @@ fn huge_unaligned_middle_falls_back_to_whole_replace() {
 }
 
 #[test]
+fn diff_lines_spread_changes_in_large_files_stay_minimal() {
+    // Changes far apart in a large file must not degrade to a whole-file
+    // replace: unique-line anchors split the middle regardless of its size.
+    let old: Vec<String> = (0..7200)
+        .map(|index| format!("stable-unique-{index}"))
+        .collect();
+    let mut new = old.clone();
+    new[51] = "replaced-head".to_string();
+    new[7134] = "replaced-tail".to_string();
+    let ops = diff_lines(&old, &new);
+    let added = ops
+        .iter()
+        .filter(|op| matches!(op, DiffOp::Insert(_)))
+        .count();
+    let removed = ops
+        .iter()
+        .filter(|op| matches!(op, DiffOp::Delete(_)))
+        .count();
+    assert_eq!((added, removed), (2, 2));
+    assert_eq!(ops.len(), old.len() + 2);
+    assert_eq!(ops[0], DiffOp::Keep);
+    assert_eq!(ops[51], DiffOp::Delete(51));
+    assert_eq!(ops[52], DiffOp::Insert(51));
+    assert_eq!(ops.last(), Some(&DiffOp::Keep));
+}
+
+#[test]
+fn modified_large_file_diff_stays_bounded_and_untruncated() {
+    let old: Vec<String> = (0..7200)
+        .map(|index| format!("stable-unique-{index}"))
+        .collect();
+    let mut new = old.clone();
+    new[51] = "replaced-head".to_string();
+    new[7134] = "replaced-tail".to_string();
+    let entry = build_entry(
+        "big.css",
+        &FileContentSnapshot::Lines(old.join("\n")),
+        &FileContentSnapshot::Lines(new.join("\n")),
+    );
+    assert_eq!(entry.op, FileEditOp::Modified);
+    assert_eq!((entry.added_lines, entry.removed_lines), (2, 2));
+    assert!(!entry.truncated);
+    let diff = entry.diff.expect("diff");
+    assert_eq!(
+        diff.lines().filter(|line| line.starts_with("@@")).count(),
+        2
+    );
+    assert!(diff.contains("+replaced-head"));
+    assert!(diff.contains("+replaced-tail"));
+}
+
+#[test]
+fn build_entry_reports_missing_paths_as_skipped_missing() {
+    let entry = build_entry(
+        "absent.txt",
+        &FileContentSnapshot::Missing,
+        &FileContentSnapshot::Missing,
+    );
+    assert_eq!(entry.op, FileEditOp::Skipped);
+    assert_eq!(entry.skip_reason, Some("missing"));
+    assert!(entry.diff.is_none());
+    assert!(!entry.truncated);
+}
+
+#[test]
+fn whitespace_only_rewrites_report_modified_with_meta_note() {
+    let entry = build_entry(
+        "notes.txt",
+        &FileContentSnapshot::Lines("a\nb\n".to_string()),
+        &FileContentSnapshot::Lines("a\nb".to_string()),
+    );
+    assert_eq!(entry.op, FileEditOp::Modified);
+    assert_eq!((entry.added_lines, entry.removed_lines), (0, 0));
+    assert!(!entry.truncated);
+    let diff = entry.diff.expect("diff");
+    assert!(diff.contains("# Whitespace-only change"));
+    assert!(!diff.contains("@@"));
+
+    let crlf = build_entry(
+        "notes.txt",
+        &FileContentSnapshot::Lines("a\nb\n".to_string()),
+        &FileContentSnapshot::Lines("a\r\nb\r\n".to_string()),
+    );
+    assert_eq!(crlf.op, FileEditOp::Modified);
+    assert!(crlf
+        .diff
+        .expect("diff")
+        .contains("# Whitespace-only change"));
+
+    let identical = build_entry(
+        "notes.txt",
+        &FileContentSnapshot::Lines("a\nb\n".to_string()),
+        &FileContentSnapshot::Lines("a\nb\n".to_string()),
+    );
+    assert_eq!(identical.op, FileEditOp::Unchanged);
+    assert!(identical.diff.is_none());
+}
+
+#[test]
+fn diff_ops_reconstruct_the_new_side_for_tricky_inputs() {
+    let rebuild = |old: &[String], new: &[String]| {
+        let ops = diff_lines(old, new);
+        let mut out: Vec<String> = Vec::new();
+        let mut a_cursor = 0usize;
+        let mut b_cursor = 0usize;
+        for op in &ops {
+            match *op {
+                DiffOp::Keep => {
+                    out.push(old[a_cursor].clone());
+                    a_cursor += 1;
+                    b_cursor += 1;
+                }
+                DiffOp::Delete(_) => a_cursor += 1,
+                DiffOp::Insert(index) => {
+                    assert_eq!(index, b_cursor, "inserts must stay in order");
+                    out.push(new[b_cursor].clone());
+                    b_cursor += 1;
+                }
+            }
+        }
+        assert_eq!(a_cursor, old.len());
+        assert_eq!(b_cursor, new.len());
+        out
+    };
+    let dup_old = lines(&["x", "dup", "x", "dup", "y", "dup"]);
+    let dup_new = lines(&["dup", "x", "dup", "z", "dup", "y", "dup"]);
+    assert_eq!(rebuild(&dup_old, &dup_new), dup_new);
+    let moved_old = lines(&["a", "b", "c", "d", "e"]);
+    let moved_new = lines(&["c", "d", "a", "b", "e"]);
+    assert_eq!(rebuild(&moved_old, &moved_new), moved_new);
+    let del_old = lines(&["k", "k", "k"]);
+    let del_new = lines(&["k"]);
+    assert_eq!(rebuild(&del_old, &del_new), del_new);
+    assert_eq!(rebuild(&del_new, &del_old), del_old);
+    let big_old: Vec<String> = (0..7200)
+        .map(|index| format!("stable-unique-{index}"))
+        .collect();
+    let mut big_new = big_old.clone();
+    big_new[3] = "head-edit".to_string();
+    big_new[7000] = "mid-edit".to_string();
+    big_new[7100] = "tail-edit".to_string();
+    assert_eq!(rebuild(&big_old, &big_new), big_new);
+}
+
+#[test]
 fn group_hunks_merges_close_changes_and_numbers_ranges() {
     let old = lines(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
     let new = lines(&["a", "B", "c", "d", "e", "f", "g", "H", "i", "j", "k"]);
@@ -227,7 +372,7 @@ fn read_snapshot_classifies_missing_binary_and_oversized() {
     let empty = dir.join("empty.txt");
     fs::write(&empty, "").unwrap();
     let (snapshot, _) = read_snapshot(&empty, None);
-    assert_eq!(snapshot, FileContentSnapshot::Lines(Vec::new()));
+    assert_eq!(snapshot, FileContentSnapshot::Lines(String::new()));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -302,7 +447,8 @@ fn compute_evidence_tracks_create_modify_delete_and_unchanged() {
     assert_eq!(same.op, FileEditOp::Unchanged);
     assert!(same.diff.is_none());
     let never = by_path.next().unwrap();
-    assert_eq!(never.op, FileEditOp::Unchanged);
+    assert_eq!(never.op, FileEditOp::Skipped);
+    assert_eq!(never.skip_reason, Some("missing"));
     let _ = fs::remove_dir_all(&dir);
 }
 

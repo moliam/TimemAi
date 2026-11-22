@@ -24,11 +24,15 @@ const MAX_DIFF_FILE_BYTES: usize = 32 * 1024;
 const MAX_EDITS_PAYLOAD_BYTES: usize = 96 * 1024;
 /// Unified-diff context lines around each change region.
 const DIFF_CONTEXT_LINES: usize = 3;
-/// Middle-section line cap before falling back to a whole-file replace diff.
+/// Anchor-less middle-section line cap before falling back to a whole-file
+/// replace diff. Regions that share unique-line anchors are split regardless
+/// of size; anchor discovery costs linear map passes, not DP cells.
 const PATIENCE_MIDDLE_LINE_CAP: usize = 5000;
 /// Maximum DP table cells for small-section LCS.
 const DP_MAX_CELLS: usize = 40_000;
-/// Patience recursion depth cap; deeper regions fall back to whole replace.
+/// Patience nesting-depth cap; deeper sub-diffs fall back to whole replace.
+/// Sequential anchor chains do not accumulate depth because every chain step
+/// consumes at least one line per side; only nested sub-diffs count.
 const PATIENCE_DEPTH_CAP: usize = 48;
 /// Display/path clamp for model-declared path strings.
 const MAX_DECLARED_PATH_CHARS: usize = 512;
@@ -38,6 +42,9 @@ const SKIP_TOO_LARGE: &str = "too_large";
 const SKIP_UNREADABLE: &str = "unreadable";
 const SKIP_NOT_CAPTURED: &str = "not_captured";
 const SKIP_BUDGET: &str = "budget_exhausted";
+const SKIP_MISSING: &str = "missing";
+/// Meta marker rendered when only line endings or the final newline changed.
+const WHITESPACE_ONLY_NOTE: &str = "# Whitespace-only change: line endings or the final newline differ; content lines are identical.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEditOp {
@@ -76,12 +83,15 @@ pub struct FileEditsEvidence {
     pub edits: Vec<FileEditEntry>,
 }
 
-/// Snapshot of a file's content as diffable lines, or the reason it could not
-/// be diffed. `Lines` holds content split on `\n` with `\r` trimmed per line
-/// and the trailing newline (when present) not represented as an extra line.
+/// Snapshot of a file's content, or the reason it could not be diffed.
+/// `Lines` holds the raw text (NUL-free, valid UTF-8, within the byte cap).
+/// The line view is derived at diff time by splitting on `\n` and trimming a
+/// trailing `\r` per line. Equality is decided on the raw bytes so invisible
+/// rewrites (final newline, CRLF/LF flip) can never fold into an
+/// "unchanged" card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FileContentSnapshot {
-    Lines(Vec<String>),
+    Lines(String),
     Binary,
     TooLarge,
     Unreadable,
@@ -224,7 +234,7 @@ fn read_snapshot(path: &Path, budget: Option<usize>) -> (FileContentSnapshot, us
     let Ok(text) = String::from_utf8(bytes) else {
         return (FileContentSnapshot::Binary, size);
     };
-    (FileContentSnapshot::Lines(split_diff_lines(&text)), size)
+    (FileContentSnapshot::Lines(text), size)
 }
 
 fn split_diff_lines(text: &str) -> Vec<String> {
@@ -253,29 +263,50 @@ fn build_entry(
         skip_reason: None,
     };
     match (before, after) {
-        (FileContentSnapshot::Lines(old), FileContentSnapshot::Lines(new)) => {
-            if old == new {
+        (FileContentSnapshot::Lines(old_text), FileContentSnapshot::Lines(new_text)) => {
+            if old_text == new_text {
                 base
             } else {
+                let old = split_diff_lines(old_text);
+                let new = split_diff_lines(new_text);
                 let mut entry = base;
                 entry.op = FileEditOp::Modified;
-                entry.extend_from_diff(declared, old, new);
+                if old == new {
+                    // Byte content changed while the line view did not (final
+                    // newline or CRLF/LF rewrite). Expose a meta note instead
+                    // of a false "unchanged" card; hunks would be empty.
+                    entry.diff = Some(format!(
+                        "--- a/{declared}\n+++ b/{declared}\n{WHITESPACE_ONLY_NOTE}\n"
+                    ));
+                } else {
+                    entry.extend_from_diff(declared, &old, &new);
+                }
                 entry
             }
         }
-        (FileContentSnapshot::Missing, FileContentSnapshot::Lines(new)) => {
+        (FileContentSnapshot::Missing, FileContentSnapshot::Lines(new_text)) => {
             let mut entry = base;
             entry.op = FileEditOp::Created;
-            entry.extend_from_diff(declared, &[], new);
+            let new = split_diff_lines(new_text);
+            entry.extend_from_diff(declared, &[], &new);
             entry
         }
-        (FileContentSnapshot::Lines(old), FileContentSnapshot::Missing) => {
+        (FileContentSnapshot::Lines(old_text), FileContentSnapshot::Missing) => {
             let mut entry = base;
             entry.op = FileEditOp::Deleted;
-            entry.extend_from_diff(declared, old, &[]);
+            let old = split_diff_lines(old_text);
+            entry.extend_from_diff(declared, &old, &[]);
             entry
         }
-        (FileContentSnapshot::Missing, FileContentSnapshot::Missing) => base,
+        (FileContentSnapshot::Missing, FileContentSnapshot::Missing) => {
+            // The declared path was absent before and after the call, so no
+            // edit can have applied; surface it as skipped with an explicit
+            // reason instead of an "unchanged" card that implies success.
+            let mut entry = base;
+            entry.op = FileEditOp::Skipped;
+            entry.skip_reason = Some(SKIP_MISSING);
+            entry
+        }
         _ => {
             let mut entry = base;
             entry.op = FileEditOp::Skipped;
@@ -468,18 +499,19 @@ fn diff_id_ranges(
         for index in 0..a_mid.len() {
             ops.push(DiffOp::Delete(a_start + index));
         }
-    } else if depth >= PATIENCE_DEPTH_CAP
-        || a_mid.len() > PATIENCE_MIDDLE_LINE_CAP
-        || b_mid.len() > PATIENCE_MIDDLE_LINE_CAP
-    {
+    } else if depth >= PATIENCE_DEPTH_CAP {
         push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops);
     } else {
         let anchor_pairs = patience_anchors(a_mid, b_mid);
         let anchors = patience_lis(&anchor_pairs);
         if anchors.is_empty() {
-            match lcs_segment(a_mid, b_mid) {
-                Some(segment) => push_segment(&segment, a_start, b_start, ops),
-                None => push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops),
+            if a_mid.len() > PATIENCE_MIDDLE_LINE_CAP || b_mid.len() > PATIENCE_MIDDLE_LINE_CAP {
+                push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops);
+            } else {
+                match lcs_segment(a_mid, b_mid) {
+                    Some(segment) => push_segment(&segment, a_start, b_start, ops),
+                    None => push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops),
+                }
             }
         } else {
             let mut cursor_a = 0usize;
@@ -497,12 +529,15 @@ fn diff_id_ranges(
                 cursor_a = anchor_a + 1;
                 cursor_b = anchor_b + 1;
             }
+            // The trailing range continues the linear anchor chain: every step
+            // consumes at least one line per side, so it stays at `depth`;
+            // only nested sub-diffs accumulate toward PATIENCE_DEPTH_CAP.
             diff_id_ranges(
                 &a_mid[cursor_a..],
                 &b_mid[cursor_b..],
                 a_start + cursor_a,
                 b_start + cursor_b,
-                depth + 1,
+                depth,
                 ops,
             );
         }
