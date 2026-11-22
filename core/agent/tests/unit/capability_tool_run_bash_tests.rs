@@ -278,6 +278,7 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
             crate::shell_exec::ShellJobManagerExitHooks::default(),
         )),
         process_job: None,
+        edits: None,
     }
 }
 
@@ -343,6 +344,7 @@ fn direct_completion_is_removed_from_the_manager_index() {
         "direct-call",
         false,
         &mut NeverCancelRuntime,
+        None,
     );
 
     assert_eq!(result.status, Some(0));
@@ -1810,6 +1812,7 @@ fn managed_shell_job_pid_is_a_distinct_runtime_child_process_group() {
         "managed-turn",
         "test_call",
         false,
+        crate::file_edits::EditContext::default(),
     );
     let evidence = started.bash_result.expect("managed child evidence");
     let pid = evidence.pid.expect("managed child pid");
@@ -2081,6 +2084,7 @@ fn supervisor_waits_for_managed_process_group_after_launcher_exits() {
         "group-turn",
         "group-call",
         false,
+        crate::file_edits::EditContext::default(),
     );
     let pid = started
         .bash_result
@@ -2437,6 +2441,7 @@ fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
         "turn_tail_background",
         "test_call",
         true,
+        crate::file_edits::EditContext::default(),
     );
     assert_eq!(started.status, ActionStatus::BackgroundRunning);
 
@@ -2867,6 +2872,33 @@ fn incomplete_capture_preserves_launcher_exit_without_reporting_success() {
     assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
 }
 
+#[test]
+fn background_exit_topic_carries_file_edit_evidence() {
+    // A default context serializes as an empty edits array. It still proves
+    // the background exit path computes evidence and forwards it to topic
+    // payloads; populated contexts are covered by the direct execution test.
+    let finished = FinishedShellJob {
+        completion_sequence: 1,
+        finished_at_ms: now_ms(),
+        status: "0".to_string(),
+        capture_error: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
+        output: String::new(),
+    };
+    let mut job = synthetic_managed_job(ShellJobDelivery::Background);
+    job.edits = Some(crate::file_edits::EditContext::default());
+    let update = job.exit_update(&finished);
+    assert!(
+        update.edits.is_some(),
+        "background update must retain edits"
+    );
+    let event = crate::running_shell_job_exit_topic_event(&update);
+    assert_eq!(event.payload["edits"], serde_json::json!([]));
+}
+
 #[cfg(unix)]
 #[test]
 fn background_spawn_rejects_when_job_cap_is_reached() {
@@ -2970,4 +3002,81 @@ fn run_bash_rejects_conflicting_cmd_and_command() {
         "{}",
         outcome.text
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_bash_attaches_file_edit_evidence_for_declared_paths() {
+    let store = ShellJobManager::new(&tmp_memory_dir("edit_evidence"));
+    let cwd = tmp_cwd("edit_evidence");
+    let existing = cwd.join("modified.txt");
+    fs::write(&existing, "one\ntwo\n").expect("seed file");
+    let outcome = match execute_run_bash_with_tail(
+        "printf 'one\\nCHANGED\\n' > modified.txt; printf 'new\\n' > created.txt",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        vec!["modified.txt".to_string(), "created.txt".to_string()],
+        BashApprovalMode::Approve,
+        &store,
+        "session_edits",
+        "turn_edits",
+        "call_edits",
+        true,
+        true,
+        &mut NeverCancelRuntime,
+    ) {
+        ActionExecution::Completed(outcome) => outcome,
+        other => panic!("approve mode should execute directly, got {other:?}"),
+    };
+    let evidence = outcome.edits.expect("edit evidence");
+    assert_eq!(evidence.edits.len(), 2);
+    let modified = &evidence.edits[0];
+    assert_eq!(modified.path, "modified.txt");
+    assert_eq!(modified.op, crate::file_edits::FileEditOp::Modified);
+    assert_eq!((modified.added_lines, modified.removed_lines), (1, 1));
+    let diff = modified.diff.as_deref().expect("modified diff");
+    assert!(diff.contains("--- a/modified.txt\n+++ b/modified.txt\n"));
+    assert!(diff.contains("+CHANGED\n"));
+    let created = &evidence.edits[1];
+    assert_eq!(created.op, crate::file_edits::FileEditOp::Created);
+    assert_eq!((created.added_lines, created.removed_lines), (1, 0));
+    assert!(created
+        .diff
+        .as_deref()
+        .expect("created diff")
+        .contains("--- /dev/null\n+++ b/created.txt\n"));
+    assert!(outcome
+        .text
+        .contains("edited_files: modified.txt, created.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_bash_validation_failure_does_not_attach_edit_evidence() {
+    let store = ShellJobManager::new(&tmp_memory_dir("edit_evidence_invalid"));
+    let cwd = tmp_cwd("edit_evidence_invalid");
+    let outcome = match execute_run_bash_with_tail(
+        "",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        vec!["whatever.txt".to_string()],
+        BashApprovalMode::Approve,
+        &store,
+        "session_edits_invalid",
+        "turn_edits_invalid",
+        "call_edits_invalid",
+        true,
+        true,
+        &mut NeverCancelRuntime,
+    ) {
+        ActionExecution::Completed(outcome) => outcome,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert!(outcome.edits.is_none());
 }

@@ -23,6 +23,8 @@ description: |
     ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
     is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
     timer0, timer1, ... when omitted.
+    A `once`/`repeat` timer persists across turns by itself: `task_finished` does not remove
+    it, so never add `trigger` to those modes for persistence — that combination is rejected.
     For "trigger", `trigger` selects the system event that fires the prompt and the
     schedule fields (after_ms/at/interval_ms) are forbidden. A trigger timer stays
     armed and fires EVERY time the event occurs until deleted via `del`:
@@ -51,8 +53,8 @@ input_schema: |
       "op": {"type":"string","enum":["new","del"],"description":"Timer operation."},
       "prompt": {"type":"string","description":"Prompt text delivered when the timer fires. Required for new."},
       "name": {"type":"string","description":"Optional stable handle name for new (auto-named timer0/timer1/... when omitted); required for del."},
-      "mode": {"type":"string","enum":["once","repeat","trigger"],"description":"once fires a single time (default); repeat refires every interval_ms; trigger fires on a system event selected by `trigger`."},
-      "trigger": {"type":"string","enum":["session_idle","after_compression"],"description":"Required for mode=trigger, forbidden otherwise. session_idle fires after the model ends a turn via task_finished; after_compression fires after this session's context compression completes."},
+      "mode": {"type":"string","enum":["once","repeat","trigger"],"description":"once fires a single time (default); repeat refires every interval_ms; trigger fires on a system event selected by `trigger`. mode=once/repeat must NOT include trigger (they persist across turns on their own); mode=trigger must not include after_ms/at/interval_ms."},
+      "trigger": {"type":"string","enum":["session_idle","after_compression"],"description":"Only valid when mode=\"trigger\": session_idle fires after the model ends a turn via task_finished; after_compression fires after this session's context compression completes. Providing trigger with mode=once or mode=repeat is invalid and rejected — those modes persist across turns by themselves and must omit trigger."},
       "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
       "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
       "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."},

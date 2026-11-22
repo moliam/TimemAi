@@ -441,7 +441,11 @@ impl CapabilityRegistry {
                         command_path: None,
                     },
                     requires_host: None,
-                    summary: tool.description.clone(),
+                    // MCP carries no separate summary field, so the catalog
+                    // entry is the first sentence of the advertised
+                    // description. The full text still travels with the API
+                    // tool definition.
+                    summary: mcp_tool_summary(&tool.description),
                     description: tool.description.clone(),
                     input_schema: CapabilityInputSchema {
                         schema_type,
@@ -849,6 +853,91 @@ impl CapabilityRegistry {
         tools
     }
 
+    /// Sorted list of every callable action name (builtin, command, MCP).
+    /// Used by model-facing dispatch failures so the model sees what it can
+    /// call instead of a bare error code.
+    pub(crate) fn available_tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Translate a schema-validation issue code into natural language the
+    /// model can act on without reading source. The original issue stays
+    /// embedded as `detail:` so tests and telemetry keep matching it.
+    pub(crate) fn invalid_input_guidance(&self, tool: &str, issue: &str) -> String {
+        if let Some(name) = issue.strip_prefix("unsupported_action:") {
+            let available = self.available_tool_names().join(", ");
+            return format!(
+                "The tool \"{name}\" is not available in this session, so nothing was executed \
+                 (detail: unsupported_action:{name}). Available tools: {available}. Use one of \
+                 the listed tools by its exact name."
+            );
+        }
+        let Some(rest) = issue.strip_prefix("input.") else {
+            return format!(
+                "Invalid input for tool \"{tool}\" (detail: {issue}). Correct the arguments to \
+                 match the tool schema and retry."
+            );
+        };
+        if let Some((key, allowed)) = rest.split_once("_unsupported; allowed keys: ") {
+            return format!(
+                "The argument \"{key}\" is not defined for tool \"{tool}\" (detail: {issue}). \
+                 Allowed arguments: {allowed}. Remove the unknown argument and retry."
+            );
+        }
+        if let Some(fields_and_condition) = rest.strip_prefix("any_required_when_") {
+            if let Some((fields, condition)) = fields_and_condition.split_once("_when_") {
+                let fields = fields.replace('|', ", ");
+                return format!(
+                    "When {condition}, tool \"{tool}\" needs at least one of the arguments \
+                     {fields} (detail: {issue}). Provide one of them and retry."
+                );
+            }
+        }
+        if let Some(fields) = rest.strip_prefix("any_required:") {
+            let fields = fields.replace('|', ", ");
+            return format!(
+                "Tool \"{tool}\" needs at least one of the arguments {fields} (detail: \
+                 input.any_required). Provide one of them and retry."
+            );
+        }
+        if let Some((key, condition)) = rest.split_once("_required_when_") {
+            return format!(
+                "When {condition}, the argument \"{key}\" is required for tool \"{tool}\" \
+                 (detail: {issue}). Provide it and retry."
+            );
+        }
+        if let Some((key, value)) = rest.split_once("_unsupported:") {
+            let allowed = self
+                .tools
+                .get(tool)
+                .and_then(|manifest| manifest.input_schema.enum_fields.get(key))
+                .map(|values| values.join(", "))
+                .unwrap_or_else(|| "the values listed in the tool schema".to_string());
+            return format!(
+                "The argument \"{key}\" of tool \"{tool}\" does not accept \"{value}\" \
+                 (detail: {issue}). Allowed values: {allowed}. Use one of them and retry."
+            );
+        }
+        if let Some(key) = rest.strip_suffix("_must_be_string") {
+            return format!(
+                "The argument \"{key}\" of tool \"{tool}\" must be a non-empty string \
+                 (detail: {issue}). Provide it as text and retry."
+            );
+        }
+        if let Some(key) = rest.strip_suffix("_required") {
+            return format!(
+                "The required argument \"{key}\" is missing for tool \"{tool}\" (detail: \
+                 {issue}). Provide it and retry."
+            );
+        }
+        format!(
+            "Invalid input for tool \"{tool}\" (detail: {issue}). Correct the arguments to \
+             match the tool schema and retry."
+        )
+    }
+
     pub fn native_builtin_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
@@ -865,21 +954,31 @@ impl CapabilityRegistry {
             .collect()
     }
 
-    /// Native tool-call mode catalog: the full tool descriptions and
-    /// parameter schemas are already delivered through the API tool
-    /// definitions, so the prompt only names the tools once and points at
-    /// the schema descriptions. Inline mode keeps the full catalog because
-    /// there the prompt is the only carrier.
-    pub(crate) fn render_native_builtin_tool_names_markdown(&self) -> String {
-        let names = self
-            .native_builtin_tool_definitions()
-            .into_iter()
-            .map(|tool| format!("`{}`", tool.name))
+    /// Native tool-call mode catalog: one summary line per builtin tool. The
+    /// full description and parameter schema already travel with the API tool
+    /// definitions, so repeating them here would duplicate the single
+    /// authoritative carrier. Inline mode keeps the full catalog because there
+    /// the prompt is the only carrier. MCP tools stay out of the static prefix
+    /// on purpose: their set changes per request and the prefix must stay
+    /// cacheable.
+    pub(crate) fn render_native_builtin_tool_summaries_markdown(&self) -> String {
+        self.tools
+            .values()
+            .filter(|manifest| manifest.id != "capmgr" && manifest.binding.binding_type != "mcp")
+            .map(|manifest| format!("- `{}`: {}", manifest.id, one_line(&manifest.summary)))
             .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "The runtime exposes the following tools: {names}. They are also provided as tool schema definitions in this request; refer to each tool's schema description for usage details."
-        )
+            .join("\n")
+    }
+
+    /// MCP tools currently registered, one summary line each, for the
+    /// per-request native-mode MCP section.
+    pub(crate) fn render_native_mcp_tool_summaries_markdown(&self) -> String {
+        self.tools
+            .values()
+            .filter(|manifest| manifest.binding.binding_type == "mcp")
+            .map(|manifest| format!("- `{}`: {}", manifest.id, one_line(&manifest.summary)))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn render_tool_catalog_json(&self) -> String {
@@ -1287,6 +1386,24 @@ fn schema_type_names(schema: &Value) -> Vec<String> {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// MCP tool definitions carry no summary field of their own, so the one-line
+/// catalog entry is the first sentence of the advertised description, bounded
+/// to keep the prompt list compact. The full description is still delivered
+/// once through the API tool definition.
+fn mcp_tool_summary(description: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let text = one_line(description);
+    if text.is_empty() {
+        return "MCP tool".to_string();
+    }
+    let sentence = text.find(". ").map_or(text.as_str(), |end| &text[..=end]);
+    if sentence.chars().count() <= MAX_CHARS {
+        return sentence.to_string();
+    }
+    let truncated = sentence.chars().take(MAX_CHARS).collect::<String>();
+    format!("{}…", truncated.trim_end())
 }
 
 fn inline_code_list(items: &[String]) -> String {

@@ -13,7 +13,11 @@ pub(crate) fn execute_action(
         .map(str::trim)
         .unwrap_or_default();
     if summary.is_empty() {
-        return failed("summary_required");
+        return failed(
+            "task_finished did not take effect: `summary` is required (detail: \
+             summary_required). Call task_finished again with the complete final \
+             user-facing answer as the summary.",
+        );
     }
     core.record_turn_finished(summary.to_string());
     if let Some(memo) = core.active_memo() {

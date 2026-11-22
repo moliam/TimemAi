@@ -95,7 +95,9 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                     evidence_error_type = Some("StorageError".to_string());
                     ActionOutcome::failed(format!(
                         "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
-                        mem_type, sql, err
+                        mem_type,
+                        sql,
+                        sql_error_prose(&err)
                     ))
                 }
             }
@@ -110,7 +112,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                     evidence_error_type = Some(durable_update_error_type(&err).to_string());
                     ActionOutcome::failed(format!(
                         "Action result: memmgr\ntype: durable\nop: {}\nerror: {}",
-                        op, err
+                        op,
+                        durable_error_prose(&op, &err)
                     ))
                 }
             }
@@ -122,12 +125,35 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 scope
             };
             let session_scope = match scope.as_str() {
-                "current_session" if requested_session_id.is_empty() => Some(core.current_session_id()),
-                "session" if !requested_session_id.trim().is_empty() => Some(requested_session_id.clone()),
+                "current_session" if requested_session_id.is_empty() => {
+                    Some(core.current_session_id())
+                }
+                "session" if !requested_session_id.trim().is_empty() => {
+                    Some(requested_session_id.clone())
+                }
                 "global" if requested_session_id.is_empty() => None,
-                "current_session" => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: session_id_not_allowed"),
-                "session" => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: session_id_required"),
-                _ => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: invalid_raw_chat_scope"),
+                "current_session" => {
+                    return ActionOutcome::failed(
+                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: \
+                         scope=\"current_session\" searches this session only, so it must not \
+                         also carry a session_id (detail: session_id_not_allowed). Drop \
+                         session_id, or use scope=\"session\" with the target session id.",
+                    )
+                }
+                "session" => {
+                    return ActionOutcome::failed(
+                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: \
+                         scope=\"session\" needs a non-empty session_id naming the target \
+                         session (detail: session_id_required). Provide it and retry.",
+                    )
+                }
+                _ => {
+                    return ActionOutcome::failed(
+                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: scope \
+                         must be \"current_session\", \"session\", or \"global\" (detail: \
+                         invalid_raw_chat_scope). Use one of those values and retry.",
+                    )
+                }
             };
             let rows = match core.chat_history.query(
                 &search_text,
@@ -139,8 +165,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 Ok(rows) => rows,
                 Err(err) => {
                     let text = format!(
-                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: {}",
-                        err
+                        "Action result: memmgr\ntype: raw_chat\nop: search\nerror: The raw \
+                         chat search could not be read from storage: {err}",
                     );
                     return ActionOutcome::failed(text.clone()).with_memmgr_result(
                         MemmgrResultEvidence {
@@ -230,8 +256,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 Err(err) => {
                     evidence_error_type = Some("StorageError".to_string());
                     ActionOutcome::failed(format!(
-                        "Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}",
-                        err
+                        "Action result: memmgr\ntype: raw_chat\nop: delete\nerror: The raw \
+                         chat delete could not be applied to storage: {err}",
                     ))
                 }
             }
@@ -246,8 +272,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 Err(err) => {
                     evidence_error_type = Some("StorageError".to_string());
                     ActionOutcome::failed(format!(
-                        "Action result: memmgr\ntype: scratch\nop: write\nerror: {}",
-                        err
+                        "Action result: memmgr\ntype: scratch\nop: write\nerror: The scratch \
+                         note could not be written to storage: {err}",
                     ))
                 }
             }
@@ -261,8 +287,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
             Err(err) => {
                 evidence_error_type = Some("StorageError".to_string());
                 ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: scratch\nop: read\nerror: {}",
-                    err
+                    "Action result: memmgr\ntype: scratch\nop: read\nerror: The scratch note \
+                     could not be read from storage: {err}",
                 ))
             }
         },
@@ -294,8 +320,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
             Err(err) => {
                 evidence_error_type = Some("StorageError".to_string());
                 ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: scratch\nop: search\nerror: {}",
-                    err
+                    "Action result: memmgr\ntype: scratch\nop: search\nerror: The scratch \
+                     search could not be read from storage: {err}",
                 ))
             }
         },
@@ -311,15 +337,18 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
             Err(err) => {
                 evidence_error_type = Some("StorageError".to_string());
                 ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: scratch\nop: delete\nerror: {}",
-                    err
+                    "Action result: memmgr\ntype: scratch\nop: delete\nerror: The scratch \
+                     note could not be deleted from storage: {err}",
                 ))
             }
         },
         _ => {
             evidence_error_type = Some("InvalidInput".to_string());
             ActionOutcome::failed(format!(
-                "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
+                "Action result: memmgr\ntype: {}\nop: {}\nerror: No memory operation was \
+                 performed: type/op must be durable(schema|sql|insert|update|upsert|delete), \
+                 raw_chat(search|delete), or scratch(search|write|read|delete) (detail: \
+                 unsupported_type_or_op). Use one of those combinations.",
                 mem_type, op
             ))
         }
@@ -332,6 +361,49 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
         content: evidence_content,
         error_type: evidence_error_type,
     })
+}
+
+fn sql_error_prose(err: &str) -> String {
+    format!(
+        "Cannot run the SQL query ({err}). memmgr SQL accepts SELECT, WITH ... SELECT, or \
+         PRAGMA table_info(memories) only; writes go through type=durable ops."
+    )
+}
+
+fn durable_error_prose(op: &str, err: &str) -> String {
+    match err {
+        "content_required" => {
+            "The durable memory write needs a non-empty `content` (detail: content_required). \
+             Provide the content and retry."
+                .to_string()
+        }
+        "id_required" => {
+            "The durable memory operation needs the row `id` (detail: id_required). Read rows \
+             first with type=durable op=sql and retry with an existing id."
+                .to_string()
+        }
+        "id_not_found" => {
+            "No durable memory row with this id exists (detail: id_not_found). List rows with \
+             type=durable op=sql, then retry with an existing id."
+                .to_string()
+        }
+        "operation_must_be_insert_update_upsert_or_delete" => {
+            "The durable op must be insert, update, upsert, or delete (detail: \
+             operation_must_be_insert_update_upsert_or_delete). Use one of those ops."
+                .to_string()
+        }
+        _ if err.starts_with("memory_conflict ") => format!(
+            "The durable memory row changed since you read it, so the write was rejected. \
+             Re-read the row with type=durable op=sql and retry with \
+             expected_version=current_version (detail: {err})."
+        ),
+        _ if err.starts_with("missing_expected_version ") => format!(
+            "Updating or deleting an existing durable row requires expected_version from the \
+             latest type=durable op=sql read (detail: {err}). Read the row first, then retry \
+             with expected_version=current_version."
+        ),
+        _ => format!("Cannot {op} the durable memory: {err}"),
+    }
 }
 
 #[cfg(test)]

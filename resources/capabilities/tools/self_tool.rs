@@ -94,7 +94,7 @@ pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction
                         )
                     }
                     Err(error) => {
-                        let content = error.to_string();
+                        let content = self_cwd_error_message(&error.to_string());
                         (
                             ActionOutcome::failed(format!(
                                 "Action result: self_tool\ntype: cwd\nerror: {content}"
@@ -125,7 +125,9 @@ pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction
             )
         }
         _ => {
-            let content = "unsupported_type".to_string();
+            let content = "No self information was read: type must be \"path\", \"cwd\", or \
+                 \"params\" (detail: unsupported_type). Use one of those values."
+                .to_string();
             (
                 ActionOutcome::failed(format!(
                     "Action result: self_tool\ntype: {self_type}\nerror: {content}"
@@ -285,6 +287,25 @@ fn round_budget_label(rounds: u32) -> String {
         "unlimited".to_string()
     } else {
         rounds.to_string()
+    }
+}
+
+fn self_cwd_error_message(error: &str) -> String {
+    if error == "new_path_required" {
+        "The working directory was not changed: `new_path` is required (detail: \
+         new_path_required). Provide an absolute path or a path relative to the current \
+         directory."
+            .to_string()
+    } else if error == "path_not_found" {
+        "The working directory was not changed: the path does not exist (detail: \
+         path_not_found). Check the path and retry."
+            .to_string()
+    } else if error == "path_is_not_directory" {
+        "The working directory was not changed: the path is not a directory (detail: \
+         path_is_not_directory). Provide a directory path."
+            .to_string()
+    } else {
+        format!("The working directory was not changed: {error}")
     }
 }
 

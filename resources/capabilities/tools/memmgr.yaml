@@ -2,7 +2,7 @@ kind: tool
 id: memmgr
 binding_type: builtin
 binding_name: memmgr
-summary: Unified local memory manager.
+summary: Search and save durable user facts, the visible chat transcript, and scratch notes.
 description: |
   Unified local memory manager. Use type=durable for long-lived user facts,
   type=raw_chat for UI-visible chat transcript, type=scratch for temporary notes.

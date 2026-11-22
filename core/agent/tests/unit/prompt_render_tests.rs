@@ -702,14 +702,12 @@ fn native_prompt_encourages_progress_updates_without_changing_finalization_seman
     );
 
     assert!(
-        rendered.contains(
-            "you should report to user your progress often, or answer questions while working"
-        ),
+        rendered.contains("ordinary response text is user-visible progress or answers"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("text without tool calls keeps the loop running"),
-        "{rendered}"
+        !rendered.contains("call task_finished to end it"),
+        "finalization semantics stay in the Tool Calling section only: {rendered}"
     );
 }
 
@@ -726,19 +724,23 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
     );
 
     assert!(rendered.contains("## Built-in Tools"), "{rendered}");
+    // The native catalog carries one summary line per tool; the full
+    // description text and input schemas live solely in the tool
+    // definitions sent through the model API.
     assert!(
-        rendered.contains(
-            "One response can reasonably contain multiple tool calls for better performance."
-        ),
+        rendered.contains("`run_bash`: Run local shell commands."),
         "{rendered}"
     );
-    // The native catalog only names the tools once and points at the API
-    // tool schema descriptions; the full description text lives solely in
-    // the tool definitions sent through the model API.
     assert!(
-        rendered.contains(
-            "They are also provided as tool schema definitions in this request; refer to each tool's schema description for usage details."
-        ),
+        rendered.contains("`readfile`: Read a bounded range from a normal text file."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("One response can reasonably contain multiple tool calls"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("They are also provided as tool schema definitions in this request"),
         "{rendered}"
     );
     assert!(rendered.contains("`run_bash`"), "{rendered}");

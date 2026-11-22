@@ -31,13 +31,13 @@ pub(crate) const MANUAL_CONTEXT_COMPRESS_TRAILER: &str = concat!(
     context_compress_caution!(),
     "Your tool calls must start with context_compress:"
 );
-const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compress` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compression succeeds.";
-const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
+const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nYou can respond with tool calls to collect supporting information for your work. You can issue multiple tools if possible. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it.";
+const NATIVE_RESPONSE_MODE_INSTRUCTION: &str =
+    "Use the API tool-call channel for runtime capabilities; ordinary response text is user-visible progress or answers.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
 const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";
-const NATIVE_BUILTIN_TOOLS_HEADING: &str =
-    "## Built-in Tools\n\nBuilt-in tool parameter schemas and descriptions are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
+const NATIVE_BUILTIN_TOOLS_HEADING: &str = "## Built-in Tools\n\nEach built-in tool is listed with a one-line summary. Its full description and parameter schema are delivered with the API tool definitions.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
 pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Please continue the work and respond as protocol requires in user's language:";
@@ -373,7 +373,7 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let with_caps = if tool_call_mode == ToolCallMode::Native {
         with_protocol.replace(
             "{{TOOL_CATALOG}}",
-            &capabilities.render_native_builtin_tool_names_markdown(),
+            &capabilities.render_native_builtin_tool_summaries_markdown(),
         )
     } else {
         capabilities.enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format())

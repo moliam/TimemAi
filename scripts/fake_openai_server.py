@@ -80,6 +80,8 @@ class Handler(BaseHTTPRequestHandler):
                 capture.write("\n---TIMEM_FAKE_MODEL_REQUEST---\n")
         if self.scenario == "contract":
             content = contract_scenario_response(prompt)
+        elif self.scenario == "file_edits":
+            content = file_edits_scenario_response(prompt)
         elif self.scenario == "toolgen":
             content = toolgen_scenario_response(prompt)
         elif "CROSS_HOST_RESUME_SMOKE" in prompt:
@@ -130,6 +132,20 @@ class Handler(BaseHTTPRequestHandler):
             for item in body.get("messages", [])
         )
 
+        messages = body.get("messages") or []
+        last_user_text = ""
+        turn_tool_result = False
+        for index, item in enumerate(messages):
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            last_user_text = content if isinstance(content, str) else json.dumps(content)
+            turn_tool_result = any(
+                isinstance(later, dict) and later.get("role") == "tool"
+                for later in messages[index + 1:]
+            )
+
+
         def tool_call(name, arguments):
             return {
                 "id": f"call_{name}",
@@ -146,6 +162,30 @@ class Handler(BaseHTTPRequestHandler):
                 call = tool_call(
                     "run_bash",
                     {"cmd": "printf CONTRACT_E2E_ACTION_DONE", "timeout_ms": 5000},
+                )
+        elif "FILE_EDITS_FOREGROUND" in last_user_text:
+            if turn_tool_result:
+                call = tool_call("task_finished", {"summary": "FILE_EDITS_FG_OK"})
+            else:
+                call = tool_call(
+                    "run_bash",
+                    {
+                        "cmd": "printf 'line1\\nline2\\n' > fg_edit_demo.txt",
+                        "timeout_ms": 5000,
+                        "edit": ["fg_edit_demo.txt"],
+                    },
+                )
+        elif "FILE_EDITS_BACKGROUND" in last_user_text:
+            if turn_tool_result:
+                call = tool_call("task_finished", {"summary": "FILE_EDITS_BG_OK"})
+            else:
+                call = tool_call(
+                    "run_bash",
+                    {
+                        "cmd": "sleep 0.5; printf 'bg1\\nbg2\\n' > bg_edit_demo.txt",
+                        "background": True,
+                        "edit": ["bg_edit_demo.txt"],
+                    },
                 )
         elif "TTY_STRESS" in prompt_text and "STRESS_ACTION_DONE" in prompt_text:
             call = tool_call("task_finished", {"summary": "STRESS_OK"})
@@ -293,6 +333,42 @@ def contract_scenario_response(prompt):
     return xml_action(
         {"run_bash": {"cmd": "printf CONTRACT_E2E_ACTION_DONE", "timeout_ms": 5000}},
         "Running a real run_bash action through the rendered tool catalog.",
+    )
+
+
+def file_edits_scenario_response(prompt):
+    """Drive foreground and background run_bash turns that declare `edit` paths."""
+
+    if "FILE_EDITS_FOREGROUND" in prompt:
+        if "Action result: run_bash" in prompt and "FILE_EDITS_FG_DONE" in prompt:
+            return xml_action(
+                {"task_finished": {"summary": "FILE_EDITS_FG_OK"}},
+                "Foreground file-edit roundtrip verified.",
+            )
+        return xml_action(
+            {
+                "run_bash": {
+                    "cmd": "printf 'line1\\nline2\\n' > fg_edit_demo.txt",
+                    "timeout_ms": 5000,
+                    "edit": ["fg_edit_demo.txt"],
+                },
+            },
+            "Creating a demo file with a declared edit path.",
+        )
+    if "Action result: run_bash" in prompt and "FILE_EDITS_BG_DONE" in prompt:
+        return xml_action(
+            {"task_finished": {"summary": "FILE_EDITS_BG_OK"}},
+            "Background file-edit submitted; diff arrives with the job exit topic.",
+        )
+    return xml_action(
+        {
+            "run_bash": {
+                "cmd": "sleep 0.5; printf 'bg1\\nbg2\\n' > bg_edit_demo.txt",
+                "background": True,
+                "edit": ["bg_edit_demo.txt"],
+            },
+        },
+        "Starting a background job that edits a declared file.",
     )
 
 
@@ -472,7 +548,7 @@ def main():
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--capture-prompt-file")
     parser.add_argument(
-        "--scenario", choices=("default", "toolgen", "contract"), default="default"
+        "--scenario", choices=("default", "toolgen", "contract", "file_edits"), default="default"
     )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()

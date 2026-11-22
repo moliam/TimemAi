@@ -73,7 +73,10 @@ fn execute_context_compress(
     // can atomically rewrite prompt state. This callback is a defensive guard
     // that also keeps manifest and compiled binding registries paired.
     ActionExecution::Completed(crate::ActionOutcome::failed(
-        "Action result: context_compress\nerror: intrinsic_dispatch_required",
+        "Action result: context_compress\nerror: This context_compress call reached the \
+         ordinary dispatch path and was not executed; the runtime promotes \
+         context_compress before dispatch (detail: intrinsic_dispatch_required). \
+         Retry the compression normally.",
     ))
 }
 

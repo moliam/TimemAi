@@ -946,7 +946,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
 fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field() {
     let memory_dir = tmp_dir("native_mcp_not_static");
     let mut core = test_core(
-        "STATIC\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
+        "STATIC\n{{TOOL_CATALOG_SECTION_HEADING}}\n\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
         profile("model"),
         &memory_dir,
     );
@@ -1007,8 +1007,9 @@ fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field()
     assert!(prompt.starts_with("[BEGIN SYSTEM PROMPT]\n"), "{prompt}");
     assert!(!prompt.contains("<Timem System Prompt>"));
     let static_end = prompt.find("[END SYSTEM PROMPT]").unwrap();
+    assert!(prompt.contains("## Built-in Tools"), "{prompt}");
     assert!(
-        prompt.contains("The runtime exposes the following tools:"),
+        prompt.contains("`run_bash`: Run local shell commands."),
         "{prompt}"
     );
     assert!(prompt.contains("`run_bash`"), "{prompt}");
@@ -1019,7 +1020,11 @@ fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field()
         "native mode must not duplicate tool descriptions in the static prompt: {prompt}"
     );
     assert!(!prompt.contains("\"input_schema\""), "{prompt}");
-    assert!(!prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
+    assert!(
+        prompt.contains("## Current MCP Tools")
+            && prompt.contains("`mcp_demo_mcp__echo`: Echo a value"),
+        "native mode lists MCP summaries in the prompt: {prompt}"
+    );
     assert!(!prompt.contains("MCP update:"), "{prompt}");
 
     let request = core.model_interaction_request(prompt.clone());
@@ -1068,7 +1073,11 @@ fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field()
         &prompt[..static_end],
         "MCP changes must not invalidate the native builtin static prefix"
     );
-    assert!(!updated_prompt.contains("mcp_demo_mcp__search"));
+    assert!(
+        updated_prompt.contains("## Current MCP Tools")
+            && updated_prompt.contains("`mcp_demo_mcp__search`: Search dynamically"),
+        "the per-request MCP section follows the latest MCP set: {updated_prompt}"
+    );
     assert!(!updated_prompt.contains("MCP update:"));
     let updated_request = core.model_interaction_request(updated_prompt.clone());
     assert!(updated_request.tools[updated_request.static_tool_count..]
@@ -6525,7 +6534,7 @@ fn sql_read_rejects_write_statement() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("error: read_only_sql_required"));
+    assert!(prompt.contains("Cannot run the SQL query (read_only_sql_required)"));
 }
 
 #[test]
@@ -6571,7 +6580,7 @@ fn sql_read_rejects_other_tables() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
+    assert!(prompt.contains("Cannot run the SQL query (only_declared_tables_are_allowed)"));
 }
 
 #[test]
@@ -6640,7 +6649,7 @@ fn memory_sql_query_rejects_chat_messages_table_info() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
+    assert!(prompt.contains("Cannot run the SQL query (only_declared_tables_are_allowed)"));
 }
 
 #[test]
@@ -6658,7 +6667,7 @@ fn memory_sql_query_rejects_non_memories_pragma() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
+    assert!(prompt.contains("Cannot run the SQL query (only_declared_tables_are_allowed)"));
 }
 
 #[test]
@@ -6892,7 +6901,7 @@ fn memory_sql_query_rejects_chat_messages_reads() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
+    assert!(prompt.contains("Cannot run the SQL query (only_declared_tables_are_allowed)"));
 }
 
 #[test]
@@ -6966,7 +6975,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("error: read_only_sql_required"));
+    assert!(prompt.contains("Cannot run the SQL query (read_only_sql_required)"));
 }
 
 #[test]
@@ -6997,7 +7006,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("error: read_only_sql_required"));
+    assert!(prompt.contains("Cannot run the SQL query (read_only_sql_required)"));
     assert_eq!(fs::read_to_string(&audit_file).unwrap(), before);
 }
 
@@ -8563,7 +8572,9 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!action_results(&delete_prompt).is_empty());
-    assert!(delete_prompt.contains("error: id_not_found"));
+    assert!(
+        delete_prompt.contains("No durable memory row with this id exists (detail: id_not_found)")
+    );
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -9717,7 +9728,7 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
     assert!(prompt.contains("#### `run_bash`"));
     assert!(!prompt.contains("#### `shell_job_status`"));
     assert!(!prompt.contains("\"release_quality_gate\""));
-    assert!(prompt.contains("Unified local memory manager"));
+    assert!(prompt.contains("Search and save durable user facts"));
     assert!(prompt.contains("Read a bounded range from a normal text file"));
     assert!(prompt.contains("`timeout_ms` is only how long Timem waits"));
     assert!(prompt.contains("It is not a kill deadline"));
@@ -10386,7 +10397,14 @@ fn self_tool_cwd_failure_keeps_context_and_emits_no_structured_state() {
         has_runtime_metadata(&prompt, "error_type", json!("InvalidPath")),
         "{prompt}"
     );
-    assert_eq!(tool_contents(&prompt), vec!["path_not_found".to_string()]);
+    assert_eq!(
+        tool_contents(&prompt),
+        vec![
+            "The working directory was not changed: the path does not exist (detail: \
+             path_not_found). Check the path and retry."
+                .to_string()
+        ]
+    );
     assert!(!has_tool_output_containing(&prompt, "content", "/forged"));
     assert!(!has_tool_output_containing(
         &prompt,

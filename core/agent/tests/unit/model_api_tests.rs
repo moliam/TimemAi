@@ -1265,9 +1265,10 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
             .body;
     assert_eq!(chat_body["parallel_tool_calls"], json!(true));
     assert_eq!(chat_body["tools"][0]["function"]["name"], "count_lines");
-    assert!(chat_body["tools"][0]["function"]
-        .get("description")
-        .is_none());
+    assert_eq!(
+        chat_body["tools"][0]["function"]["description"],
+        "Count source lines."
+    );
     assert!(chat_body["tools"][0]["function"]
         .get("parameters")
         .is_some());
@@ -1281,7 +1282,10 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
             .model_request
             .body;
     assert_eq!(responses_body["tools"][0]["name"], "count_lines");
-    assert!(responses_body["tools"][0].get("description").is_none());
+    assert_eq!(
+        responses_body["tools"][0]["description"],
+        "Count source lines."
+    );
     assert!(responses_body["tools"][0].get("parameters").is_some());
     assert_eq!(
         responses_body["tools"][1]["description"],
@@ -1294,7 +1298,10 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
             .model_request
             .body;
     assert_eq!(anthropic_body["tools"][0]["name"], "count_lines");
-    assert!(anthropic_body["tools"][0].get("description").is_none());
+    assert_eq!(
+        anthropic_body["tools"][0]["description"],
+        "Count source lines."
+    );
     assert!(anthropic_body["tools"][0].get("input_schema").is_some());
     assert_eq!(
         anthropic_body["tools"][1]["description"],

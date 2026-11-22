@@ -256,3 +256,114 @@ export function mailboxPresentation(
   }
   return;
 }
+
+export type FileEditOp = "created" | "modified" | "deleted" | "unchanged" | "skipped";
+export type FileEditPresentation = {
+  path: string;
+  op: FileEditOp;
+  diff: string | null;
+  added_lines: number;
+  removed_lines: number;
+  truncated: boolean;
+  skip_reason: string | null;
+};
+export type FileEditsPresentation = FileEditPresentation[];
+
+const FILE_EDIT_OPS = new Set<FileEditOp>([
+  "created",
+  "modified",
+  "deleted",
+  "unchanged",
+  "skipped",
+]);
+const FILE_EDIT_SKIP_REASONS = new Set([
+  "binary",
+  "too_large",
+  "unreadable",
+  "not_captured",
+  "budget_exhausted",
+]);
+const MAX_FILE_EDIT_ENTRIES = 16;
+const MAX_FILE_EDIT_DIFF_CHARS = 40_000;
+
+// Parses the runtime-provided `edits` array from the core.action finish
+// payload. Strict all-or-nothing: any malformed entry rejects the whole
+// payload so the generic fallback never shows half-trusted diff data.
+export function fileEditsPresentation(value: unknown): FileEditsPresentation | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FILE_EDIT_ENTRIES) return;
+  const edits: FileEditsPresentation = [];
+  for (const item of value) {
+    if (!record(item)) return;
+    if (typeof item.path !== "string" || !item.path.trim() || item.path.length > 512) return;
+    if (typeof item.op !== "string" || !FILE_EDIT_OPS.has(item.op as FileEditOp)) return;
+    if (item.diff !== null && typeof item.diff !== "string") return;
+    if (typeof item.diff === "string" && item.diff.length > MAX_FILE_EDIT_DIFF_CHARS) return;
+    const added = item.added_lines;
+    if (typeof added !== "number" || !Number.isSafeInteger(added) || added < 0 || added > 1_000_000) return;
+    const removed = item.removed_lines;
+    if (typeof removed !== "number" || !Number.isSafeInteger(removed) || removed < 0 || removed > 1_000_000) return;
+    if (typeof item.truncated !== "boolean") return;
+    if (item.skip_reason !== null
+      && (typeof item.skip_reason !== "string" || !FILE_EDIT_SKIP_REASONS.has(item.skip_reason))) return;
+    if (Object.keys(item).some(key => !["path", "op", "diff", "added_lines", "removed_lines", "truncated", "skip_reason"].includes(key))) return;
+    edits.push({
+      path: item.path,
+      op: item.op as FileEditOp,
+      diff: item.diff,
+      added_lines: added,
+      removed_lines: removed,
+      truncated: item.truncated,
+      skip_reason: item.skip_reason,
+    });
+  }
+  return edits;
+}
+
+export type DiffRowKind = "hunk" | "meta" | "add" | "del" | "ctx";
+export type DiffRow = {
+  kind: DiffRowKind;
+  oldNo?: number;
+  newNo?: number;
+  text: string;
+};
+
+// Parses bounded unified diff text (as produced by the runtime) into table
+// rows. Line numbers follow the standard 1-based numbering with 0 starts for
+// empty ranges; unknown lines degrade to dimmed meta rows.
+export function parseDiffRows(diff: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldNo = 0;
+  let newNo = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("@@")) {
+      const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (match) {
+        oldNo = Number(match[1]);
+        newNo = Number(match[3]);
+        rows.push({ kind: "hunk", text: line });
+        continue;
+      }
+      rows.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("\\ ")) {
+      rows.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (line.startsWith("+")) {
+      rows.push({ kind: "add", newNo: newNo++, text: line.slice(1) });
+      continue;
+    }
+    if (line.startsWith("-")) {
+      rows.push({ kind: "del", oldNo: oldNo++, text: line.slice(1) });
+      continue;
+    }
+    if (line.startsWith(" ")) {
+      rows.push({ kind: "ctx", oldNo: oldNo++, newNo: newNo++, text: line.slice(1) });
+      continue;
+    }
+    if (line === "") continue;
+    rows.push({ kind: "meta", text: line });
+  }
+  return rows;
+}

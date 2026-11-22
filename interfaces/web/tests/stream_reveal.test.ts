@@ -196,7 +196,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(mainSource).toContain("const runningStreamTools = useMemo(");
    expect(mainSource.match(/document.addEventListener\("selectionchange"/g)?.length).toBe(1);
    expect(mainSource).toContain("if (followBottom) frame = requestAnimationFrame(follow)");
-   expect(mainSource).toContain("completed.length > 0 && !expanded && !interactionHeld");
+   expect(mainSource).toContain("mergeableCount > 0 && !expanded && !interactionHeld");
    expect(mainSource).toContain("superseded || handoffIds.has(activity.id)");
    expect(mainSource).not.toContain("setMergeReady");
    expect(mainSource).toContain("const open = expanded || interactionHeld");
@@ -204,7 +204,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
  });
 
 it("animates growing merged counts without remounting the toggle", () => {
-  expect(mainSource).toContain("merged && completed.length > previousMergedCount.current");
+  expect(mainSource).toContain("merged && mergeableCount > previousMergedCount.current");
   expect(mainSource).toContain('<span key={countRevision}');
   expect(mainSource).toContain("toolResultCountsLabel(succeededCount, failedCount)");
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");

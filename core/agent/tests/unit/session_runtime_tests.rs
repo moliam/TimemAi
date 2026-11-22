@@ -6294,7 +6294,7 @@ impl ModelClient for NativeRoundTripModel {
             && request.rendered_prompt.contains("## Built-in Tools")
             && request
                 .rendered_prompt
-                .contains("refer to each tool's schema description for usage details")
+                .contains("`run_bash`: Run local shell commands.")
             && request.rendered_prompt.contains("`run_bash`")
             && !request.rendered_prompt.contains("## Actions")
             && !request

@@ -428,6 +428,7 @@ export type Activity = {
   self_tool?: import("./tool_presentation").SelfToolPresentation;
   readfile?: import("./tool_presentation").ReadFilePresentation;
   run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
+  edits?: import("./tool_presentation").FileEditsPresentation;
   timer?: import("./tool_presentation").TimerPresentation;
   mailbox?: import("./tool_presentation").MailboxPresentation;
   elapsed_ms?: number;

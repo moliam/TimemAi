@@ -30,7 +30,10 @@ pub fn execute(registry: &CapabilityRegistry, input: CapmgrActionInput<'_>) -> S
             }
             registry.load_text(input.kind.trim(), input.id)
         }
-        other => format!("Action result: capmgr\nop: {other}\nerror: unsupported_op"),
+        other => format!(
+            "Action result: capmgr\nop: {other}\nerror: unsupported_op\nmessage: op must \
+             be list, load, job_status, or job_cancel. Provide a valid op and retry."
+        ),
     }
 }
 

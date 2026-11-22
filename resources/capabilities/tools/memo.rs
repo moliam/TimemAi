@@ -22,7 +22,10 @@ pub(crate) fn execute_action(
     let outcome_text = match op {
         "create" | "update" => {
             if text.is_empty() {
-                return failed("text_required");
+                return failed(
+                    "Cannot create or update the memo: `text` is required (detail: \
+                 text_required). Provide the refined long-task reminder text.",
+                );
             }
             let creating = core.active_memo().is_none();
             core.set_active_memo(text.clone());
@@ -46,7 +49,12 @@ pub(crate) fn execute_action(
             )]);
             "Memo deleted. No active memo. Reminder: make sure that all user's demands/goal are met. If next step is clear, you should automatically continue without disturbing user. Don't `finish` in the middle unless user asks.".to_string()
         }
-        _ => return failed("op_invalid"),
+        _ => {
+            return failed(
+                "No memo action was performed: op must be create, update, or delete \
+                 (detail: op_invalid).",
+            )
+        }
     };
     ActionExecution::Completed(ActionOutcome::completed(outcome_text))
 }

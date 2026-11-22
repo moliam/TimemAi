@@ -1,0 +1,755 @@
+// Bounded file-edit evidence for shell tools. When the model declares `edit`
+// paths on run_bash/run_powershell, the runtime snapshots those files before
+// execution, re-reads them after, and produces structured unified diffs for
+// the finish-topic payload consumed by interfaces. Everything here is bounded
+// by design: hard caps on file count, snapshot bytes, per-file diff text, and
+// the total serialized payload; overruns degrade to explicit skip reasons
+// instead of unbounded data. Snapshot data never enters the model context.
+
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+/// Maximum number of declared paths captured and reported per tool call.
+pub(crate) const MAX_EDIT_FILES: usize = 16;
+/// Per-file snapshot read cap. Larger files degrade to `too_large`.
+const MAX_SNAPSHOT_FILE_BYTES: usize = 512 * 1024;
+/// Total snapshot budget retained per tool call.
+const MAX_SNAPSHOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+/// Serialized diff text cap per file.
+const MAX_DIFF_FILE_BYTES: usize = 32 * 1024;
+/// Serialized total payload budget across all entries.
+const MAX_EDITS_PAYLOAD_BYTES: usize = 96 * 1024;
+/// Unified-diff context lines around each change region.
+const DIFF_CONTEXT_LINES: usize = 3;
+/// Middle-section line cap before falling back to a whole-file replace diff.
+const PATIENCE_MIDDLE_LINE_CAP: usize = 5000;
+/// Maximum DP table cells for small-section LCS.
+const DP_MAX_CELLS: usize = 40_000;
+/// Patience recursion depth cap; deeper regions fall back to whole replace.
+const PATIENCE_DEPTH_CAP: usize = 48;
+/// Display/path clamp for model-declared path strings.
+const MAX_DECLARED_PATH_CHARS: usize = 512;
+
+const SKIP_BINARY: &str = "binary";
+const SKIP_TOO_LARGE: &str = "too_large";
+const SKIP_UNREADABLE: &str = "unreadable";
+const SKIP_NOT_CAPTURED: &str = "not_captured";
+const SKIP_BUDGET: &str = "budget_exhausted";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileEditOp {
+    Created,
+    Modified,
+    Deleted,
+    Unchanged,
+    Skipped,
+}
+
+impl FileEditOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEditEntry {
+    pub path: String,
+    pub op: FileEditOp,
+    pub diff: Option<String>,
+    pub added_lines: u32,
+    pub removed_lines: u32,
+    pub truncated: bool,
+    pub skip_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileEditsEvidence {
+    pub edits: Vec<FileEditEntry>,
+}
+
+/// Snapshot of a file's content as diffable lines, or the reason it could not
+/// be diffed. `Lines` holds content split on `\n` with `\r` trimmed per line
+/// and the trailing newline (when present) not represented as an extra line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileContentSnapshot {
+    Lines(Vec<String>),
+    Binary,
+    TooLarge,
+    Unreadable,
+    Missing,
+}
+
+impl FileContentSnapshot {
+    fn is_diffable(&self) -> bool {
+        matches!(self, Self::Lines(_))
+    }
+
+    fn skip_reason(&self) -> &'static str {
+        match self {
+            Self::Binary => SKIP_BINARY,
+            Self::TooLarge => SKIP_TOO_LARGE,
+            _ => SKIP_UNREADABLE,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeclaredEditSnapshot {
+    declared: String,
+    path: PathBuf,
+    /// `None` when the path was not captured (declared file-count overflow).
+    before: Option<FileContentSnapshot>,
+}
+
+/// Before-state of the declared edit paths for one shell tool call. Kept in
+/// the job for background execution so the exit path can compute evidence.
+#[derive(Debug, Clone, Default)]
+pub struct EditContext {
+    files: Vec<DeclaredEditSnapshot>,
+}
+
+impl EditContext {
+    /// Snapshot every declared path against `cwd` under the hard caps.
+    pub(crate) fn capture(cwd: &Path, declared_paths: &[String]) -> Self {
+        let mut files: Vec<DeclaredEditSnapshot> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut budget = MAX_SNAPSHOT_TOTAL_BYTES;
+        for declared in declared_paths {
+            let declared = declared.trim();
+            if declared.is_empty() || declared.chars().count() > MAX_DECLARED_PATH_CHARS {
+                continue;
+            }
+            let path = resolve_declared_path(cwd, declared);
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let before = if files.len() >= MAX_EDIT_FILES {
+                None
+            } else {
+                let (snapshot, bytes) = read_snapshot(&path, Some(budget));
+                budget = budget.saturating_sub(bytes);
+                Some(snapshot)
+            };
+            files.push(DeclaredEditSnapshot {
+                declared: declared.to_string(),
+                path,
+                before,
+            });
+        }
+        Self { files }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Read the after-states and build bounded evidence. Runs at completion
+    /// time (foreground) or on the job supervisor thread (background).
+    pub(crate) fn compute_evidence(&self) -> FileEditsEvidence {
+        let mut entries = Vec::with_capacity(self.files.len());
+        for file in &self.files {
+            let Some(before) = file.before.as_ref() else {
+                entries.push(FileEditEntry {
+                    path: file.declared.clone(),
+                    op: FileEditOp::Skipped,
+                    diff: None,
+                    added_lines: 0,
+                    removed_lines: 0,
+                    truncated: false,
+                    skip_reason: Some(SKIP_NOT_CAPTURED),
+                });
+                continue;
+            };
+            let (after, _) = read_snapshot(&file.path, None);
+            entries.push(build_entry(&file.declared, before, &after));
+        }
+        FileEditsEvidence {
+            edits: apply_payload_budget(entries),
+        }
+    }
+}
+
+fn resolve_declared_path(cwd: &Path, declared: &str) -> PathBuf {
+    let path = Path::new(declared);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// Read one file into a snapshot. `budget` bounds the bytes retained for the
+/// before-capture; `None` means only the per-file cap applies (after-reads).
+fn read_snapshot(path: &Path, budget: Option<usize>) -> (FileContentSnapshot, usize) {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (FileContentSnapshot::Missing, 0)
+        }
+        Err(_) => return (FileContentSnapshot::Unreadable, 0),
+    };
+    if !metadata.is_file() {
+        return (FileContentSnapshot::Unreadable, 0);
+    }
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (FileContentSnapshot::Unreadable, 0),
+    };
+    let mut handle = file.take(MAX_SNAPSHOT_FILE_BYTES as u64 + 1);
+    let mut bytes = Vec::new();
+    if handle.read_to_end(&mut bytes).is_err() {
+        return (FileContentSnapshot::Unreadable, 0);
+    }
+    if bytes.len() as u64 > MAX_SNAPSHOT_FILE_BYTES as u64 {
+        return (FileContentSnapshot::TooLarge, 0);
+    }
+    if let Some(budget) = budget {
+        if bytes.len() > budget {
+            return (FileContentSnapshot::TooLarge, 0);
+        }
+    }
+    let size = bytes.len();
+    if bytes.contains(&0) {
+        return (FileContentSnapshot::Binary, size);
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return (FileContentSnapshot::Binary, size);
+    };
+    (FileContentSnapshot::Lines(split_diff_lines(&text)), size)
+}
+
+fn split_diff_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+fn build_entry(
+    declared: &str,
+    before: &FileContentSnapshot,
+    after: &FileContentSnapshot,
+) -> FileEditEntry {
+    let base = FileEditEntry {
+        path: declared.to_string(),
+        op: FileEditOp::Unchanged,
+        diff: None,
+        added_lines: 0,
+        removed_lines: 0,
+        truncated: false,
+        skip_reason: None,
+    };
+    match (before, after) {
+        (FileContentSnapshot::Lines(old), FileContentSnapshot::Lines(new)) => {
+            if old == new {
+                base
+            } else {
+                let mut entry = base;
+                entry.op = FileEditOp::Modified;
+                entry.extend_from_diff(declared, old, new);
+                entry
+            }
+        }
+        (FileContentSnapshot::Missing, FileContentSnapshot::Lines(new)) => {
+            let mut entry = base;
+            entry.op = FileEditOp::Created;
+            entry.extend_from_diff(declared, &[], new);
+            entry
+        }
+        (FileContentSnapshot::Lines(old), FileContentSnapshot::Missing) => {
+            let mut entry = base;
+            entry.op = FileEditOp::Deleted;
+            entry.extend_from_diff(declared, old, &[]);
+            entry
+        }
+        (FileContentSnapshot::Missing, FileContentSnapshot::Missing) => base,
+        _ => {
+            let mut entry = base;
+            entry.op = FileEditOp::Skipped;
+            entry.skip_reason = Some(if before.is_diffable() {
+                after.skip_reason()
+            } else {
+                before.skip_reason()
+            });
+            entry
+        }
+    }
+}
+
+impl FileEditEntry {
+    /// Fill diff fields for a created/modified/deleted file.
+    fn extend_from_diff(&mut self, declared: &str, old: &[String], new: &[String]) {
+        let ops = diff_lines(old, new);
+        self.added_lines = ops
+            .iter()
+            .filter(|op| matches!(op, DiffOp::Insert(_)))
+            .count() as u32;
+        self.removed_lines = ops
+            .iter()
+            .filter(|op| matches!(op, DiffOp::Delete(_)))
+            .count() as u32;
+        let mut text = String::new();
+        if self.op == FileEditOp::Created {
+            text.push_str("--- /dev/null\n");
+            text.push_str(&format!("+++ b/{declared}\n"));
+        } else if self.op == FileEditOp::Deleted {
+            text.push_str(&format!("--- a/{declared}\n"));
+            text.push_str("+++ /dev/null\n");
+        } else {
+            text.push_str(&format!("--- a/{declared}\n+++ b/{declared}\n"));
+        }
+        for hunk in group_hunks(old, new, &ops) {
+            let rendered = render_hunk(&hunk);
+            if text.len() + rendered.len() > MAX_DIFF_FILE_BYTES {
+                self.truncated = true;
+                break;
+            }
+            text.push_str(&rendered);
+        }
+        self.diff = Some(text);
+    }
+}
+
+fn entry_json(entry: &FileEditEntry) -> Value {
+    json!({
+        "path": entry.path,
+        "op": entry.op.as_str(),
+        "diff": entry.diff,
+        "added_lines": entry.added_lines,
+        "removed_lines": entry.removed_lines,
+        "truncated": entry.truncated,
+        "skip_reason": entry.skip_reason,
+    })
+}
+
+/// Core-side payload projection for the finish topic (`edits` array). Bounded:
+/// entries over the payload budget degrade to slim or skipped forms.
+pub(crate) fn edits_payload(evidence: &FileEditsEvidence) -> Value {
+    Value::Array(evidence.edits.iter().map(entry_json).collect())
+}
+
+fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
+    let mut kept: Vec<FileEditEntry> = Vec::new();
+    let mut used = 2usize; // "[]"
+    for entry in entries {
+        let full_len = entry_json(&entry).to_string().len() + 1;
+        if used + full_len <= MAX_EDITS_PAYLOAD_BYTES {
+            used += full_len;
+            kept.push(entry);
+            continue;
+        }
+        let mut slim = entry.clone();
+        slim.diff = None;
+        slim.truncated = true;
+        let slim_len = entry_json(&slim).to_string().len() + 1;
+        if used + slim_len <= MAX_EDITS_PAYLOAD_BYTES {
+            used += slim_len;
+            kept.push(slim);
+            continue;
+        }
+        let minimal = FileEditEntry {
+            path: clamp_chars(&entry.path, 128),
+            op: FileEditOp::Skipped,
+            diff: None,
+            added_lines: 0,
+            removed_lines: 0,
+            truncated: false,
+            skip_reason: Some(SKIP_BUDGET),
+        };
+        let minimal_len = entry_json(&minimal).to_string().len() + 1;
+        if used + minimal_len > MAX_EDITS_PAYLOAD_BYTES {
+            break;
+        }
+        used += minimal_len;
+        kept.push(minimal);
+    }
+    kept
+}
+
+fn clamp_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Line diffing: common prefix/suffix trim, patience anchors, small-section
+// LCS, and a whole-file replace fallback. All paths are bounded.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOp {
+    Keep,
+    Delete(usize),
+    Insert(usize),
+}
+
+#[derive(Debug, Clone)]
+struct Hunk {
+    a_start: usize,
+    a_len: usize,
+    b_start: usize,
+    b_len: usize,
+    lines: Vec<(char, String)>,
+}
+
+/// Compute ordered diff ops over `old`/`new`; `Delete`/`Insert` carry the
+/// absolute line index on their own side, and `Keep` positions are derived
+/// from the op stream.
+fn diff_lines(old: &[String], new: &[String]) -> Vec<DiffOp> {
+    let mut interned: HashMap<&str, u32> = HashMap::new();
+    let old_ids: Vec<u32> = old
+        .iter()
+        .map(|line| {
+            let next = interned.len() as u32;
+            *interned.entry(line.as_str()).or_insert(next)
+        })
+        .collect();
+    let new_ids: Vec<u32> = new
+        .iter()
+        .map(|line| {
+            let next = interned.len() as u32;
+            *interned.entry(line.as_str()).or_insert(next)
+        })
+        .collect();
+    let mut ops: Vec<DiffOp> = Vec::new();
+    diff_id_ranges(&old_ids, &new_ids, 0, 0, 0, &mut ops);
+    ops
+}
+
+/// Recursively diff the middle ranges starting at absolute offsets
+/// `a_offset`/`b_offset`. Common prefix/suffix matches are emitted as `Keep`
+/// ops; unsolvable middle regions become whole replace blocks.
+fn diff_id_ranges(
+    a: &[u32],
+    b: &[u32],
+    a_offset: usize,
+    b_offset: usize,
+    depth: usize,
+    ops: &mut Vec<DiffOp>,
+) {
+    let mut a_cursor = 0usize;
+    let mut b_cursor = 0usize;
+    while a_cursor < a.len() && b_cursor < b.len() && a[a_cursor] == b[b_cursor] {
+        ops.push(DiffOp::Keep);
+        a_cursor += 1;
+        b_cursor += 1;
+    }
+    let mut a_end = a.len();
+    let mut b_end = b.len();
+    while a_end > a_cursor && b_end > b_cursor && a[a_end - 1] == b[b_end - 1] {
+        a_end -= 1;
+        b_end -= 1;
+    }
+    let suffix_len = a.len() - a_end;
+    let a_mid = &a[a_cursor..a_end];
+    let b_mid = &b[b_cursor..b_end];
+    let a_start = a_offset + a_cursor;
+    let b_start = b_offset + b_cursor;
+    if a_mid.is_empty() {
+        for index in 0..b_mid.len() {
+            ops.push(DiffOp::Insert(b_start + index));
+        }
+    } else if b_mid.is_empty() {
+        for index in 0..a_mid.len() {
+            ops.push(DiffOp::Delete(a_start + index));
+        }
+    } else if depth >= PATIENCE_DEPTH_CAP
+        || a_mid.len() > PATIENCE_MIDDLE_LINE_CAP
+        || b_mid.len() > PATIENCE_MIDDLE_LINE_CAP
+    {
+        push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops);
+    } else {
+        let anchor_pairs = patience_anchors(a_mid, b_mid);
+        let anchors = patience_lis(&anchor_pairs);
+        if anchors.is_empty() {
+            match lcs_segment(a_mid, b_mid) {
+                Some(segment) => push_segment(&segment, a_start, b_start, ops),
+                None => push_whole_replace(a_mid.len(), b_mid.len(), a_start, b_start, ops),
+            }
+        } else {
+            let mut cursor_a = 0usize;
+            let mut cursor_b = 0usize;
+            for (anchor_a, anchor_b) in anchors {
+                diff_id_ranges(
+                    &a_mid[cursor_a..anchor_a],
+                    &b_mid[cursor_b..anchor_b],
+                    a_start + cursor_a,
+                    b_start + cursor_b,
+                    depth + 1,
+                    ops,
+                );
+                ops.push(DiffOp::Keep);
+                cursor_a = anchor_a + 1;
+                cursor_b = anchor_b + 1;
+            }
+            diff_id_ranges(
+                &a_mid[cursor_a..],
+                &b_mid[cursor_b..],
+                a_start + cursor_a,
+                b_start + cursor_b,
+                depth + 1,
+                ops,
+            );
+        }
+    }
+    for _ in 0..suffix_len {
+        ops.push(DiffOp::Keep);
+    }
+}
+
+fn push_whole_replace(
+    a_len: usize,
+    b_len: usize,
+    a_start: usize,
+    b_start: usize,
+    ops: &mut Vec<DiffOp>,
+) {
+    for index in 0..a_len {
+        ops.push(DiffOp::Delete(a_start + index));
+    }
+    for index in 0..b_len {
+        ops.push(DiffOp::Insert(b_start + index));
+    }
+}
+
+/// Patience anchor candidates: line ids that occur exactly once on each side,
+/// paired by index and returned sorted by old index.
+fn patience_anchors(a_mid: &[u32], b_mid: &[u32]) -> Vec<(usize, usize)> {
+    let mut count_a: HashMap<u32, usize> = HashMap::new();
+    for id in a_mid {
+        *count_a.entry(*id).or_insert(0) += 1;
+    }
+    let mut count_b: HashMap<u32, usize> = HashMap::new();
+    for id in b_mid {
+        *count_b.entry(*id).or_insert(0) += 1;
+    }
+    let mut position_b: HashMap<u32, usize> = HashMap::new();
+    for (index, id) in b_mid.iter().enumerate() {
+        position_b.entry(*id).or_insert(index);
+    }
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for (index, id) in a_mid.iter().enumerate() {
+        if count_a.get(id) != Some(&1) || count_b.get(id) != Some(&1) {
+            continue;
+        }
+        if let Some(b_index) = position_b.get(id) {
+            pairs.push((index, *b_index));
+        }
+    }
+    pairs
+}
+
+/// Longest strictly increasing subsequence over anchor pairs ordered by old
+/// index, comparing new indices. Returns the selected anchor pairs.
+fn patience_lis(pairs: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let mut tails: Vec<(usize, usize)> = Vec::new();
+    let mut prev: Vec<Option<usize>> = vec![None; pairs.len()];
+    for (index, &(_, new_index)) in pairs.iter().enumerate() {
+        let position = tails.partition_point(|&(_, tail)| tail < new_index);
+        if position == tails.len() {
+            tails.push((index, new_index));
+        } else {
+            tails[position] = (index, new_index);
+        }
+        if position > 0 {
+            prev[index] = Some(tails[position - 1].0);
+        }
+    }
+    let mut chain = Vec::with_capacity(tails.len());
+    let mut cursor = tails.last().map(|&(index, _)| index);
+    while let Some(index) = cursor {
+        chain.push(pairs[index]);
+        cursor = prev[index];
+    }
+    chain.reverse();
+    chain
+}
+
+/// LCS via bounded DP; segment ops use relative indices. `None` when the
+/// table would exceed the cap (caller falls back to whole replace).
+fn lcs_segment(a_mid: &[u32], b_mid: &[u32]) -> Option<Vec<DiffOp>> {
+    if a_mid.len() as u64 * b_mid.len() as u64 > DP_MAX_CELLS as u64 {
+        return None;
+    }
+    let rows = a_mid.len() + 1;
+    let columns = b_mid.len() + 1;
+    let mut table = vec![0u32; rows * columns];
+    for row in (0..a_mid.len()).rev() {
+        for column in (0..b_mid.len()).rev() {
+            table[row * columns + column] = if a_mid[row] == b_mid[column] {
+                table[(row + 1) * columns + column + 1] + 1
+            } else {
+                table[(row + 1) * columns + column].max(table[row * columns + column + 1])
+            };
+        }
+    }
+    let mut segment = Vec::new();
+    let mut row = 0usize;
+    let mut column = 0usize;
+    while row < a_mid.len() && column < b_mid.len() {
+        if a_mid[row] == b_mid[column] {
+            segment.push(DiffOp::Keep);
+            row += 1;
+            column += 1;
+        } else if table[(row + 1) * columns + column] >= table[row * columns + column + 1] {
+            segment.push(DiffOp::Delete(row));
+            row += 1;
+        } else {
+            segment.push(DiffOp::Insert(column));
+            column += 1;
+        }
+    }
+    while row < a_mid.len() {
+        segment.push(DiffOp::Delete(row));
+        row += 1;
+    }
+    while column < b_mid.len() {
+        segment.push(DiffOp::Insert(column));
+        column += 1;
+    }
+    Some(segment)
+}
+
+/// Apply a small LCS segment (relative indices) with absolute offsets.
+fn push_segment(segment: &[DiffOp], a_start: usize, b_start: usize, ops: &mut Vec<DiffOp>) {
+    let mut offset_a = 0usize;
+    let mut offset_b = 0usize;
+    for op in segment {
+        match *op {
+            DiffOp::Keep => {
+                ops.push(DiffOp::Keep);
+                offset_a += 1;
+                offset_b += 1;
+            }
+            DiffOp::Delete(_) => {
+                ops.push(DiffOp::Delete(a_start + offset_a));
+                offset_a += 1;
+            }
+            DiffOp::Insert(_) => {
+                ops.push(DiffOp::Insert(b_start + offset_b));
+                offset_b += 1;
+            }
+        }
+    }
+}
+
+/// Precompute the absolute old/new line cursors before each op index, then
+/// group changes into unified-diff hunks with context and 1-based numbering
+/// (0 start for empty ranges, matching standard tools).
+fn group_hunks(old: &[String], new: &[String], ops: &[DiffOp]) -> Vec<Hunk> {
+    let mut a_positions = Vec::with_capacity(ops.len() + 1);
+    let mut b_positions = Vec::with_capacity(ops.len() + 1);
+    let (mut a_position, mut b_position) = (0usize, 0usize);
+    for op in ops {
+        a_positions.push(a_position);
+        b_positions.push(b_position);
+        match *op {
+            DiffOp::Keep => {
+                a_position += 1;
+                b_position += 1;
+            }
+            DiffOp::Delete(_) => a_position += 1,
+            DiffOp::Insert(_) => b_position += 1,
+        }
+    }
+    a_positions.push(a_position);
+    b_positions.push(b_position);
+
+    let mut hunks: Vec<Hunk> = Vec::new();
+    let mut change_cursor = 0usize;
+    while change_cursor < ops.len() {
+        while change_cursor < ops.len() && matches!(ops[change_cursor], DiffOp::Keep) {
+            change_cursor += 1;
+        }
+        if change_cursor >= ops.len() {
+            break;
+        }
+        let first = change_cursor;
+        let mut last = first;
+        let mut cursor = first + 1;
+        while cursor < ops.len() {
+            if matches!(ops[cursor], DiffOp::Keep) {
+                cursor += 1;
+                continue;
+            }
+            if cursor - last <= DIFF_CONTEXT_LINES * 2 {
+                last = cursor;
+                cursor += 1;
+            } else {
+                break;
+            }
+        }
+        let context_start = first.saturating_sub(DIFF_CONTEXT_LINES);
+        let context_end = (last + DIFF_CONTEXT_LINES + 1).min(ops.len());
+        let a_raw_start = a_positions[context_start];
+        let b_raw_start = b_positions[context_start];
+        let mut hunk = Hunk {
+            a_start: a_raw_start,
+            a_len: 0,
+            b_start: b_raw_start,
+            b_len: 0,
+            lines: Vec::new(),
+        };
+        for op_index in context_start..context_end {
+            match ops[op_index] {
+                DiffOp::Keep => {
+                    hunk.lines.push((' ', old[a_positions[op_index]].clone()));
+                    hunk.a_len += 1;
+                    hunk.b_len += 1;
+                }
+                DiffOp::Delete(index) => {
+                    hunk.lines.push(('-', old[index].clone()));
+                    hunk.a_len += 1;
+                }
+                DiffOp::Insert(index) => {
+                    hunk.lines.push(('+', new[index].clone()));
+                    hunk.b_len += 1;
+                }
+            }
+        }
+        if hunk.a_len > 0 {
+            hunk.a_start += 1;
+        }
+        if hunk.b_len > 0 {
+            hunk.b_start += 1;
+        }
+        hunks.push(hunk);
+        change_cursor = context_end;
+    }
+    hunks
+}
+
+fn render_hunk(hunk: &Hunk) -> String {
+    let mut text = format!(
+        "@@ -{},{} +{},{} @@\n",
+        hunk.a_start, hunk.a_len, hunk.b_start, hunk.b_len
+    );
+    for (tag, content) in &hunk.lines {
+        text.push(*tag);
+        text.push_str(content);
+        text.push('\n');
+    }
+    text
+}
+
+#[cfg(test)]
+#[path = "../../../core/agent/tests/unit/file_edits_tests.rs"]
+mod tests;

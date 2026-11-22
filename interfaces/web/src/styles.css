@@ -7132,3 +7132,166 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .endpoint-menu .endpoint-chain-empty { border-color: #dbe5e8; background: #f7fafb; color: #6d8189; }
 :root[data-theme="light"] .endpoint-menu .endpoint-chain-remove { color: #718791; }
 :root[data-theme="light"] .endpoint-menu .endpoint-chain-remove:hover { color: #a75b42; }
+
+/* ------------------------------------------------------------------ */
+/* File-edit diff presentation (run_bash declared edits)               */
+/* ------------------------------------------------------------------ */
+.stream-tool-edits-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(64, 180, 120, 0.12);
+  color: #7fd6a4;
+  font-size: 11px;
+  line-height: 16px;
+  flex: none;
+  white-space: nowrap;
+}
+.file-edits-panel {
+  margin: 8px 0 0;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.file-edit-section {
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+  min-width: 0;
+}
+.file-edit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  min-width: 0;
+}
+.file-edit-toggle { cursor: pointer; }
+.file-edit-op {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.file-edit-op-created { color: #7fd6a4; background: rgba(64, 180, 120, 0.14); }
+.file-edit-op-modified { color: #e8c268; background: rgba(222, 178, 86, 0.14); }
+.file-edit-op-deleted { color: #e59a94; background: rgba(214, 92, 84, 0.15); }
+.file-edit-op-unchanged,
+.file-edit-op-skipped { color: #98afbc; background: rgba(255, 255, 255, 0.05); }
+.file-edit-path {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: 11.5px/1.4 "SFMono-Regular", Consolas, monospace;
+}
+.file-edit-directory { color: #7f929e; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.file-edit-name { color: #e1ebf0; font-weight: 600; flex: none; }
+.file-edit-stats {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 6px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.file-edit-additions { color: #7fd6a4; }
+.file-edit-deletions { color: #e59a94; }
+.file-edit-copy {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  color: #98afbc;
+  font-size: 11px;
+  line-height: 15px;
+  cursor: pointer;
+  user-select: none;
+}
+.file-edit-copy:hover { color: #c9d6de; border-color: rgba(255, 255, 255, 0.22); }
+.file-edit-copy.copy-success { color: #7fd6a4; border-color: rgba(64, 180, 120, 0.4); }
+.file-edit-copy.copy-failed { color: #e59a94; border-color: rgba(214, 92, 84, 0.4); }
+.file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
+.file-edit-diff {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.14);
+  overflow: auto;
+  max-height: 420px;
+}
+.file-edit-diff-table {
+  font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;
+  min-width: 0;
+  padding: 4px 0;
+}
+.file-edit-row {
+  display: grid;
+  /* Line-number gutters size to their content so 3+ digit rows never clip. */
+  grid-template-columns: max-content max-content 1.4ch minmax(0, 1fr);
+  align-items: baseline;
+}
+.file-edit-gutter {
+  color: #5c6f7c;
+  text-align: right;
+  padding-right: 7px;
+  min-width: max-content;
+  white-space: nowrap;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.file-edit-sign { user-select: none; text-align: center; }
+.file-edit-code { white-space: pre; min-width: 0; }
+.file-edit-row-add { background: rgba(64, 180, 120, 0.10); }
+.file-edit-row-add .file-edit-sign { color: #7fd6a4; font-weight: 600; }
+.file-edit-row-del { background: rgba(214, 92, 84, 0.10); }
+.file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
+.file-edit-row-ctx .file-edit-code { color: #8fa3b0; }
+.file-edit-row-hunk {
+  background: rgba(88, 152, 201, 0.08);
+  color: #79a7c7;
+  font-weight: 600;
+  margin: 3px 0;
+}
+.file-edit-row-hunk .file-edit-code { white-space: pre-wrap; }
+.file-edit-row-meta { color: #5c6f7c; }
+.file-edit-row-meta .file-edit-code { white-space: pre-wrap; }
+.file-edit-notice {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #e8c268;
+  background: rgba(222, 178, 86, 0.08);
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+:root[data-theme="light"] .stream-tool-edits-chip { background: #e5f5ec; color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-section { border-color: rgba(0, 0, 0, 0.1); background: #fbfcfd; }
+:root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; background: #e0f2e9; }
+:root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; background: #f7ecd4; }
+:root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; background: #fbe5e3; }
+:root[data-theme="light"] .file-edit-op-unchanged,
+:root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; background: #eef1f3; }
+:root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
+:root[data-theme="light"] .file-edit-name { color: #24333a; }
+:root[data-theme="light"] .file-edit-additions { color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-deletions { color: #b23a31; }
+:root[data-theme="light"] .file-edit-copy { border-color: rgba(0, 0, 0, 0.14); color: #5c6f7c; }
+:root[data-theme="light"] .file-edit-copy:hover { color: #24333a; border-color: rgba(0, 0, 0, 0.28); }
+:root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; border-color: #8fceae; }
+:root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; border-color: #e0a39e; }
+:root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
+:root[data-theme="light"] .file-edit-diff { border-top-color: rgba(0, 0, 0, 0.06); background: #f6f8fa; }
+:root[data-theme="light"] .file-edit-gutter { color: #9aa7b0; }
+:root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }
+:root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-row-del { background: #fbe5e3; }
+:root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
+:root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #6b7f8c; }
+:root[data-theme="light"] .file-edit-row-hunk { background: #e8f1f8; color: #4d7ba3; }
+:root[data-theme="light"] .file-edit-row-meta { color: #9aa7b0; }
+:root[data-theme="light"] .file-edit-notice { color: #8a6d1f; background: #fdf6e3; border-top-color: rgba(0, 0, 0, 0.08); }

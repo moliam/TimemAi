@@ -214,7 +214,7 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("exits with code 0"));
     assert!(rendered.contains("**Synopsis**"));
     assert!(rendered.contains("**Options**"));
-    assert!(rendered.contains("Unified local memory manager"));
+    assert!(rendered.contains("Search and save durable user facts"));
     assert!(rendered.contains("Read a bounded range from a normal text file"));
     assert!(!rendered.contains("Byte numbers address the original"));
     assert!(!rendered.contains("macOS and Linux"));

@@ -1,6 +1,7 @@
 import { useThrottledValue } from "./use_throttled_value";
 import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
+import { FileEditsChip, FileEditsPanel } from "./file_edits_view";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -13243,7 +13244,10 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   const completed = activities.filter(activity =>
     !isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) &&
     (superseded || handoffIds.has(activity.id)));
-  const completedIds = new Set(completed.map(activity => activity.id));
+  // 用户反馈：带文件修改证据的行不并入折叠组，diff 卡片默认保持完整可见；
+  // 折叠开关、计数与脉冲只统计真正被收起的行。
+  const mergeableCount = completed.filter(activity => !activity.edits?.length).length;
+  const completedIds = new Set(completed.filter(activity => !activity.edits?.length).map(activity => activity.id));
   const succeededCount = completed.filter(activity => activity.tool_status === "completed").length;
   const failedCount = completed.length - succeededCount;
   const runRef = useRef<HTMLDivElement>(null);
@@ -13259,19 +13263,19 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
     };
     return subscribeStreamInteraction(update);
   }, []);
-  const merged = completed.length > 0 && !expanded && !interactionHeld;
+  const merged = mergeableCount > 0 && !expanded && !interactionHeld;
   // Visual contract: pulse when NEW results actually enter collapsed Tools,
   // including deferred handoff after completion. Completion alone must not pulse.
   // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
   // Keep the disclosure/rows mounted; animate only the count to avoid scroll jumps.
-  const previousMergedCount = useRef(merged ? completed.length : 0);
+  const previousMergedCount = useRef(merged ? mergeableCount : 0);
   const [countRevision, setCountRevision] = useState(0);
   useEffect(() => {
-    if (merged && completed.length > previousMergedCount.current) {
+    if (merged && mergeableCount > previousMergedCount.current) {
       setCountRevision(value => value + 1);
     }
-    if (merged) previousMergedCount.current = Math.max(previousMergedCount.current, completed.length);
-  }, [merged, completed.length]);
+    if (merged) previousMergedCount.current = Math.max(previousMergedCount.current, mergeableCount);
+  }, [merged, mergeableCount]);
   useLayoutEffect(() => {
     if (!merged) return;
     const focused = document.activeElement;
@@ -13284,8 +13288,8 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
-    {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+    {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
+      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -13351,9 +13355,16 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, running]);
-  const [expanded, setExpanded] = useState(false);
+  // 用户反馈：修改证据自动展开只呈现 diff 面板，命令保持单行缩略显示；
+  // 完整代码与输出仍由手动展开控制，手动收起后不再强制展开。
+  const hasEdits = !!activity.edits?.length;
+  const [expanded, setExpanded] = useState(() => hasEdits);
+  const [manuallyToggled, setManuallyToggled] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
+  useEffect(() => {
+    if (hasEdits) setExpanded(true);
+  }, [hasEdits]);
   useEffect(() => {
     const update = () => {
       const row = rowRef.current;
@@ -13366,10 +13377,12 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     return subscribeStreamInteraction(update);
   }, []);
   const open = expanded || interactionHeld;
-  const hasExpandableDetail = !!code || !!detail;
+  const editsAutoOpen = hasEdits && !manuallyToggled;
+  const hasExpandableDetail = !!code || !!detail || !!activity.edits?.length;
   const toggle = () => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
+    setManuallyToggled(true);
     setExpanded(current => !current);
   };
   return (
@@ -13390,7 +13403,8 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
         {((running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined ||
@@ -13427,8 +13441,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
-          {code && <pre className="stream-tool-command">{code}</pre>}
-          {detail && <div className="stream-tool-detail">{detail}</div>}
+          {!editsAutoOpen && code && <pre className="stream-tool-command">{code}</pre>}
+          {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
+          {!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
     </div>
@@ -13440,7 +13455,8 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
     a.tool_output_bytes === b.tool_output_bytes && a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
     JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
-    JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
+    JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit) &&
+    JSON.stringify(a.edits) === JSON.stringify(b.edits);
 });
 
 const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
@@ -14976,7 +14992,14 @@ function ToolActivity({ activity }: { activity: Activity }) {
     activity.tool_name === "run_bash" ||
     activity.tool_name === "run_powershell";
   const pollingActivity = bashActivity && activity.tool_mode === "poll";
-  const [open, setOpen] = useState(false);
+  // 用户反馈：修改证据自动展开只呈现 diff 面板，命令保持单行缩略显示；
+  // 完整输出与代码仍由手动展开控制，手动收起后不再强制展开。
+  const hasEdits = !!activity.edits?.length;
+  const [open, setOpen] = useState(() => hasEdits);
+  const [manuallyToggled, setManuallyToggled] = useState(false);
+  useEffect(() => {
+    if (hasEdits) setOpen(true);
+  }, [hasEdits]);
   const waitBudgetMs = pollingActivity
     ? activity.loop_timeout_ms
     : bashActivity && activity.tool_mode !== "background"
@@ -14997,7 +15020,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
-  const hasExpandableDetail = !!detail || !!code;
+  const hasExpandableDetail = !!detail || !!code || !!activity.edits?.length;
+  const editsAutoOpen = hasEdits && !manuallyToggled;
   const toolName = toolActivityDisplayName(
     activity.tool_name || activity.title,
     activity.tool_mode,
@@ -15019,11 +15043,12 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
       )}
+      {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
       {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined ||
         activity.tool_output_bytes !== undefined) && (
         <span className="tool-activity-timing">
@@ -15098,23 +15123,27 @@ function ToolActivity({ activity }: { activity: Activity }) {
         aria-label={summaryLabel}
         onClick={event => {
           const selection = window.getSelection();
-          if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode))
+          if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) {
             event.preventDefault();
+            return;
+          }
+          setManuallyToggled(true);
         }}
       >
         {summaryContent}
       </summary>
       <div className="tool-activity-body">
-        {detail && (
+        {!editsAutoOpen && detail && (
           <div className="turn-work-detail">
             <MarkdownContent text={detail} />
           </div>
         )}
-        {code && (
+        {!editsAutoOpen && code && (
           <MarkdownContent
             text={fencedCode(activity.code_language ?? "text", code)}
           />
         )}
+        {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
       </div>
     </details>
   );

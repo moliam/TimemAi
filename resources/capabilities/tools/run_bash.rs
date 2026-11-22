@@ -67,6 +67,7 @@ pub struct ShellJobExitUpdate {
     pub stdout_truncation: Option<StreamCaptureTruncation>,
     pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub output: String,
+    pub edits: Option<crate::file_edits::FileEditsEvidence>,
 }
 
 impl ShellJobExitUpdate {
@@ -212,6 +213,7 @@ struct ManagedShellJob {
     completion_publication: Arc<Mutex<u64>>,
     exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
     process_job: Option<crate::os::ManagedProcessJob>,
+    edits: Option<crate::file_edits::EditContext>,
 }
 
 impl ManagedShellJob {
@@ -262,6 +264,10 @@ impl ManagedShellJob {
             stdout_truncation: finished.stdout_truncation.clone(),
             stderr_truncation: finished.stderr_truncation.clone(),
             output: finished.output.clone(),
+            edits: self
+                .edits
+                .as_ref()
+                .map(|context| context.compute_evidence()),
         }
     }
 
@@ -396,6 +402,7 @@ impl ShellJobManager {
             turn_id,
             "unknown_tool_call",
             false,
+            crate::file_edits::EditContext::default(),
         )
         .text
     }
@@ -408,6 +415,7 @@ impl ShellJobManager {
         turn_id: &str,
         tool_call_id: &str,
         tail_out: bool,
+        edits: crate::file_edits::EditContext,
     ) -> ActionOutcome {
         let clean = command.trim();
         if clean.is_empty() {
@@ -428,6 +436,7 @@ impl ShellJobManager {
             tool_call_id,
             tail_out,
             ShellJobDelivery::Background,
+            (!edits.is_empty()).then_some(edits),
         ) {
             Ok(job) => job,
             Err(error) => {
@@ -500,6 +509,7 @@ impl ShellJobManager {
         tool_call_id: &str,
         tail_out: bool,
         delivery: ShellJobDelivery,
+        edits: Option<crate::file_edits::EditContext>,
     ) -> std::io::Result<Arc<ManagedShellJob>> {
         if self.job_count() >= self.max_jobs {
             return Err(std::io::Error::other(
@@ -581,6 +591,7 @@ impl ShellJobManager {
             completion_publication: Arc::clone(&self.state.completion_publication),
             exit_hooks: Arc::clone(&self.state.exit_hooks),
             process_job,
+            edits,
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
@@ -617,6 +628,7 @@ impl ShellJobManager {
             "unknown_tool_call",
             false,
             runtime,
+            crate::file_edits::EditContext::default(),
         )
         .text
     }
@@ -632,6 +644,7 @@ impl ShellJobManager {
         tool_call_id: &str,
         tail_out: bool,
         runtime: &mut dyn ActionRuntime,
+        edits: crate::file_edits::EditContext,
     ) -> ActionOutcome {
         self.run_with_timeout_structured(
             command,
@@ -642,6 +655,7 @@ impl ShellJobManager {
             tool_call_id,
             tail_out,
             runtime,
+            (!edits.is_empty()).then_some(edits),
         )
         .to_action_outcome(crate::os::local_shell_tool_name())
     }
@@ -657,6 +671,7 @@ impl ShellJobManager {
         tool_call_id: &str,
         tail_out: bool,
         runtime: &mut dyn ActionRuntime,
+        edits: Option<crate::file_edits::EditContext>,
     ) -> BashCommandOutput {
         let clean = command.trim();
         if timeout_ms <= 0 {
@@ -671,6 +686,7 @@ impl ShellJobManager {
             tool_call_id,
             tail_out,
             ShellJobDelivery::Direct,
+            edits,
         ) {
             Ok(job) => job,
             Err(_) => return bash_error(clean, "command_failed"),
@@ -2113,6 +2129,8 @@ pub(crate) fn execute_run_bash_with_tail(
             continuation: None,
         });
     }
+    let edit_context = crate::file_edits::EditContext::capture(cwd, &edited_files);
+    let has_edit_context = !edit_context.is_empty();
     let mut outcome = if background {
         shell_jobs.spawn_background_outcome(
             command_to_run,
@@ -2121,6 +2139,7 @@ pub(crate) fn execute_run_bash_with_tail(
             turn_id,
             tool_call_id,
             tail_out,
+            edit_context.clone(),
         )
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash_outcome_with_tail(
@@ -2142,8 +2161,12 @@ pub(crate) fn execute_run_bash_with_tail(
             tool_call_id,
             tail_out,
             runtime,
+            edit_context.clone(),
         )
     };
+    if !background && has_edit_context {
+        outcome = outcome.with_edits(edit_context.compute_evidence());
+    }
     append_edited_files_note(&mut outcome.text, &edited_files);
     ActionExecution::Completed(outcome)
 }
@@ -2235,8 +2258,18 @@ pub(crate) fn execute_approved_bash_with_tail(
             .with_runtime_metadata("approval_id", request.approval_id.clone())
             .with_runtime_metadata("approval_status", "approved_by_user");
     }
+    let edit_context = crate::file_edits::EditContext::capture(cwd, edited_files);
+    let has_edit_context = !edit_context.is_empty();
     let mut outcome = if background {
-        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tool_call_id, tail_out)
+        shell_jobs.spawn_background_outcome(
+            clean,
+            cwd,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            edit_context.clone(),
+        )
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash_outcome_with_tail(
             clean,
@@ -2257,8 +2290,12 @@ pub(crate) fn execute_approved_bash_with_tail(
             tool_call_id,
             tail_out,
             runtime,
+            edit_context.clone(),
         )
     };
+    if !background && has_edit_context {
+        outcome = outcome.with_edits(edit_context.compute_evidence());
+    }
     append_edited_files_note(&mut outcome.text, edited_files);
     outcome
         .with_runtime_metadata("approval_id", request.approval_id.clone())

@@ -49,8 +49,15 @@ Native to Inline therefore exposes current MCP state even when no historical
 catalog delta exists. Legacy stored `mcp_capability_catalog` slices are hidden in
 all modes to prevent stale duplication.
 
-Stable builtin descriptions remain in the static system prompt, while builtin
-API tool entries retain only names and input schemas. MCP enablement and
+Builtin API tool entries carry names, full descriptions, and input schemas;
+the static system prompt carries only a one-line summary per builtin tool, so
+the provider payload remains the single carrier for the full description,
+parameter schema, and examples. MCP tools stay out of that static prefix so
+enabling, disabling, or updating an MCP server never invalidates it: native
+mode appends a per-request `## Current MCP Tools` section with one summary line
+per connected MCP tool. MCP definitions expose no summary field of their own,
+so that line is the first sentence of the advertised description; the full
+text still travels only with the API tool definition. MCP enablement and
 model-visible definition/instruction changes may append concise historical
 change notices, but those notices never duplicate full schemas or instruction
 bodies. Native mode hides those notices because the provider API tools already
@@ -89,12 +96,12 @@ rule applies to nested object schemas. This keeps runtime validation metadata
 as the single manifest source without sending duplicate or unenforced
 constraints to the model.
 MCP schemas follow the same lossless path instead of being reduced to only
-top-level properties. Native builtin descriptions in the static system prompt
-include valid argument-object examples (without the inline tool-name wrapper),
-while their API tool entries contain only names and schemas. Dynamic MCP API
-tool entries continue to contain descriptions and schemas together, so usage
-text must never refer to an example that is absent from both the static prompt
-and the dynamic API definition.
+top-level properties. Native builtin API tool entries include the full
+description with valid argument-object examples (without the inline tool-name
+wrapper) together with the input schema, because the static prompt names the
+tools without repeating their documentation. Dynamic MCP API tool entries
+follow the same rule. Usage text must never refer to an example that is absent
+from the API tool definition.
 Builtin manifests close their input objects when the paired runtime rejects
 unknown fields, and tool-specific schemas must encode the same mutually
 exclusive modes, required combinations, and numeric limits enforced by the

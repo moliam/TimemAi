@@ -10,7 +10,10 @@ pub(crate) fn execute_action(
     match op.as_str() {
         "new" => execute_new(core, action, runtime),
         "del" => execute_del(core, action, runtime),
-        _ => failed("op_invalid"),
+        _ => failed(
+            "No timer action was performed: op must be \"new\" to create a timer or \"del\" \
+             to delete one by name.",
+        ),
     }
 }
 
@@ -21,7 +24,10 @@ fn execute_new(
 ) -> ActionExecution {
     let prompt = str_field(action, "prompt");
     if prompt.is_empty() {
-        return failed("prompt_required");
+        return failed(
+            "Cannot create the timer: op=\"new\" requires a non-empty prompt. That prompt is \
+             the text delivered when the timer fires.",
+        );
     }
     let name = str_field(action, "name");
     let mode = {
@@ -42,44 +48,74 @@ fn execute_new(
     match mode.as_str() {
         "once" => {
             if !trigger.is_empty() {
-                return failed("trigger_requires_trigger_mode");
+                return failed(PERIODIC_OR_EVENT_HINT);
             }
             if interval_ms.is_some() {
-                return failed("interval_requires_repeat");
+                return failed(
+                    "Cannot create the timer: interval_ms only applies to mode=\"repeat\". \
+                     For a one-shot timer, omit interval_ms and use mode=\"once\" with exactly \
+                     one of after_ms or at.",
+                );
             }
             if !schedule_exactly_one(after_ms, &at) {
-                return failed("schedule_invalid");
+                return failed(SCHEDULE_ONE_HINT);
             }
             if after_ms == Some(0) {
-                return failed("after_ms_invalid");
+                return failed(
+                    "Cannot create the timer: after_ms must be greater than zero. Use a positive \
+                     number of milliseconds, or use at for an absolute first-fire time.",
+                );
             }
         }
         "repeat" => {
             if !trigger.is_empty() {
-                return failed("trigger_requires_trigger_mode");
+                return failed(PERIODIC_OR_EVENT_HINT);
             }
             if interval_ms.is_none() {
-                return failed("interval_required");
+                return failed(
+                    "Cannot create the timer: mode=\"repeat\" also requires interval_ms, the \
+                     refire period in milliseconds, in addition to exactly one of after_ms or at.",
+                );
             }
             if interval_ms == Some(0) {
-                return failed("interval_invalid");
+                return failed(
+                    "Cannot create the timer: interval_ms must be greater than zero. Give the \
+                     refire period in milliseconds.",
+                );
             }
             if !schedule_exactly_one(after_ms, &at) {
-                return failed("schedule_invalid");
+                return failed(SCHEDULE_ONE_HINT);
             }
             if after_ms == Some(0) {
-                return failed("after_ms_invalid");
+                return failed(
+                    "Cannot create the timer: after_ms must be greater than zero. Use a positive \
+                     number of milliseconds, or use at for an absolute first-fire time.",
+                );
             }
         }
         "trigger" => {
             if !matches!(trigger.as_str(), "session_idle" | "after_compression") {
-                return failed("trigger_invalid");
+                return failed(
+                    "Cannot create the timer: mode=\"trigger\" needs trigger=\"session_idle\" or \
+                     trigger=\"after_compression\". Those are the only supported events, so put \
+                     one of those exact event names in the trigger field.",
+                );
             }
             if after_ms.is_some() || !at.is_empty() || interval_ms.is_some() {
-                return failed("schedule_not_allowed_for_trigger");
+                return failed(
+                    "Cannot create the timer: mode=\"trigger\" is event-driven, so after_ms, at, \
+                     and interval_ms must all be omitted; the selected event decides when the \
+                     prompt fires. Remove those schedule fields.",
+                );
             }
         }
-        _ => return failed("mode_invalid"),
+        _ => {
+            return failed(
+                "Cannot create the timer: mode must be \"once\", \"repeat\", or \"trigger\". \
+                 \"once\" fires one time, \"repeat\" refires every interval_ms, and \"trigger\" \
+                 fires on session_idle or after_compression.",
+            )
+        }
     }
 
     let spec = TimerSpec {
@@ -131,7 +167,7 @@ fn execute_new(
                 core.timers().len()
             )))
         }
-        Err(error) => failed(&error),
+        Err(error) => failed(create_timer_error(&error)),
     }
 }
 
@@ -142,7 +178,10 @@ fn execute_del(
 ) -> ActionExecution {
     let name = str_field(action, "name");
     if name.is_empty() {
-        return failed("name_required");
+        return failed(
+            "Cannot delete a timer without its name: call op=\"del\" with the exact name shown \
+             in the active timer list.",
+        );
     }
     match core.remove_timer(&name) {
         Ok(removed) => {
@@ -160,7 +199,7 @@ fn execute_del(
                 core.timers().len()
             )))
         }
-        Err(error) => failed(&error),
+        Err(error) => failed(delete_timer_error(&error)),
     }
 }
 
@@ -180,9 +219,48 @@ fn u64_field(action: &ParsedAction, key: &str) -> Option<u64> {
     action.input_u64(key)
 }
 
-fn failed(error: &str) -> ActionExecution {
+const PERIODIC_OR_EVENT_HINT: &str =
+    "Cannot create the timer: trigger is only valid with mode=\"trigger\", but a time-based \
+     mode was used here. For a periodic timer, use mode=\"repeat\" with exactly one of after_ms \
+     or at plus interval_ms and omit trigger, for example \
+     {\"op\":\"new\",\"mode\":\"repeat\",\"after_ms\":4800000,\"interval_ms\":4800000,\"prompt\":\"...\"}; \
+     the timer refires on its own and needs no event. For an event-driven timer, use \
+     mode=\"trigger\" with trigger=\"session_idle\" or \"after_compression\" and omit \
+     after_ms, at, and interval_ms.";
+const SCHEDULE_ONE_HINT: &str =
+    "Cannot create the timer: exactly one of after_ms or at is required. Set after_ms for a \
+     relative delay, or at for an absolute ISO-RFC3339 instant, but not both and not neither.";
+
+fn create_timer_error(error: &str) -> String {
+    if let Some(name) = error.strip_prefix("name_exists:") {
+        format!(
+            "Cannot create the timer: a timer named \"{name}\" already exists. Delete it first \
+             with op=\"del\" and name=\"{name}\", or choose a different name."
+        )
+    } else if error == "timer_limit" {
+        "Cannot create the timer: this session already has the maximum number of timers. \
+         Delete an unused timer before creating another."
+            .to_string()
+    } else {
+        format!("Cannot create the timer: {error}")
+    }
+}
+
+fn delete_timer_error(error: &str) -> String {
+    if let Some(name) = error.strip_prefix("not_found:") {
+        format!(
+            "Cannot delete the timer: no timer named \"{name}\" exists. Nothing was deleted; \
+             use the exact name from the active timer list."
+        )
+    } else {
+        format!("Cannot delete the timer: {error}")
+    }
+}
+
+fn failed(message: impl Into<String>) -> ActionExecution {
     ActionExecution::Completed(ActionOutcome::failed(format!(
-        "Action result: timer\nerror: {error}"
+        "Action result: timer\nerror: {}",
+        message.into()
     )))
 }
 

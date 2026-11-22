@@ -1624,6 +1624,32 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
             "cmd": update.command,
         }),
     };
+    let mut payload = json!({
+    "action": crate::os::local_shell_tool_name(),
+    "action_id": update.tool_call_id,
+    "turn_id": update.turn_id,
+    "input": input,
+    "kind": {
+        "kind": "bash",
+        "command": update.command,
+        "mode": update.kind,
+        "interval_ms": null,
+        "timeout_ms": null,
+        "loop_timeout_ms": null,
+        "once_timeout_ms": null,
+    },
+    "active": false,
+    "event": "finish",
+    "status": status,
+    "pid": update.pid,
+    "exit_status": update.status,
+    "capture_error": update.capture_error,
+        "elapsed_ms": update.elapsed_ms,
+        "memory_activity": "none",
+    });
+    if let Some(edits) = &update.edits {
+        payload["edits"] = crate::file_edits::edits_payload(edits);
+    }
     CoreTopicEvent::new(
         update.session_id.clone(),
         CoreTopic::new(
@@ -1637,29 +1663,7 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
             }),
         ),
         CoreSessionState::Running,
-        json!({
-            "action": crate::os::local_shell_tool_name(),
-            "action_id": update.tool_call_id,
-            "turn_id": update.turn_id,
-            "input": input,
-            "kind": {
-                "kind": "bash",
-                "command": update.command,
-                "mode": update.kind,
-                "interval_ms": null,
-                "timeout_ms": null,
-                "loop_timeout_ms": null,
-                "once_timeout_ms": null,
-            },
-            "active": false,
-            "event": "finish",
-            "status": status,
-            "pid": update.pid,
-            "exit_status": update.status,
-            "capture_error": update.capture_error,
-            "elapsed_ms": update.elapsed_ms,
-            "memory_activity": "none",
-        }),
+        payload,
     )
 }
 

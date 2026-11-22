@@ -2,7 +2,7 @@ kind: tool
 id: mailbox
 binding_type: builtin
 binding_name: mailbox
-summary: Mailbox is like email, for instant bi-directional communication: send mail to another session's mailbox across timem instances; delivery actively wakes the recipient (injected into its next model request, or a fresh turn when idle), so mail can also trigger or hand off work there, and you receive read/timeout receipts. `action` also lets you list, search, and read your own mailbox history.
+summary: Send mail between sessions and read your own mailbox history; delivery wakes the recipient, so mail can trigger or hand off work.
 description: |
   Mailbox is like email, for instant bi-directional communication. Send mail
   to another session's mailbox across timem instances, and inspect your own

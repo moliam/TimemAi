@@ -179,7 +179,7 @@ fn mailbox_search_matches_case_insensitively_with_word_window() {
 
     let missing_query = run(&mut core, json!({"action": "search"}));
     assert!(
-        missing_query.contains("error: query_required"),
+        missing_query.contains("Cannot search mail") && missing_query.contains("query_required"),
         "{missing_query}"
     );
 }
@@ -231,7 +231,10 @@ fn mailbox_read_prints_full_body_and_reports_unknown_ids() {
     assert!(miss.contains("no mail with id nope"), "{miss}");
 
     let missing = run(&mut core, json!({"action": "read"}));
-    assert!(missing.contains("error: mail_id_required"), "{missing}");
+    assert!(
+        missing.contains("Cannot read a mail") && missing.contains("mail_id_required"),
+        "{missing}"
+    );
 }
 
 #[test]
@@ -331,5 +334,8 @@ fn mailbox_send_keeps_legacy_behavior_with_and_without_action() {
         "{explicit}"
     );
     let missing_to = run(&mut core, json!({"action": "send", "msg": "hi"}));
-    assert!(missing_to.contains("error: to_required"), "{missing_to}");
+    assert!(
+        missing_to.contains("Cannot send mail") && missing_to.contains("to_required"),
+        "{missing_to}"
+    );
 }

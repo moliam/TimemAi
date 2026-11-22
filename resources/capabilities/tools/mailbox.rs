@@ -34,11 +34,18 @@ fn execute_send(
 ) -> ActionExecution {
     let to = str_field(action, "to");
     if to.is_empty() {
-        return failed("to_required");
+        return failed(
+            "Cannot send mail: the recipient mailbox id in `to` is required (detail: \
+             to_required). Provide the destination mailbox id, for example id_1a2b3c4d, \
+             and retry.",
+        );
     }
     let msg = str_field(action, "msg");
     if msg.is_empty() {
-        return failed("msg_required");
+        return failed(
+            "Cannot send mail: the `msg` body is required (detail: msg_required). Provide \
+             the mail text and retry.",
+        );
     }
     // `queue_timeout` supersedes the legacy `max_wait` name; both accept the
     // `300s` / `300` / `-1` syntax. `resp_timeout` is new. `queue_timeout` is
@@ -67,7 +74,13 @@ fn execute_send(
         &mailbox_send_request_id(),
     )) {
         Some(reply) => reply,
-        None => return failed("mailbox_runtime_unavailable"),
+        None => {
+            return failed(
+                "The mail was not sent: the mailbox runtime is unavailable right now \
+                 (detail: mailbox_runtime_unavailable). Retry; if it keeps failing, tell \
+                 the user.",
+            )
+        }
     };
     let mail_id = reply.mail_id;
     // The Host waits briefly after sending; when the receiver consumed the
@@ -144,7 +157,11 @@ fn execute_list(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
 fn execute_search(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     let query = action.input_str("query");
     if query.is_empty() {
-        return ActionOutcome::failed("Action result: mailbox\nerror: query_required");
+        return ActionOutcome::failed(
+            "Action result: mailbox\nerror: Cannot search mail: `query` is required \
+             (detail: query_required). Provide the text to search for, or use list to \
+             show recent mail.",
+        );
     }
     let rows = load_mail_rows(core, None, None);
     let query_lower = query.to_lowercase();
@@ -178,7 +195,11 @@ fn execute_search(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
 fn execute_read(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     let mail_id = action.input_str("mail_id");
     if mail_id.is_empty() {
-        return ActionOutcome::failed("Action result: mailbox\nerror: mail_id_required");
+        return ActionOutcome::failed(
+            "Action result: mailbox\nerror: Cannot read a mail: `mail_id` is required \
+             (detail: mail_id_required). Use the exact mail id shown in the mailbox \
+             list or a prior send result.",
+        );
     }
     let rows = load_mail_rows(core, Some(&mail_id), Some(1));
     match rows.iter().find(|row| row.id == mail_id) {

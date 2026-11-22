@@ -537,10 +537,7 @@ fn apply_native_interaction(
                 interaction
                     .tools
                     .iter()
-                    .enumerate()
-                    .map(|(index, tool)| {
-                        openai_chat_tool_definition(tool, index >= interaction.static_tool_count)
-                    })
+                    .map(openai_chat_tool_definition)
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
@@ -556,13 +553,7 @@ fn apply_native_interaction(
                 interaction
                     .tools
                     .iter()
-                    .enumerate()
-                    .map(|(index, tool)| {
-                        openai_responses_tool_definition(
-                            tool,
-                            index >= interaction.static_tool_count,
-                        )
-                    })
+                    .map(openai_responses_tool_definition)
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
@@ -584,10 +575,7 @@ fn apply_native_interaction(
             let mut tools = interaction
                 .tools
                 .iter()
-                .enumerate()
-                .map(|(index, tool)| {
-                    anthropic_tool_definition(tool, index >= interaction.static_tool_count)
-                })
+                .map(anthropic_tool_definition)
                 .collect::<Vec<_>>();
             mark_anthropic_static_tool_prefix(&mut tools, interaction.static_tool_count);
             body["tools"] = Value::Array(tools);
@@ -622,46 +610,44 @@ fn anthropic_tool_choice_label(choice: crate::NativeToolChoice) -> &'static str 
     }
 }
 
-fn openai_chat_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
-    let mut function = serde_json::Map::from_iter([
+// Native mode lists builtin tool names in the static prompt and leaves their
+// descriptions to the provider tool definitions, so every tool (static or
+// dynamic) must carry its description here. Dropping it for static tools left
+// builtins with no model-visible documentation at all.
+fn openai_chat_tool_definition(tool: &ToolDefinition) -> Value {
+    let function = serde_json::Map::from_iter([
         ("name".to_string(), json!(tool.name)),
+        ("description".to_string(), json!(tool.description)),
         (
             "parameters".to_string(),
             render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::OpenAi),
         ),
     ]);
-    if include_description {
-        function.insert("description".to_string(), json!(tool.description));
-    }
     json!({"type": "function", "function": function})
 }
 
-fn openai_responses_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
-    let mut definition = serde_json::Map::from_iter([
+fn openai_responses_tool_definition(tool: &ToolDefinition) -> Value {
+    let definition = serde_json::Map::from_iter([
         ("type".to_string(), json!("function")),
         ("name".to_string(), json!(tool.name)),
+        ("description".to_string(), json!(tool.description)),
         (
             "parameters".to_string(),
             render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::OpenAi),
         ),
     ]);
-    if include_description {
-        definition.insert("description".to_string(), json!(tool.description));
-    }
     Value::Object(definition)
 }
 
-fn anthropic_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
-    let mut definition = serde_json::Map::from_iter([
+fn anthropic_tool_definition(tool: &ToolDefinition) -> Value {
+    let definition = serde_json::Map::from_iter([
         ("name".to_string(), json!(tool.name)),
+        ("description".to_string(), json!(tool.description)),
         (
             "input_schema".to_string(),
             render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::AnthropicBedrock),
         ),
     ]);
-    if include_description {
-        definition.insert("description".to_string(), json!(tool.description));
-    }
     Value::Object(definition)
 }
 

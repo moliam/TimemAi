@@ -46,6 +46,8 @@ pub mod context_compress;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
+#[path = "../../../resources/capabilities/tools/file_edits.rs"]
+pub mod file_edits;
 pub mod host;
 pub mod interaction;
 #[path = "../../../resources/capabilities/tools/memmgr.rs"]
@@ -136,6 +138,7 @@ pub use data_layout::{
     web_instance_registry_dir, web_instance_registry_dir_from_default_memory,
     workspace_config_file, RuntimeDataLayout, WebInstanceRegistryRecord,
 };
+pub use file_edits::{FileEditEntry, FileEditOp, FileEditsEvidence};
 pub use host::{
     capability_negotiation_topic_event, context_compress_requested_topic_event,
     context_compress_topic_event, core_initialized_topic_event,
@@ -1201,6 +1204,7 @@ pub(crate) struct ActionOutcome {
     pub readfile_result: Option<ReadfileResultEvidence>,
     pub memmgr_result: Option<MemmgrResultEvidence>,
     pub self_tool_result: Option<SelfToolResultEvidence>,
+    pub edits: Option<crate::file_edits::FileEditsEvidence>,
 }
 
 impl ActionOutcome {
@@ -1214,6 +1218,7 @@ impl ActionOutcome {
             readfile_result: None,
             memmgr_result: None,
             self_tool_result: None,
+            edits: None,
         }
     }
 
@@ -1251,6 +1256,11 @@ impl ActionOutcome {
         self_tool_result: SelfToolResultEvidence,
     ) -> Self {
         self.self_tool_result = Some(self_tool_result);
+        self
+    }
+
+    pub(crate) fn with_edits(mut self, edits: crate::file_edits::FileEditsEvidence) -> Self {
+        self.edits = Some(edits);
         self
     }
 
@@ -3189,9 +3199,21 @@ impl AgentCore {
         )]);
     }
 
-    fn current_inline_mcp_section(&self) -> Option<String> {
+    fn current_mcp_request_section(&self) -> Option<String> {
         if self.resolved_tool_call_mode == ToolCallMode::Native {
-            return None;
+            // Native mode already ships full MCP descriptions and schemas as
+            // API tool definitions. The prompt only adds a compact, per-request
+            // summary list so the model sees which MCP tools exist without
+            // touching the cacheable static prefix.
+            let summaries = self
+                .capabilities
+                .render_native_mcp_tool_summaries_markdown();
+            if summaries.trim().is_empty() {
+                return None;
+            }
+            return Some(format!(
+                "## Current MCP Tools\n\nThese MCP tools are currently available in addition to the built-in tools. Their full descriptions and parameter schemas travel with the API tool definitions.\n\n{summaries}"
+            ));
         }
         let tools = self
             .capabilities
@@ -3233,7 +3255,7 @@ impl AgentCore {
             self.response_protocol.suite(),
             self.resolved_tool_call_mode,
         );
-        let Some(mcp_section) = self.current_inline_mcp_section() else {
+        let Some(mcp_section) = self.current_mcp_request_section() else {
             return rendered;
         };
         let (body, trailer) = prompt_render::split_formatted_response_trailer(&rendered);
@@ -4655,7 +4677,10 @@ impl AgentCore {
                                 Ok(record) => Some(record),
                                 Err(err) => {
                                     let outcome = ActionOutcome::failed(format!(
-                                        "scratch_offload_failed: {err}"
+                                        "The compression could not be completed: offloading \
+                                         the removed context into scratch storage failed \
+                                         (detail: scratch_offload_failed: {err}). Retry the \
+                                         compression."
                                     ))
                                     .with_runtime_metadata("error_type", "ScratchOffloadFailed");
                                     let result = self.format_context_compress_outcome(
@@ -4667,9 +4692,12 @@ impl AgentCore {
                             }
                         }
                         Err(err) => {
-                            let outcome =
-                                ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
-                                    .with_runtime_metadata("error_type", "ScratchOffloadFailed");
+                            let outcome = ActionOutcome::failed(format!(
+                                "The compression could not be completed: offloading the \
+                                 removed context into scratch storage failed (detail: \
+                                 scratch_offload_failed: {err}). Retry the compression."
+                            ))
+                            .with_runtime_metadata("error_type", "ScratchOffloadFailed");
                             let result =
                                 self.format_context_compress_outcome(compact, &outcome, runtime);
                             slices.push(("result_of_llm_action".to_string(), result));
@@ -4751,7 +4779,10 @@ impl AgentCore {
                 compacted_successfully = true;
             } else {
                 let outcome = ActionOutcome::failed(format!(
-                    "invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
+                    "The compression was rejected: some referenced delta ids no longer exist, \
+                     so nothing was removed. Re-run context_compress with `keep` limited to the \
+                     current live refs listed below (detail: invalid_prompt_refs).\nmissing_ids: \
+                     {}\ncurrent_live_delta_refs:\n{}",
                     missing.join(", "),
                     self.live_delta_refs_hint()
                 ))
@@ -4765,8 +4796,8 @@ impl AgentCore {
             // The request succeeded; superseded maintenance instructions and
             // past failure echoes would only pollute future compactions.
             self.hide_prompt_slices_matching("force_shrink_required");
-            self.hide_prompt_slices_matching("error: invalid_prompt_refs");
-            self.hide_prompt_slices_matching("error: scratch_offload_failed");
+            self.hide_prompt_slices_matching("invalid_prompt_refs");
+            self.hide_prompt_slices_matching("scratch_offload_failed");
         }
         if compacted_successfully {
             // A successful compaction is accepted as-is: shrink depth cannot
@@ -7993,9 +8024,12 @@ Runtime tool_call ids:",
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
+                let available = self.capabilities.available_tool_names().join(", ");
                 let outcome = ActionOutcome::failed(format!(
-                    "Action result: {}\nerror: {}",
-                    action.action, err
+                    "Action result: {}\nerror: The action \"{}\" was not executed: it is not \
+                     an available tool in this session (detail: {err}). Available tools: \
+                     {available}. Call one of the listed tools by its exact name.",
+                    action.action, action.action
                 ));
                 self.record_action_audit(
                     &action_for_audit,
@@ -8016,9 +8050,12 @@ Runtime tool_call ids:",
             .capabilities
             .validate_action_input(&action.action, &action.raw_input)
         {
+            let guidance = self
+                .capabilities
+                .invalid_input_guidance(&action.action, &issue);
             let outcome = ActionOutcome::failed(format!(
-                "Action result: {}\nerror: invalid_input\nmessage: {}",
-                action.action, issue
+                "Action result: {}\nerror: invalid_input\nmessage: {guidance}",
+                action.action
             ));
             self.record_action_audit(&action_for_audit, "invalid_input", Some(&outcome.text));
             self.emit_action_finish_topic(
@@ -8059,14 +8096,18 @@ Runtime tool_call ids:",
                     {
                         Ok(outcome) => outcome,
                         Err(error) => ActionOutcome::failed(format!(
-                            "Action result: {}\nstatus: failed\nerror: {}",
-                            action.action, error
+                            "Action result: {}\nstatus: failed\nerror: The MCP tool call \
+                             failed before producing a result (detail: {error}). Check the \
+                             server state and arguments, then retry or use a different tool.",
+                            action.action
                         )),
                     }
                 }
                 None => ActionOutcome::failed(format!(
-                    "Action result: {}\nstatus: failed\nerror: mcp_server_not_enabled",
-                    action.action
+                    "Action result: {}\nstatus: failed\nerror: The MCP server behind \"{}\" \
+                     is not enabled for this session (detail: mcp_server_not_enabled). Enable \
+                     the server in the session settings or use a different tool.",
+                    action.action, action.action
                 )),
             };
             self.record_action_audit(
@@ -8104,8 +8145,9 @@ Runtime tool_call ids:",
         ) {
             Ok(Some(execution)) => execution,
             Ok(None) => ActionExecution::Completed(ActionOutcome::failed(format!(
-                "Action result: {}\nunsupported native action",
-                dispatch_name
+                "Action result: {}\nerror: The tool \"{}\" has no executable binding in this \
+                 runtime build (unsupported native action). Use a different tool.",
+                dispatch_name, dispatch_name
             ))),
             Err(_) => {
                 let outcome = ActionOutcome::failed(format!(
@@ -8218,6 +8260,9 @@ Runtime tool_call ids:",
         }
         if let Some(pid) = managed_running_bash_pid(outcome) {
             event.payload["pid"] = json!(pid);
+        }
+        if let Some(edits) = &outcome.edits {
+            event.payload["edits"] = file_edits::edits_payload(edits);
         }
         runtime.on_core_topic_events(&[event]);
     }

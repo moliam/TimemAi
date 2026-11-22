@@ -10,7 +10,8 @@ pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> Act
     let op = action.input_lower("op");
     if op != "publish" {
         return ActionExecution::Completed(ActionOutcome::failed(format!(
-            "Action result: toolgen\nop: {op}\nerror: unsupported_op"
+            "Action result: toolgen\nop: {op}\nerror: No tool was published: toolgen only \
+             supports op=\"publish\" with a draft_path (detail: unsupported_op)."
         )));
     }
     let draft_path = action.input_raw_str("draft_path");

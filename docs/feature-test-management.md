@@ -910,10 +910,30 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试：timer-ui-acceptance e2e 浏览器驱动新增原生对话框接管（`Page.javascriptDialogOpening` → `handleJavaScriptDialog`，闭包开关控制接受/取消、记录文案）——验证「取消：定时器保留且不产生 timer_delete 命令、文案点名 timer」与「确认：条目移除且命令送达」，1440/390 × 明暗全过。示意演示页删除同步加同款确认。
 - 验证：vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 已重建。
 
+## 2026-11 run_bash 文件修改证据与结构化 diff 展示
+
+- 背景：run_bash 已要求为写入/删除路径声明 `edit`，但用户只能从 stdout 推测实际变化。补齐“声明路径 → 执行前后快照 → 统一 diff → 权威事件 → Web 结构化展示”的闭环。
+- Core/工具：新增 `file_edits` 模块，对声明路径做严格有界捕获——最多 16 个文件、单文件快照 512KiB、总快照 4MiB、单文件 diff 32KiB、总 payload 96KiB；支持 create/modify/delete/unchanged/skip、patience diff、相邻变更 hunk 合并与统计行数。diff 超限或 payload 收窄时保留完整 added/removed 统计并标记 `truncated`。Unix/Windows 的 `run_bash` schema 同步说明 `edit` 覆盖删除。
+- Web：`core.action` finish payload 携带严格校验的 `edits`；工具卡头部显示文件数与 +/- 统计，正文按文件渲染可折叠 diff，带内容自适应且不折叠的旧/新行号列、明暗主题样式、完整差异复制。有 diff 的段默认展开，正文超过 420px 后滚动；运行时截断或 payload 收窄时在 diff 底部显示“【已省略】差异超出限制，已截断”。
+- 测试看护：`file_edits_tests.rs` 覆盖行拆分、diff 算法、hunk 编号、超限截断、二进制/超大/不可读分类、路径解析和证据计算；`capability_tool_run_bash_tests.rs` 覆盖声明路径附加证据、后台完成事件转发 edits 与校验失败不附加；`file_edits.test.ts` 覆盖 payload 解析/拒绝、行号解析、SSR 面板、完整捕获行渲染、运行时截断省略提示与 payload 收窄提示；布局测试断言有证据的工具卡独立展示。
+
+## 2026-11 内置工具描述随 API tools 下发与 timer 自然语言错误反馈
+
+- 触发背景：review session 将 `mode="repeat"` 与 `trigger="session_idle"` 混用后，连续 30 轮收到同一裸错误码并重复同样调用。排查确认 `aa2f79a7` 把 native 静态 prompt 的工具目录改为只列名字（假定描述已随 API tools 下发），而 `model_api.rs` 三协议只对 `index >= static_tool_count` 的动态 MCP 工具发送 description——内置工具描述在 prompt 与 API tools 两边都不存在。
+- Core：`openai_chat_tool_definition` / `openai_responses_tool_definition` / `anthropic_tool_definition` 对全部工具统一携带 description（内置静态工具 + 动态 MCP）；静态 prompt 的 `## Built-in Tools` 改为每个内置工具一行 `- `name`: summary`，详细 description/参数 schema 只随 API tools 下发，同一份描述不再两处重复。MCP 概要放在每次请求的 `## Current MCP Tools` 小节（静态前缀不因 MCP 变化失效）；MCP 无独立 summary 字段，取 description 首句（上限 160 字符）作为目录行。
+- 模型可见错误反馈全面自然语言化（用户要求：提交给模型的错误不能只是错误码）：
+  - 通用 dispatch：`unsupported_action` 与 schema 校验失败（`input.*_required` / `input.*_unsupported` / `input.any_required*` / enum 拒绝等）在 `execute_action_inner` 输出处转换为自然语言说明，附带可用工具列表、允许的参数/取值与修复建议；原始 issue 以 `detail:` 保留供测试与遥测匹配。MCP 未启用/调用失败、`unsupported native action` 同样改为自然语言。
+  - 工具层：`timer`（含 repeat 正确参数 JSON 示例）、`mailbox`、`memo`、`task_finished`、`self_tool`（cwd 错误分类）、`toolgen`、`capmgr`、`memmgr`（scope 限制、durable 版本冲突/缺 expected_version/id 不存在、scratch/raw_chat 存储错误、非法 type/op 组合）全部改为可执行英文说明；readfile/run_bash 原有 code+message/诊断结构保持。
+  - `context_compress`：`invalid_prompt_refs` 与 `scratch_offload_failed` 失败加自然语言说明；成功后隐藏旧失败回声的 needle 同步从 `error: invalid_prompt_refs`/`error: scratch_offload_failed` 改为 token 匹配。
+  - 宿主 `timer_create`/`timer_update` 命令校验仍返回既有错误码，线协议不变；`validate_action_input` 返回的 issue 字符串不变（response protocol repair 依赖），只在模型可见渲染处转换。
+- 测试看护：`native_tool_wires_are_provider_specific_and_parallel_is_explicit` 断言 chat/responses/anthropic 三协议静态工具均带 description；`timer_new_trigger_event_kind_is_validated_and_schedule_forbidden` 与 `timer_validates_schedule_and_mode` 等断言错误文本包含面向模型的修复指引（如 `For a periodic timer`、`omit trigger`、`exactly one of after_ms or at`）。
+- 文档：`docs/capability-system.md` 更新为「内置工具描述随 API tools 下发，静态 prompt 只承载一行 summary」。
+- Prompt 文案收敛：`## Tool Calling` 改为「tool calls collect supporting information / issue multiple tools / text is a user-visible progress note / 无 tool call 不结束回合，必须显式 task_finished」；删除 `context_compress` 必须先调用的说明（压缩 trailer 已按需承载该约束）；循环叙事 s2 行只保留「ordinary response text is user-visible progress or answers」，不再重复收尾规则。
+
 ## 2026-11 Timer 触发式模式（session_idle / after_compression）
 
 - 触发背景：用户要求在时间型（once/repeat）之外增加事件驱动触发：`session_idle`＝模型以 task_finished 正常收尾后（取消/失败不触发），`after_compression`＝本会话主上下文压缩完成后（子 worker 压缩不触发）；触发后 prompt 作为输入进入上下文。
-- 语义：`TimerSpec.trigger: Option<String>`（serde default 兼容旧 timers.json），`mode="trigger"` 仅允许 `trigger ∈ {session_idle, after_compression}` 且禁止 after_ms/at/interval_ms；触发式 timer 永久布防（next_fire_ms=u64::MAX，墙钟调度器排除），每次事件投递一次（沿用各自 queue_timeout 与既有投递路径），仅显式删除移除。工具/宿主/命令三处一致校验：`trigger_invalid` / `schedule_not_allowed_for_trigger` / `trigger_requires_trigger_mode`。
+- 语义：`TimerSpec.trigger: Option<String>`（serde default 兼容旧 timers.json），`mode="trigger"` 仅允许 `trigger ∈ {session_idle, after_compression}` 且禁止 after_ms/at/interval_ms；触发式 timer 永久布防（next_fire_ms=u64::MAX，墙钟调度器排除），每次事件投递一次（沿用各自 queue_timeout 与既有投递路径），仅显式删除移除。工具/宿主/命令三处一致校验（宿主命令仍返回 `trigger_invalid` / `schedule_not_allowed_for_trigger` / `trigger_requires_trigger_mode` 错误码；工具侧自 2026-11 修复起改为面向模型的自然语言修复说明）。
 - Core：timer 工具 op=new 支持 mode/trigger，成功消息写明事件语义与自唤醒循环警告；timer.yaml schema/描述/示例同步（example_json 必须单个 JSON 值）。`active_timers_confirmation_line` 以 `[名|trigger|model]` 呈现。
 - Host：TurnFinished arm 在 `finished_by_task_summary` 时 fire `session_idle`；Topics arm 对主 worker 的 `core.context.compress phase=completed` fire `after_compression`；`fire_trigger_timers` 复用 `deliver_timer_fire`，投递成功仅记 last_fired_ms 保持布防，失败按既有语义 park。timer_create/timer_update 命令与 `validate_user_timer_input`/`create_session_timer`/`update_session_timer` 全链透传 trigger，schedule 整体替换语义覆盖 trigger。
 - 已知边界（文档+工具消息明示）：session_idle 存在自唤醒循环——被触发回合自己的收尾（或压缩）会再次命中同一事件；prompt 必须 del 定时器或保证有界动作。模型删除用户创建 timer 时 Host 合并的竞态保护（created_by=="user" 永不被 Core 集合剔除）意味着删除只作用于 Core 投影，用户仍需面板删除——既有语义未改。

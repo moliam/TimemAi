@@ -119,40 +119,52 @@ fn timer_new_trigger_event_kind_is_validated_and_schedule_forbidden() {
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "trigger"})
     )
-    .contains("trigger_invalid"));
+    .contains("needs trigger=\"session_idle\""));
     // unknown event kind
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "whenever"})
     )
-    .contains("trigger_invalid"));
+    .contains("needs trigger=\"session_idle\""));
     // schedule fields are forbidden in trigger mode
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "after_ms": 1000})
     )
-    .contains("schedule_not_allowed_for_trigger"));
+    .contains("event-driven"));
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "interval_ms": 50})
     )
-    .contains("schedule_not_allowed_for_trigger"));
+    .contains("event-driven"));
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "at": "2030-01-01T00:00:00Z"})
     )
-    .contains("schedule_not_allowed_for_trigger"));
+    .contains("event-driven"));
     // an event kind on a time-based mode
-    assert!(run(
+    let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 1000, "trigger": "session_idle"})
-    )
-    .contains("trigger_requires_trigger_mode"));
-    assert!(run(
+        json!({"op": "new", "prompt": "x", "after_ms": 1000, "trigger": "session_idle"}),
+    );
+    assert!(
+        out.contains("trigger is only valid with mode=\"trigger\""),
+        "{out}"
+    );
+    let repeated = run(
         &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 5000, "trigger": "session_idle"})
-    )
-    .contains("trigger_requires_trigger_mode"));
+        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 5000, "trigger": "session_idle"}),
+    );
+    assert!(
+        repeated.contains("trigger is only valid with mode=\"trigger\""),
+        "{repeated}"
+    );
+    assert!(
+        repeated.contains("For a periodic timer")
+            && repeated.contains("mode=\"repeat\"")
+            && repeated.contains("omit trigger"),
+        "timer rejection must explain both valid alternatives in prose: {repeated}"
+    );
     // nothing was recorded
     assert!(core.timers().is_empty());
     drop(core);
@@ -217,7 +229,7 @@ fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
         &mut core,
         json!({"op": "new", "prompt": "d", "name": "timer1", "after_ms": 1000}),
     );
-    assert!(out.contains("name_exists"), "{out}");
+    assert!(out.contains("already exists"), "{out}");
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -226,47 +238,49 @@ fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
 fn timer_validates_schedule_and_mode() {
     let (mut core, dir) = setup("validation");
     // missing prompt
-    assert!(run(&mut core, json!({"op": "new", "after_ms": 1000})).contains("prompt_required"));
+    assert!(run(&mut core, json!({"op": "new", "after_ms": 1000}))
+        .contains("requires a non-empty prompt"));
     // no schedule
-    assert!(run(&mut core, json!({"op": "new", "prompt": "x"})).contains("schedule_invalid"));
+    assert!(run(&mut core, json!({"op": "new", "prompt": "x"}))
+        .contains("exactly one of after_ms or at"));
     // both after_ms and at
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "after_ms": 1000, "at": "2026-01-01T00:00:00Z"})
     )
-    .contains("schedule_invalid"));
+    .contains("exactly one of after_ms or at"));
     // zero delay
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "after_ms": 0})
     )
-    .contains("after_ms_invalid"));
+    .contains("after_ms must be greater than zero"));
     // interval on once
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "after_ms": 1000, "interval_ms": 5000})
     )
-    .contains("interval_requires_repeat"));
+    .contains("only applies to mode=\"repeat\""));
     // repeat without interval
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000})
     )
-    .contains("interval_required"));
+    .contains("also requires interval_ms"));
     // repeat with zero interval
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 0})
     )
-    .contains("interval_invalid"));
+    .contains("interval_ms must be greater than zero"));
     // invalid mode
     assert!(run(
         &mut core,
         json!({"op": "new", "prompt": "x", "mode": "hourly", "after_ms": 1000})
     )
-    .contains("mode_invalid"));
+    .contains("mode must be"));
     // invalid op
-    assert!(run(&mut core, json!({"op": "create", "prompt": "x"})).contains("op_invalid"));
+    assert!(run(&mut core, json!({"op": "create", "prompt": "x"})).contains("op must be"));
     // nothing was recorded
     assert!(core.timers().is_empty());
     drop(core);
@@ -280,8 +294,9 @@ fn timer_del_unknown_name_errors_and_name_required() {
         &mut core,
         json!({"op": "new", "prompt": "x", "after_ms": 1000}),
     );
-    assert!(run(&mut core, json!({"op": "del"})).contains("name_required"));
-    assert!(run(&mut core, json!({"op": "del", "name": "nope"})).contains("not_found"));
+    assert!(run(&mut core, json!({"op": "del"})).contains("without its name"));
+    assert!(run(&mut core, json!({"op": "del", "name": "nope"}))
+        .contains("no timer named \"nope\" exists"));
     let out = run(&mut core, json!({"op": "del", "name": "timer0"}));
     assert!(!out.contains("error"), "{out}");
     assert!(core.timers().is_empty());
@@ -303,7 +318,7 @@ fn timer_enforces_cap() {
         &mut core,
         json!({"op": "new", "prompt": "p", "name": "over", "after_ms": 1000})
     )
-    .contains("timer_limit"));
+    .contains("maximum number of timers"));
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }

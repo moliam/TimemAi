@@ -3777,6 +3777,7 @@ fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
         stdout_truncation: None,
         stderr_truncation: None,
         output: format!("output-{pid}"),
+        edits: None,
     }
 }
 
