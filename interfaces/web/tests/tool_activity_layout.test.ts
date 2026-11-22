@@ -138,6 +138,24 @@ it("keeps live text/tool spacing compact without shrinking touch targets", () =>
   expect(styles).toContain(".stream-tool-head.stream-tool-toggle, .stream-tool-run-toggle { min-height: 44px; }");
 });
 
+it("shows the folded turn change summary beside the archived frame", () => {
+  const turnScope = source.slice(source.indexOf("const turnEditsSummary = useMemo("), source.indexOf("{persistentToolGenItems.length > 0 && ("));
+
+  // Aggregation comes from the authoritative lifecycle items of the turn.
+  expect(turnScope).toContain("summarizeTurnEdits(");
+  expect(turnScope).toContain("lifecycleItems.map((item) => item.activity?.edits ?? undefined)");
+  // The folded summary only appears when the turn ended, the work frame is
+  // collapsed, and the turn actually captured file edits.
+  expect(turnScope).toContain("showWorkFrame &&");
+  expect(turnScope).toContain("!isWorking &&");
+  expect(turnScope).toContain("!workStreamVisible &&");
+  expect(turnScope).toContain("turnEditsSummary.edits.length > 0 && (");
+  expect(turnScope).toContain("<TurnEditsSummaryBox summary={turnEditsSummary} />");
+  expect(styles).toContain(".turn-edits-summary");
+  expect(styles).toContain(".turn-edits-summary-head");
+  expect(styles).toContain(".file-edit-captures");
+});
+
 it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
   expect(styles).toContain('src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2")');
   expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-family: "IBM Plex Mono"/);

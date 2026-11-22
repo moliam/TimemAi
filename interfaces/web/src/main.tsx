@@ -1,7 +1,7 @@
 import { useThrottledValue } from "./use_throttled_value";
 import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
-import { FileEditsChip, FileEditsPanel } from "./file_edits_view";
+import { FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, summarizeTurnEdits } from "./file_edits_view";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -12439,6 +12439,13 @@ const TurnInteraction = memo(function TurnInteraction({
       ),
     [lifecycleEvents, sessionId],
   );
+  const turnEditsSummary = useMemo(
+    () =>
+      summarizeTurnEdits(
+        lifecycleItems.map((item) => item.activity?.edits ?? undefined),
+      ),
+    [lifecycleItems],
+  );
   const supplementItems = useMemo(
     () =>
       turn.user_entries
@@ -13001,6 +13008,15 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </section>
       )}
+      {showWorkFrame &&
+        (!streamRetentionActive ||
+          (turn.state !== "working" && streamArchive) ||
+          decisions.length > 0) &&
+        !isWorking &&
+        !workStreamVisible &&
+        turnEditsSummary.edits.length > 0 && (
+          <TurnEditsSummaryBox summary={turnEditsSummary} />
+        )}
       {persistentToolGenItems.length > 0 && (
         <div className="turn-persistent-toolgen" aria-label="ToolGen result">
           {persistentToolGenItems.map(({ key, activity }) =>

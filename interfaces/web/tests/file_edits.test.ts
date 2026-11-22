@@ -18,6 +18,11 @@ const validEntry = {
   skip_reason: null,
 };
 
+const entry = (over: Partial<typeof validEntry>) => ({
+  ...validEntry,
+  ...over,
+});
+
 describe("fileEditsPresentation", () => {
   it("parses a valid edits payload", () => {
     const parsed = fileEditsPresentation([validEntry]);
@@ -155,6 +160,9 @@ describe("file edits surfaces", () => {
       "fileSkipNotCaptured",
       "fileSkipBudget",
       "collapseCommand",
+      "turnEditsTitle",
+      "turnEditsOverflow",
+      "captureCount",
     ];
     for (const key of keys) {
       expect(en).toContain(`${key}:`);
@@ -166,7 +174,7 @@ describe("file edits surfaces", () => {
 
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { FileEditsChip, FileEditsPanel } from "../src/file_edits_view";
+import { FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, summarizeTurnEdits } from "../src/file_edits_view";
 
 describe("file edits components render server-side", () => {
   it("chip summarizes count and stats", () => {
@@ -248,5 +256,107 @@ describe("file edits auto-expand contract", () => {
     // 带修改证据的行豁免折叠组合并，diff 卡片始终完整可见。
     expect(main).toContain("const mergeableCount = completed.filter(activity => !activity.edits?.length).length;");
     expect(main).toContain("const merged = mergeableCount > 0 && !expanded && !interactionHeld;");
+  });
+});
+
+describe("summarizeTurnEdits", () => {
+  it("merges repeated paths keeping first-touch order and the final capture", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "a.txt", added_lines: 1, removed_lines: 0 })],
+      [entry({ path: "b.txt", op: "created" })],
+      [entry({ path: "a.txt", added_lines: 5, removed_lines: 2 })],
+    ]);
+    expect(result.edits.map((edit) => edit.path)).toEqual(["a.txt", "b.txt"]);
+    expect(result.edits[0]).toMatchObject({ added_lines: 5, removed_lines: 2, capture_count: 2 });
+    expect(result.edits[1]).toMatchObject({ op: "created", capture_count: 1 });
+    expect(result.overflowCount).toBe(0);
+  });
+
+  it("marks a path created during the turn as created even after modifications", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "new.txt", op: "created" })],
+      [entry({ path: "new.txt", op: "modified" })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "created", capture_count: 2 });
+  });
+
+  it("keeps a final deletion honest over an earlier creation", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "gone.txt", op: "created" })],
+      [entry({ path: "gone.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 4 })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "deleted", removed_lines: 4 });
+  });
+
+  it("keeps the last captured diff when a later capture is skipped", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "keep.txt", diff: "--- a\n+++ b\n@@\n+x\n" })],
+      [entry({ path: "keep.txt", op: "skipped", skip_reason: "binary", diff: null, added_lines: 0, removed_lines: 0 })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "modified", skip_reason: null });
+    expect(result.edits[0].diff).toContain("+x");
+    expect(result.edits[0].capture_count).toBe(2);
+  });
+
+  it("stays skipped when every capture is skipped", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "bin.dat", op: "skipped", skip_reason: "binary", diff: null })],
+      [entry({ path: "bin.dat", op: "skipped", skip_reason: "unreadable", diff: null })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "skipped", skip_reason: "unreadable", capture_count: 2 });
+  });
+
+  it("ignores malformed groups and entries", () => {
+    const result = summarizeTurnEdits([
+      undefined,
+      null,
+      "nope",
+      [null, undefined, 3],
+      [entry({ path: "" })],
+      [entry({ path: "ok.txt" })],
+    ] as never);
+    expect(result.edits).toHaveLength(1);
+    expect(result.edits[0]).toMatchObject({ path: "ok.txt", capture_count: 1 });
+  });
+
+  it("caps merged entries and reports the overflow count", () => {
+    const groups = Array.from({ length: 70 }, (_, index) => [
+      entry({ path: `f${index}.txt` }),
+    ]);
+    const result = summarizeTurnEdits(groups);
+    expect(result.edits).toHaveLength(64);
+    expect(result.overflowCount).toBe(6);
+    expect(result.edits.at(-1)).toMatchObject({ path: "f63.txt" });
+  });
+
+  it("accepts a missing or empty input", () => {
+    expect(summarizeTurnEdits(undefined)).toEqual({ edits: [], overflowCount: 0 });
+    expect(summarizeTurnEdits([])).toEqual({ edits: [], overflowCount: 0 });
+  });
+});
+
+describe("turn edits summary box renders server-side", () => {
+  it("renders the title, chip, capture badge and overflow note", () => {
+    const summary = summarizeTurnEdits([
+      [entry({ path: "src/lib.rs", added_lines: 3, removed_lines: 1 })],
+      [entry({ path: "src/lib.rs", added_lines: 6, removed_lines: 2 })],
+      [entry({ path: "docs/x.md", op: "created" })],
+    ]);
+    const html = renderToString(createElement(TurnEditsSummaryBox, { summary })).replace(/<!-- -->/g, "");
+    expect(html).toContain("turn-edits-summary");
+    expect(html).toContain("file-edit-captures");
+    expect(html).toContain("×2");
+    expect(html).toContain("+6");
+    expect(html).not.toContain("file-edit-notice");
+  });
+
+  it("reports the bounded overflow when the summary exceeds its budget", () => {
+    const groups = Array.from({ length: 66 }, (_, index) => [
+      entry({ path: `f${index}.txt` }),
+    ]);
+    const html = renderToString(
+      createElement(TurnEditsSummaryBox, { summary: summarizeTurnEdits(groups) }),
+    );
+    expect(html).toContain("file-edit-notice");
   });
 });
