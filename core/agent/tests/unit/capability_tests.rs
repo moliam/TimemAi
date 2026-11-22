@@ -800,6 +800,68 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     assert!(!prompt.contains("expect_timeout_ms"));
 }
 
+#[test]
+fn run_bash_manifest_renders_every_example_array_element() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+
+    let markdown = registry.render_tool_catalog_markdown();
+    assert!(markdown.contains(r#"{"run_bash":{"loop_cmd":"test -f /tmp/done.flag","interval_ms":2000,"loop_timeout_ms":60000}}"#));
+    let section = markdown
+        .split("#### `run_bash`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("run_bash catalog section");
+    let synopsis_lines = section
+        .lines()
+        .filter(|line| line.starts_with("`{\"run_bash\":"))
+        .count();
+    assert_eq!(
+        synopsis_lines, 3,
+        "run_bash must render exactly one synopsis line per example: {section}"
+    );
+    let loop_at = section
+        .find(r#"{"run_bash":{"loop_cmd""#)
+        .expect("loop example line");
+    let sed_at = section
+        .find(r#"{"run_bash":{"cmd":"sed -i"#)
+        .expect("sed example line");
+    let python_at = section
+        .find(r#"{"run_bash":{"cmd":"python3 -c"#)
+        .expect("python example line");
+    assert!(
+        loop_at < sed_at && sed_at < python_at,
+        "synopsis lines must keep the manifest's example order"
+    );
+
+    assert!(markdown.contains(r#"{"run_bash":{"cmd":"sed -i 's/3.0/3.1/' /tmp/demo/version.txt && rm /tmp/demo/config.old","edit":["/tmp/demo/version.txt","/tmp/demo/config.old"],"background":true}}"#));
+    assert!(markdown.contains(r#"{"run_bash":{"cmd":"python3 -c \"import pathlib; p = pathlib.Path('/tmp/demo/config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))\"","edit":"/tmp/demo/config.ini"}}"#));
+
+    let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
+    assert!(xml.contains(
+        "<run_bash><cmd>sed -i 's/3.0/3.1/' /tmp/demo/version.txt &amp;&amp; rm /tmp/demo/config.old</cmd><edit><item>/tmp/demo/version.txt</item><item>/tmp/demo/config.old</item></edit><background>true</background></run_bash>"
+    ));
+    assert!(xml.contains(
+        r#"<run_bash><cmd>python3 -c "import pathlib; p = pathlib.Path('/tmp/demo/config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))"</cmd><edit>/tmp/demo/config.ini</edit></run_bash>"#
+    ));
+
+    let tools = registry.native_tool_definitions();
+    let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
+    assert!(run_bash
+        .description
+        .contains(r#""loop_cmd":"test -f /tmp/done.flag""#));
+    assert!(run_bash.description.contains(
+        r#""cmd":"sed -i 's/3.0/3.1/' /tmp/demo/version.txt && rm /tmp/demo/config.old""#
+    ));
+    assert!(run_bash
+        .description
+        .contains(r#""edit":["/tmp/demo/version.txt","/tmp/demo/config.old"]"#));
+    assert!(run_bash
+        .description
+        .contains(r#""edit":"/tmp/demo/config.ini""#));
+    assert!(!run_bash.description.contains(r#"{"run_bash":"#));
+}
+
 #[cfg(unix)]
 #[test]
 fn capmgr_can_list_and_load_skill_content() {
@@ -1137,6 +1199,46 @@ example_json: |
 
     let err = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap_err();
     assert!(err.contains("ghost:unsupported_builtin_binding"));
+}
+
+#[test]
+fn overlay_manifest_rejects_malformed_example_arrays() {
+    for (label, example) in [
+        (
+            "non_object_element",
+            r#"[{"badexample": {"path": "x"}}, "not-an-object"]"#,
+        ),
+        ("empty_array", "[]"),
+        ("scalar_payload", r#""just-a-string""#),
+    ] {
+        let dir = temp_capability_dir(&format!("bad_example_{label}"));
+        let tools_dir = dir.join("tools");
+        fs::create_dir_all(&tools_dir).unwrap();
+        fs::write(
+            tools_dir.join("badexample.yaml"),
+            format!(
+                r#"kind: tool
+id: badexample
+binding_type: builtin
+binding_name: readfile
+summary: Example payloads must stay machine-checkable.
+description: |
+  Should not load.
+input_properties:
+  path: string
+example_json: |
+  {example}
+"#
+            ),
+        )
+        .unwrap();
+
+        let err = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap_err();
+        assert!(
+            err.contains("badexample:example_must_be_object"),
+            "{label}: {err}"
+        );
+    }
 }
 
 #[test]

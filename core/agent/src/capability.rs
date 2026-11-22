@@ -293,14 +293,32 @@ fn replace_run_bash_host_environment(description: &str, environment: &str) -> St
     description.replace(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER, environment)
 }
 
+/// The per-example argument-object JSON strings for the native tool
+/// description; None falls back to the schema shape synopsis. One malformed
+/// array element invalidates the whole payload, mirroring the single-object
+/// wrapper fallback.
+fn manifest_argument_examples(manifest: &ToolManifest) -> Option<Vec<String>> {
+    let arguments_json = |item: &Value| {
+        item.get(&manifest.id)
+            .filter(|arguments| arguments.is_object())
+            .and_then(|arguments| serde_json::to_string(arguments).ok())
+    };
+    if let Some(items) = manifest.example.as_array() {
+        let examples = items.iter().filter_map(arguments_json).collect::<Vec<_>>();
+        if examples.len() == items.len() && !examples.is_empty() {
+            return Some(examples);
+        }
+        return None;
+    }
+    arguments_json(&manifest.example).map(|example| vec![example])
+}
+
 fn native_tool_definition(manifest: &ToolManifest) -> ToolDefinition {
-    // The single machine-checked example is the argument-object source; the
-    // schema shape line is the fallback when the wrapper key is absent.
-    let example = manifest
-        .example
-        .get(&manifest.id)
-        .filter(|arguments| arguments.is_object())
-        .and_then(|arguments| serde_json::to_string(arguments).ok())
+    // The machine-checked example_json is the argument-object source in the
+    // author's order; the schema shape line is the fallback when the wrapper
+    // key is absent.
+    let example = manifest_argument_examples(manifest)
+        .map(|examples| examples.join("\n"))
         .unwrap_or_else(|| synopsis_from_schema(manifest));
     ToolDefinition {
         name: manifest.id.clone(),
@@ -1109,6 +1127,22 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str)
 fn render_synopsis(manifest: &ToolManifest, protocol_format: &str) -> Vec<String> {
     // The machine-checked example_json is the synopsis source in the author's
     // order; the schema shape line is the fallback without a wrapper key.
+    if let Some(items) = manifest.example.as_array() {
+        if let Some(element_texts) = split_json_top_level_elements(&manifest.example_text) {
+            if items.len() == element_texts.len() && items.iter().all(Value::is_object) {
+                return items
+                    .iter()
+                    .zip(element_texts)
+                    .map(|(item, source)| {
+                        let rendered =
+                            render_protocol_action_synopsis(item, &source, protocol_format)
+                                .unwrap_or_else(|| source.clone());
+                        format!("`{rendered}`")
+                    })
+                    .collect();
+            }
+        }
+    }
     if manifest
         .example
         .get(&manifest.id)
@@ -1442,6 +1476,54 @@ fn compact_json_text(raw: &str) -> String {
         }
     }
     output
+}
+
+/// Split a compacted JSON array document into the compacted text of each
+/// top-level element, preserving the author's element and key order. Returns
+/// None for non-array documents and any malformed or empty array.
+fn split_json_top_level_elements(raw: &str) -> Option<Vec<String>> {
+    let text = raw.trim();
+    if !text.starts_with('[') || !text.ends_with(']') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start: Option<usize> = None;
+    let mut elements = Vec::new();
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => {
+                depth += 1;
+                if depth == 2 && start.is_none() {
+                    start = Some(index);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 1 {
+                    let from = start.take()?;
+                    elements.push(compact_json_text(&text[from..=index]));
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 || in_string || elements.is_empty() {
+        return None;
+    }
+    Some(elements)
 }
 
 fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
@@ -2328,10 +2410,19 @@ fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
         }
     }
     validate_manifest_rule_fields(manifest)?;
-    if !manifest.example.is_object() {
+    if !example_payload_is_valid(&manifest.example) {
         return Err(format!("{}:example_must_be_object", manifest.id));
     }
     Ok(())
+}
+
+/// A tool example payload is either one wrapper object keyed by the tool id
+/// or a non-empty array of such objects.
+fn example_payload_is_valid(value: &Value) -> bool {
+    value.is_object()
+        || value
+            .as_array()
+            .is_some_and(|items| !items.is_empty() && items.iter().all(Value::is_object))
 }
 
 fn validate_overlay_manifest(
@@ -2377,7 +2468,7 @@ fn validate_overlay_manifest(
         }
     }
     validate_manifest_rule_fields(manifest)?;
-    if !manifest.example.is_object() {
+    if !example_payload_is_valid(&manifest.example) {
         return Err(format!("{}:example_must_be_object", manifest.id));
     }
     Ok(())
