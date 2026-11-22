@@ -6115,6 +6115,11 @@ impl AgentCore {
         self.render_prompt_from_deltas(&self.deltas)
     }
 
+    /// Runtime co-signal submitted right after every user supplement
+    /// component: late supplements must not erase earlier instructions or
+    /// tasks from the final answer's scope.
+    const USER_SUPPLEMENT_REMINDER: &str = "Don't forget the user's previous instructions and tasks. When providing the final response, ensure that it comprehensively addresses all of the user's requests and tasks in the current turn, consolidating and organizing them as appropriate.";
+
     pub fn submit_prompt_component(
         &mut self,
         role: PromptComponentRole,
@@ -6587,6 +6592,7 @@ Runtime tool_call ids:",
         logical_time_ms: i64,
     ) -> Option<String> {
         let kind = kind.into();
+        let is_user_supplement = role == PromptComponentRole::User && kind == "user_supplement";
         let mut content = content.into();
         let is_result_class = role.prompt_type_hint(&kind) == "result_of_llm_action";
         // Runtime sideband kinds (job exits, disk pressure, config notices,
@@ -6630,9 +6636,29 @@ Runtime tool_call ids:",
             source: source.into(),
             created_at_ms: logical_time_ms,
             sequence,
-            batch_id,
+            batch_id: batch_id.clone(),
             cache_policy_hint: None,
         });
+        // A user supplement rides the user role, and the runtime co-signals
+        // one bounded reminder line right after it: long turns must still
+        // deliver every earlier instruction and task in the final response,
+        // not just the newest supplement text. The note shares the delta so
+        // discard, compression, and replay treat the pair as one unit.
+        if is_user_supplement {
+            self.prompt_component_sequence = self.prompt_component_sequence.saturating_add(1);
+            let reminder_sequence = self.prompt_component_sequence;
+            self.pending_prompt_components.push(PromptComponent {
+                id: format!("pc_{}_{}", logical_time_ms, reminder_sequence),
+                role: PromptComponentRole::System,
+                kind: "runtime_note".to_string(),
+                content: Self::USER_SUPPLEMENT_REMINDER.to_string(),
+                source: "runtime".to_string(),
+                created_at_ms: logical_time_ms,
+                sequence: reminder_sequence,
+                batch_id,
+                cache_policy_hint: None,
+            });
+        }
         Some(id)
     }
 

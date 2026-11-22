@@ -3969,6 +3969,107 @@ fn direct_resume_has_empty_body_and_startup_context_precedes_user() {
 }
 
 #[test]
+fn user_supplement_carries_exactly_one_runtime_final_answer_reminder() {
+    let mut core = test_core("supplement_runtime_reminder");
+    let initial = match core.begin_turn("first question", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!initial.contains(AgentCore::USER_SUPPLEMENT_REMINDER));
+
+    let prompt = match core
+        .append_user_supplement("extra ask")
+        .expect("supplement step")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("extra ask"));
+    assert_eq!(
+        prompt.matches(AgentCore::USER_SUPPLEMENT_REMINDER).count(),
+        1,
+        "exactly one runtime reminder per accepted user supplement"
+    );
+    let supplement_pos = prompt.find("extra ask").expect("supplement text");
+    let reminder_pos = prompt
+        .find(AgentCore::USER_SUPPLEMENT_REMINDER)
+        .expect("reminder");
+    assert!(reminder_pos > supplement_pos);
+    // 默认协议用 XML 角色元素：reminder 必须落在紧随 supplement 的 RUNTIME 块内。
+    let runtime_open = prompt[..reminder_pos]
+        .rfind("<RUNTIME>")
+        .expect("runtime role element before the reminder");
+    assert!(
+        runtime_open > supplement_pos,
+        "reminder renders inside the runtime block that follows the supplement"
+    );
+
+    let prompt = match core
+        .append_user_supplement("more")
+        .expect("supplement step")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(AgentCore::USER_SUPPLEMENT_REMINDER).count(),
+        2
+    );
+}
+
+#[test]
+fn runtime_originated_inputs_do_not_get_the_supplement_reminder() {
+    let audit_dir = std::env::temp_dir().join("supplement_reminder_audit_guard");
+    std::fs::create_dir_all(&audit_dir).expect("audit dir");
+    let audit = audit_dir.join("audit.jsonl");
+    let _ = std::fs::remove_file(&audit);
+    let mut core = test_core("system_input_no_reminder");
+    let _ = core.begin_turn("base question", None);
+    let prompt = match core.append_user_supplements_with_context_and_audit(
+        vec![UserSupplement {
+            text: "runtime-produced event".to_string(),
+            additional_context: None,
+            system_input: true,
+        }],
+        &audit,
+        "session-reminder",
+        "turn-reminder",
+    ) {
+        Some(CoreStep::NeedModel { prompt, .. }) => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("runtime-produced event"));
+    assert!(!prompt.contains(AgentCore::USER_SUPPLEMENT_REMINDER));
+
+    // User-originated supplements keep exactly one reminder after the user
+    // text, with host-provided supporting context staying ahead of it.
+    let prompt = match core.append_user_supplements_with_context_and_audit(
+        vec![UserSupplement {
+            text: "typed follow-up".to_string(),
+            additional_context: Some("host supporting context".to_string()),
+            system_input: false,
+        }],
+        &audit,
+        "session-reminder",
+        "turn-reminder",
+    ) {
+        Some(CoreStep::NeedModel { prompt, .. }) => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(AgentCore::USER_SUPPLEMENT_REMINDER).count(),
+        1
+    );
+    let context_pos = prompt.find("host supporting context").expect("context");
+    let supplement_pos = prompt.find("typed follow-up").expect("supplement");
+    let reminder_pos = prompt
+        .find(AgentCore::USER_SUPPLEMENT_REMINDER)
+        .expect("reminder");
+    assert!(context_pos < supplement_pos && supplement_pos < reminder_pos);
+    let _ = std::fs::remove_file(&audit);
+}
+
+#[test]
 fn literal_resume_text_stays_user_authored() {
     let mut core = test_core("literal_resume_text");
     core.set_response_protocol(ResponseProtocolKind::Json);
