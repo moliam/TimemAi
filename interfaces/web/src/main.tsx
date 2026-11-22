@@ -2804,6 +2804,16 @@ function TimemApp() {
         pushActivity(activity);
         return;
       }
+      if (event.type === "session_work_instruction_updated") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, work_instruction: event.work_instruction }
+              : session,
+          ),
+        );
+        return;
+      }
       if (event.type === "session_api_key_revealed") {
         removePendingKey(
           pendingSessionCredentialIdsRef,
@@ -5411,6 +5421,37 @@ function TimemApp() {
                       setShowToolRepo(false);
                       setShowRuntime(true);
                     }}
+                    workInstruction={activeSession?.work_instruction}
+                    onWorkInstructionRefresh={
+                      activeSession
+                        ? () => {
+                            sendCommand({
+                              type: "session_work_instruction_refresh",
+                              session_id: activeSession.session_id,
+                            });
+                          }
+                        : null
+                    }
+                    onWorkInstructionToggle={
+                      activeSession
+                        ? (path, selected) => {
+                            const accepted = sendCommand({
+                              type: "session_work_instruction_selection_update",
+                              session_id: activeSession.session_id,
+                              path,
+                              selected,
+                            });
+                            if (!accepted) {
+                              reportUiError(
+                                "Work instruction update failed",
+                                t("errors.checkConnection"),
+                                activeSession.session_id,
+                              );
+                            }
+                            return accepted;
+                          }
+                        : null
+                    }
                   />
                   {modelEndpointsUnavailable && !showRuntime && (
                     <div className="endpoint-guide-bubble" role="status">
@@ -14425,6 +14466,9 @@ function HeaderModelControl({
   onCompact,
   onClear,
   onOpenModelPanel,
+  workInstruction,
+  onWorkInstructionRefresh,
+  onWorkInstructionToggle,
 }: {
   session: Session | undefined;
   endpoint: ModelEndpoint | undefined;
@@ -14443,6 +14487,10 @@ function HeaderModelControl({
   onCompact: (() => boolean) | null;
   onClear: (() => void) | null;
   onOpenModelPanel: () => void;
+  /** Host projection of the resident instruction file picker. */
+  workInstruction: Session["work_instruction"];
+  onWorkInstructionRefresh: (() => void) | null;
+  onWorkInstructionToggle: ((path: string, selected: boolean) => boolean) | null;
 }) {
   useT();
   const [open, setOpen] = useState(false);
@@ -14454,6 +14502,36 @@ function HeaderModelControl({
   const compactRequestedRef = useRef(false);
   const compactTimerRef = useRef<number | null>(null);
   const sessionIdRef = useRef(session?.session_id);
+  const [pendingWorkInstructionToggles, setPendingWorkInstructionToggles] = useState<
+    Map<string, boolean>
+  >(new Map());
+  useEffect(() => {
+    setPendingWorkInstructionToggles(new Map());
+  }, [session?.session_id]);
+  // In-flight checkboxes are transient UI state; the Host projection in
+  // `workInstruction` stays the single source of resident truth, so pending
+  // entries reconcile (or drop) whenever the projection changes.
+  useEffect(() => {
+    if (pendingWorkInstructionToggles.size === 0) return;
+    setPendingWorkInstructionToggles((current) => {
+      if (current.size === 0) return current;
+      const next = new Map(current);
+      for (const [path, selected] of current) {
+        const file = workInstruction?.files.find((item) => item.path === path);
+        if (!file || file.selected === selected) next.delete(path);
+      }
+      return next.size === current.size ? current : next;
+    });
+  }, [workInstruction, pendingWorkInstructionToggles]);
+  const toggleWorkInstructionFile = (path: string, selected: boolean) => {
+    if (!onWorkInstructionToggle || pendingWorkInstructionToggles.has(path)) return;
+    if (!onWorkInstructionToggle(path, selected)) return;
+    setPendingWorkInstructionToggles((current) => {
+      const next = new Map(current);
+      next.set(path, selected);
+      return next;
+    });
+  };
   const clearCompactTimer = () => {
     if (compactTimerRef.current === null) return;
     window.clearTimeout(compactTimerRef.current);
@@ -14596,6 +14674,7 @@ function HeaderModelControl({
           }
           resetDraft();
           setOpen(true);
+          onWorkInstructionRefresh?.();
         }}
       >
         <span className="header-model-control-name" title={endpointLabel}>
@@ -14725,6 +14804,57 @@ function HeaderModelControl({
                 </button>
               )}
             </span>
+          </div>
+          <div className="header-model-popover-row header-model-popover-files-row">
+            <span
+              className="header-model-popover-label"
+              title={t("headerModel.workInstructionsHint")}
+            >
+              {t("headerModel.workInstructions")}
+            </span>
+            <div className="header-model-popover-files">
+              <label
+                className="header-model-popover-file"
+                title={workInstruction?.session_work_file || session?.current_dir}
+              >
+                <input type="checkbox" checked disabled aria-hidden="true" tabIndex={-1} />
+                <span className="header-model-popover-file-name">Timem.md</span>
+                <span className="header-model-popover-file-tag header-model-popover-file-tag-always">
+                  {t("headerModel.workInstructionsAlways")}
+                </span>
+              </label>
+              {(workInstruction?.files ?? []).map((file) => (
+                <label
+                  key={file.path}
+                  className="header-model-popover-file"
+                  title={file.path}
+                >
+                  <input
+                    type="checkbox"
+                    checked={file.selected}
+                    disabled={pendingWorkInstructionToggles.has(file.path)}
+                    aria-label={file.path}
+                    onChange={() => toggleWorkInstructionFile(file.path, !file.selected)}
+                  />
+                  <span className="header-model-popover-file-name">{file.filename}</span>
+                  <span className="header-model-popover-file-tag">
+                    {file.source === "global"
+                      ? t("headerModel.workInstructionsGlobal")
+                      : t("headerModel.workInstructionsProject")}
+                  </span>
+                </label>
+              ))}
+              {workInstruction && workInstruction.files.length === 0 && (
+                <span className="header-model-popover-files-empty">
+                  {t("headerModel.workInstructionsEmpty")}
+                </span>
+              )}
+              {!workInstruction && (
+                <span className="header-model-popover-files-empty">
+                  {t("headerModel.workInstructionsLoading")}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       )}

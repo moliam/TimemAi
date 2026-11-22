@@ -889,6 +889,14 @@ export const zh = {
     reset: "默认",
     resetHint: "未设置自定义值，当前跟随接入点默认",
     contextManagement: "上下文管理",
+    workInstructions: "常驻指令文件",
+    workInstructionsHint:
+      "勾选的 Claude/Codex 兼容指令文件随会话常驻上下文；Timem.md 永远常驻。",
+    workInstructionsAlways: "常驻",
+    workInstructionsProject: "项目",
+    workInstructionsGlobal: "全局",
+    workInstructionsEmpty: "未发现 Claude/Codex 兼容指令文件",
+    workInstructionsLoading: "正在发现指令文件…",
   },
   insights: {
     title: "Session Insights",

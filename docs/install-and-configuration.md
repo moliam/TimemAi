@@ -390,11 +390,22 @@ export TIMEM_BASH_APPROVAL=approve
 export TIMEM_WORK_INSTRUCTIONS=silent
 ```
 
-`TIMEM_WORK_INSTRUCTIONS` controls `AGENTS.md` / `CLAUDE.md` loading:
+`TIMEM_WORK_INSTRUCTIONS` controls Claude/Codex-compatible instruction loading:
 
 - `silent`: auto-load and notify
 - `ask`: ask the host UI
 - `off`: do not load
+
+Resident instruction candidates are discovered per session. Project scope
+covers `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, and `.codex/AGENTS.md`
+inside the session working directory; global scope covers `~/.claude/CLAUDE.md`
+and `~/.codex/AGENTS.md`. `TIMEM_WORK_INSTRUCTION_HOME` relocates the global
+instruction home for sandboxes and containers. In the Web header popover
+(model button → 上下文管理), every discovered file gets a checkbox that decides
+whether it stays resident in context; the `Timem.md` session work file is
+always resident. Selections are per-session, validated against the current
+candidate set (unknown paths fail closed), persisted with the session, and each
+instruction file body is capped at 64 KiB.
 
 `TIMEM_BASH_APPROVAL` controls model-requested command approval:
 

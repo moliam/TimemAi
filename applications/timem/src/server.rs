@@ -57,18 +57,18 @@ use agent_core::session_store::{
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts,
     context_compress_requested_topic_event, create_memory_dir, default_memory_dir,
-    is_model_rate_limited_error, load_workspace_dirs_from_path,
-    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
-    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, HttpModelClient,
-    InterfacePreferences, ModelClient, ModelServiceConfig, ModelServiceConfigSource,
-    ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, TimerSpec, ToolDetail, ToolSummary,
-    TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MAILBOX, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    discover_work_instruction_candidates, is_model_rate_limited_error,
+    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
+    resolve_memory_dir, runtime_config_menu_report, validate_api_key,
+    work_instruction_load_report_selected, work_instruction_load_request_selected,
+    work_instruction_mode_from_sources, AgentCore, BashApprovalMode, CoreSessionWorkerWorkspace,
+    HostDecision, HostDecisionRequest, HttpModelClient, InterfacePreferences, ModelClient,
+    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
+    SessionToolRepo, TimerSpec, ToolDetail, ToolSummary, TopicReply, TurnProjection,
+    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MAILBOX,
+    CORE_TOPIC_MODEL_ENDPOINT_FAILOVER, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -690,6 +690,39 @@ struct WebTimer {
     parked_reason: Option<String>,
 }
 
+/// One discovered ecosystem instruction candidate in the resident-context
+/// picker. `path` is the authoritative selection key; `selected` mirrors the
+/// Host-side per-session selection.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct WebWorkInstructionFileView {
+    path: String,
+    filename: String,
+    directory: String,
+    source: String,
+    selected: bool,
+}
+
+/// Host projection of the resident-context file list for one session:
+/// discovered Claude/Codex-compatible candidates plus the always-resident
+/// session work file pointer.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct WebWorkInstructionView {
+    mode: String,
+    files: Vec<WebWorkInstructionFileView>,
+    session_work_file: String,
+}
+
+impl Default for WebWorkInstructionView {
+    fn default() -> Self {
+        Self {
+            mode: agent_core::work_instruction_mode_label(WorkInstructionLoadMode::Silent)
+                .to_string(),
+            files: Vec::new(),
+            session_work_file: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSession {
     session_id: String,
@@ -766,11 +799,18 @@ struct WebSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     restored_context_prompt_tokens: Option<u32>,
     #[serde(skip)]
-    work_instruction_mode: WorkInstructionLoadMode,
-    #[serde(skip)]
     work_instruction_allowed: Option<bool>,
     #[serde(skip)]
     pending_work_instruction_turn: Option<PendingWorkInstructionTurn>,
+    /// Host-authoritative per-file resident selection over discovered
+    /// ecosystem instruction candidates. `None` keeps every discovered file,
+    /// preserving the pre-selection loading behavior; an explicit selection
+    /// (including an empty one) is honored verbatim after validation.
+    work_instruction_selection: Option<BTreeSet<String>>,
+    /// Cached candidate projection, refreshed on create, restore, popover
+    /// refresh, selection updates, and loading-mode changes. Clients treat it
+    /// as display state and re-request it on demand.
+    work_instruction: WebWorkInstructionView,
     #[serde(skip)]
     runtime: WebSessionRuntime,
 }
@@ -1069,6 +1109,10 @@ enum WireEvent {
         key: String,
         value: String,
         runtime_profile: WebSessionRuntimeProfile,
+    },
+    SessionWorkInstructionUpdated {
+        session_id: String,
+        work_instruction: WebWorkInstructionView,
     },
     SessionApiKeyRevealed {
         session_id: String,
@@ -1736,6 +1780,14 @@ enum ClientCommand {
         endpoint_id: String,
         max_input_tokens: Option<u32>,
     },
+    SessionWorkInstructionRefresh {
+        session_id: String,
+    },
+    SessionWorkInstructionSelectionUpdate {
+        session_id: String,
+        path: String,
+        selected: bool,
+    },
     SessionUsageReset {
         session_id: String,
     },
@@ -1935,6 +1987,8 @@ impl ClientCommand {
             | Self::SessionReasoningEffortUpdate { session_id, .. }
             | Self::SessionEndpointReasoningEffortUpdate { session_id, .. }
             | Self::SessionEndpointMaxInputTokensUpdate { session_id, .. }
+            | Self::SessionWorkInstructionRefresh { session_id }
+            | Self::SessionWorkInstructionSelectionUpdate { session_id, .. }
             | Self::SessionUsageReset { session_id }
             | Self::SessionResourceUsageQuery { session_id }
             | Self::ModelEndpointApply { session_id, .. }
@@ -5518,6 +5572,37 @@ fn handle_command_with_id(
                 },
             );
         }
+        ClientCommand::SessionWorkInstructionRefresh { session_id } => {
+            let work_instruction = refresh_session_work_instruction(state, &session_id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionWorkInstructionUpdated {
+                    session_id,
+                    work_instruction,
+                },
+            );
+        }
+        ClientCommand::SessionWorkInstructionSelectionUpdate {
+            session_id,
+            path,
+            selected,
+        } => {
+            let path = nonempty_text(path, "work instruction path")?;
+            let work_instruction =
+                update_work_instruction_selection(state, &session_id, &path, selected)?;
+            // The timeline keeps showing which resident files actually load
+            // with the next turn, so a selection change refreshes the notice.
+            if let Some(event) = work_instruction_notice_event(state, &session_id) {
+                publish_semantic(state, event);
+            }
+            publish_semantic(
+                state,
+                WireEvent::SessionWorkInstructionUpdated {
+                    session_id,
+                    work_instruction,
+                },
+            );
+        }
         ClientCommand::SessionReasoningEffortUpdate {
             session_id,
             reasoning_effort,
@@ -7203,6 +7288,13 @@ fn create_session_in_group(
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_runtime(&runtime);
     let global_roles = current_mem_state(state)?.role_library.roles;
+    let work_instruction = build_work_instruction_view(
+        state,
+        &session_id,
+        &current_dir,
+        runtime.settings.work_instruction_mode,
+        None,
+    )?;
     {
         let mut sessions = state
             .sessions
@@ -7279,10 +7371,11 @@ fn create_session_in_group(
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
-                work_instruction_mode: runtime.settings.work_instruction_mode,
                 restored_context_prompt_tokens: None,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
+                work_instruction_selection: None,
+                work_instruction,
                 runtime,
             },
         );
@@ -8206,6 +8299,17 @@ fn restore_stored_session(
             session.roles = roles.clone();
         }
         let ordinal = stored.ordinal;
+        let work_instruction = build_work_instruction_view(
+            state,
+            &stored.session_id,
+            &current_dir,
+            runtime.settings.work_instruction_mode,
+            stored
+                .work_instruction_selected_files
+                .as_ref()
+                .map(|files| files.iter().cloned().collect::<BTreeSet<String>>())
+                .as_ref(),
+        )?;
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
@@ -8262,10 +8366,14 @@ fn restore_stored_session(
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
-                work_instruction_mode: runtime.settings.work_instruction_mode,
                 restored_context_prompt_tokens: None,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
+                work_instruction_selection: stored
+                    .work_instruction_selected_files
+                    .as_ref()
+                    .map(|files| files.iter().cloned().collect()),
+                work_instruction,
                 runtime,
             },
         );
@@ -12556,6 +12664,10 @@ fn stored_session_from_web_session_with_store(
             .to_string(),
         group_id: session.group_id.clone(),
         ordinal: session.ordinal,
+        work_instruction_selected_files: session
+            .work_instruction_selection
+            .as_ref()
+            .map(|selection| selection.iter().cloned().collect()),
     }
 }
 
@@ -13339,10 +13451,14 @@ fn submit_turn_with_selected_attachments_and_kind(
         let session = sessions
             .get(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
-        if session.work_instruction_mode == WorkInstructionLoadMode::Ask
+        if session.runtime.settings.work_instruction_mode == WorkInstructionLoadMode::Ask
             && session.work_instruction_allowed.is_none()
         {
-            work_instruction_load_request(Path::new(&session.current_dir))
+            work_instruction_load_request_selected(
+                Path::new(&session.current_dir),
+                work_instruction_home().as_deref(),
+                session.work_instruction_selection.as_ref(),
+            )
         } else {
             None
         }
@@ -15838,6 +15954,15 @@ fn update_session_runtime_setting(
             .extend(session_cached_env_values(&session.runtime.settings));
         session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.max_llm_input_tokens = session.runtime.settings.config.max_llm_input_tokens;
+        if field == agent_core::RuntimeConfigField::WorkInstructions {
+            session.work_instruction = build_work_instruction_view(
+                state,
+                session_id,
+                Path::new(&session.current_dir),
+                session.runtime.settings.work_instruction_mode,
+                session.work_instruction_selection.as_ref(),
+            )?;
+        }
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -16896,6 +17021,119 @@ fn session_context(
     session_context_with_roles(state, session_id, attachments, &[])
 }
 
+fn work_instruction_home() -> Option<PathBuf> {
+    agent_core::work_instruction_home_from_env()
+}
+
+/// Rebuilds the resident-instruction candidate projection for one session.
+/// Discovery runs against the current filesystem so the picker always offers
+/// files that exist right now; the selection filters which entries load.
+fn build_work_instruction_view(
+    state: &AppState,
+    session_id: &str,
+    work_dir: &Path,
+    mode: WorkInstructionLoadMode,
+    selection: Option<&BTreeSet<String>>,
+) -> Result<WebWorkInstructionView, String> {
+    let home = work_instruction_home();
+    let candidates = discover_work_instruction_candidates(work_dir, home.as_deref());
+    let files = candidates
+        .iter()
+        .map(|candidate| {
+            let selected = selection
+                .map(|set| set.contains(&candidate.path.display().to_string()))
+                .unwrap_or(true);
+            WebWorkInstructionFileView {
+                path: candidate.path.display().to_string(),
+                filename: candidate.filename.clone(),
+                directory: candidate
+                    .path
+                    .parent()
+                    .map(|parent| parent.display().to_string())
+                    .unwrap_or_default(),
+                source: candidate.source.label().to_string(),
+                selected,
+            }
+        })
+        .collect();
+    Ok(WebWorkInstructionView {
+        mode: agent_core::work_instruction_mode_label(mode).to_string(),
+        files,
+        session_work_file: session_work_file_path(state, session_id)?
+            .display()
+            .to_string(),
+    })
+}
+
+/// Recomputes and stores the cached resident-instruction projection.
+fn refresh_session_work_instruction(
+    state: &AppState,
+    session_id: &str,
+) -> Result<WebWorkInstructionView, String> {
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get_mut(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    let view = build_work_instruction_view(
+        state,
+        session_id,
+        Path::new(&session.current_dir),
+        session.runtime.settings.work_instruction_mode,
+        session.work_instruction_selection.as_ref(),
+    )?;
+    session.work_instruction = view.clone();
+    Ok(view)
+}
+
+/// Applies one selection patch (check/uncheck) on top of the current
+/// effective selection, validated against freshly discovered candidates.
+/// Unknown paths fail closed; the effective selection always stays a subset
+/// of the current candidate set.
+fn update_work_instruction_selection(
+    state: &AppState,
+    session_id: &str,
+    requested_path: &str,
+    selected: bool,
+) -> Result<WebWorkInstructionView, String> {
+    let home = work_instruction_home();
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let candidates =
+            discover_work_instruction_candidates(Path::new(&session.current_dir), home.as_deref());
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.path.display().to_string() == requested_path)
+            .ok_or_else(|| "work_instruction_selection_invalid".to_string())?;
+        let mut next = session
+            .work_instruction_selection
+            .clone()
+            .unwrap_or_else(|| {
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.path.display().to_string())
+                    .collect()
+            });
+        if selected {
+            next.insert(candidate.path.display().to_string());
+        } else {
+            next.remove(&candidate.path.display().to_string());
+        }
+        session.work_instruction_selection = Some(next);
+    }
+    let view = refresh_session_work_instruction(state, session_id)?;
+    persist_web_session(state, session_id)?;
+    Ok(view)
+}
+
 /// Pointer to this session's persistent work file plus its bounded current
 /// content: durable, complex work assigned to this session records its
 /// guidance, plans, and progress there, so a compaction or a context clear
@@ -16994,12 +17232,22 @@ fn session_context_with_roles(
             agent_core::os::local_shell_tool_name()
         ))
     };
-    let instructions = match session.work_instruction_mode {
+    let instructions = match session.runtime.settings.work_instruction_mode {
         WorkInstructionLoadMode::Silent => {
-            work_instruction_load_report(Path::new(&current_dir)).context
+            work_instruction_load_report_selected(
+                Path::new(&current_dir),
+                work_instruction_home().as_deref(),
+                session.work_instruction_selection.as_ref(),
+            )
+            .context
         }
         WorkInstructionLoadMode::Ask if session.work_instruction_allowed == Some(true) => {
-            work_instruction_load_report(Path::new(&current_dir)).context
+            work_instruction_load_report_selected(
+                Path::new(&current_dir),
+                work_instruction_home().as_deref(),
+                session.work_instruction_selection.as_ref(),
+            )
+            .context
         }
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
@@ -17345,15 +17593,25 @@ fn mark_attachment_consumed(state: &AppState, session_id: &str, attachment_id: &
 }
 
 fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<WireEvent> {
-    let current_dir = {
+    let (current_dir, selection) = {
         let sessions = state.sessions.lock().ok()?;
         let session = sessions.get(session_id)?;
-        let loaded = session.work_instruction_mode == WorkInstructionLoadMode::Silent
-            || (session.work_instruction_mode == WorkInstructionLoadMode::Ask
+        let loaded = session.runtime.settings.work_instruction_mode
+            == WorkInstructionLoadMode::Silent
+            || (session.runtime.settings.work_instruction_mode == WorkInstructionLoadMode::Ask
                 && session.work_instruction_allowed == Some(true));
-        loaded.then(|| PathBuf::from(&session.current_dir))?
+        loaded.then(|| {
+            (
+                PathBuf::from(&session.current_dir),
+                session.work_instruction_selection.clone(),
+            )
+        })?
     };
-    let report = work_instruction_load_report(&current_dir);
+    let report = work_instruction_load_report_selected(
+        &current_dir,
+        work_instruction_home().as_deref(),
+        selection.as_ref(),
+    );
     if report.file_names.is_empty() && report.error.is_none() {
         return None;
     }

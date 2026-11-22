@@ -892,6 +892,14 @@ export const en: Strings = {
     reset: "Default",
     resetHint: "No custom value yet; following the endpoint default",
     contextManagement: "Context management",
+    workInstructions: "Resident instruction files",
+    workInstructionsHint:
+      "Checked Claude/Codex-compatible instruction files stay resident in context; Timem.md is always resident.",
+    workInstructionsAlways: "resident",
+    workInstructionsProject: "project",
+    workInstructionsGlobal: "global",
+    workInstructionsEmpty: "No Claude/Codex-compatible instruction files found",
+    workInstructionsLoading: "Discovering instruction files…",
   },
   insights: {
     title: "Session Insights",

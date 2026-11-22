@@ -187,6 +187,18 @@ export type Session = {
     include_reasoning_in_context: boolean;
     api_key_configured: boolean;
   };
+  /** Host projection of the resident instruction file picker. */
+  work_instruction?: {
+    mode: string;
+    files: {
+      path: string;
+      filename: string;
+      directory: string;
+      source: "project" | "global";
+      selected: boolean;
+    }[];
+    session_work_file: string;
+  };
   contexts: SessionContext[];
   workers: SessionWorker[];
   active_context_id: string;
@@ -751,6 +763,11 @@ export type WireEvent =
       value: string;
       runtime_profile: NonNullable<Session["runtime_profile"]>;
     }
+  | {
+      type: "session_work_instruction_updated";
+      session_id: string;
+      work_instruction: NonNullable<Session["work_instruction"]>;
+    }
   | { type: "session_api_key_revealed"; session_id: string; api_key: string }
   | {
       type: "core_topic";
@@ -1044,6 +1061,13 @@ export type ClientCommand =
       session_id: string;
       key: string;
       value: string;
+    }
+  | { type: "session_work_instruction_refresh"; session_id: string }
+  | {
+      type: "session_work_instruction_selection_update";
+      session_id: string;
+      path: string;
+      selected: boolean;
     }
   | {
       type: "session_reasoning_effort_update";

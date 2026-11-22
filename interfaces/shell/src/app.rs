@@ -694,6 +694,7 @@ fn new_shell_session(
         display_name: "ShellSession".to_string(),
         group_id: None,
         ordinal: 0,
+        work_instruction_selected_files: None,
         created_at_ms: now_ms_i64(),
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),

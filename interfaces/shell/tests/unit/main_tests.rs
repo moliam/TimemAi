@@ -2380,6 +2380,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
         telemetry_reset_at_ms: None,
+        work_instruction_selected_files: None,
     };
     store.upsert_session(&stored).unwrap();
 
@@ -2462,6 +2463,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
         telemetry_reset_at_ms: None,
+        work_instruction_selected_files: None,
     };
     let original = format!("{}\nnot-json\n", serde_json::to_string(&stored).unwrap());
     fs::write(store.index_path(), &original).unwrap();
@@ -2543,6 +2545,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
             endpoint_reasoning_efforts: BTreeMap::new(),
             endpoint_max_input_tokens: BTreeMap::new(),
             telemetry_reset_at_ms: None,
+            work_instruction_selected_files: None,
         })
         .unwrap();
 
@@ -2630,6 +2633,7 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
         telemetry_reset_at_ms: None,
+        work_instruction_selected_files: None,
     };
 
     let merged = shell_session_effective_env(&launch_env, &session);
@@ -2687,6 +2691,7 @@ fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
         telemetry_reset_at_ms: None,
+        work_instruction_selected_files: None,
     };
     let launch_env = HashMap::from([
         ("TIMEM_API_KEY".to_string(), "".to_string()),
@@ -2868,6 +2873,7 @@ fn shell_can_resume_web_style_session_history() {
             endpoint_reasoning_efforts: BTreeMap::new(),
             endpoint_max_input_tokens: BTreeMap::new(),
             telemetry_reset_at_ms: None,
+            work_instruction_selected_files: None,
         })
         .unwrap();
     store

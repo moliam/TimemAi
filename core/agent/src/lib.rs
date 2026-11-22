@@ -260,12 +260,17 @@ pub use turn_state::{
     TurnProjectionOutcome, TurnToken,
 };
 pub use work_instructions::{
-    combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,
-    parse_work_instruction_mode, work_instruction_load_report, work_instruction_load_request,
-    work_instruction_mode_from_sources, WorkInstructionContext, WorkInstructionFile,
-    WorkInstructionLoadMessage, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
-    WORK_INSTRUCTION_FILENAMES,
+    combine_additional_contexts, discover_work_instruction_candidates,
+    discover_work_instruction_files, load_work_instruction_context,
+    load_work_instruction_context_selected, parse_work_instruction_mode,
+    validate_work_instruction_selection, work_instruction_home_from_env,
+    work_instruction_load_report, work_instruction_load_report_selected,
+    work_instruction_load_request, work_instruction_load_request_selected,
+    work_instruction_mode_from_sources, WorkInstructionCandidate, WorkInstructionContext,
+    WorkInstructionFile, WorkInstructionLoadMessage, WorkInstructionLoadMessageKind,
+    WorkInstructionLoadMode, WorkInstructionLoadReport, WorkInstructionLoadRequest,
+    WorkInstructionLoadStatus, WorkInstructionSource, WORK_INSTRUCTION_FILENAMES,
+    WORK_INSTRUCTION_FILE_CONTENT_LIMIT,
 };
 pub use workspace::{
     apply_workspace_command_to_path, load_workspace_dirs_from_path, normalize_workspace_dir,

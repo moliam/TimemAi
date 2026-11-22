@@ -327,3 +327,43 @@ it("allows endpoint selection while a request is working and explains the reques
   expect(zhCatalog.endpoints.workingNote).toContain("下一次请求生效");
   expect(enCatalog.endpoints.workingNote).toContain("next request");
 });
+
+
+it("keeps resident instruction files host-authoritative with full-path tooltips", () => {
+  expect(source).toContain("header-model-popover-files-row");
+  expect(source).toContain('className="header-model-popover-files"');
+  expect(source).toContain('className="header-model-popover-file"');
+  // Long filenames ellipsize while the full path stays available on hover.
+  expect(source).toContain("title={file.path}");
+  expect(source).toContain(
+    "title={workInstruction?.session_work_file || session?.current_dir}",
+  );
+  expect(source).toContain("header-model-popover-file-name");
+  expect(styles).toContain(".header-model-popover-file-name");
+  expect(styles).toContain("text-overflow: ellipsis; white-space: nowrap; color: #c3d6d1");
+  expect(styles).toContain(".header-model-popover-files { min-width: 0; display: grid; gap: 3px; max-height: 132px; overflow-y: auto; }");
+  // Timem.md is always resident and never user-toggleable.
+  expect(source).toContain('<span className="header-model-popover-file-name">Timem.md</span>');
+  expect(source).toContain('t("headerModel.workInstructionsAlways")');
+  // The Host projection stays authoritative; pending toggles only disable input.
+  expect(source).toContain("checked={file.selected}");
+  expect(source).toContain("pendingWorkInstructionToggles.has(file.path)");
+  expect(source).toContain("const toggleWorkInstructionFile");
+  expect(source).toContain('type: "session_work_instruction_refresh"');
+  expect(source).toContain('type: "session_work_instruction_selection_update"');
+  expect(source).toContain("onWorkInstructionRefresh?.()");
+});
+
+it("ships resident instruction i18n keys and source tags for both locales", () => {
+  for (const catalog of [zhCatalog, enCatalog]) {
+    expect(catalog.headerModel.workInstructions).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsHint).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsAlways).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsProject).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsGlobal).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsEmpty).toBeTruthy();
+    expect(catalog.headerModel.workInstructionsLoading).toBeTruthy();
+  }
+  expect(zhCatalog.headerModel.workInstructions).toContain("常驻");
+  expect(enCatalog.headerModel.workInstructions).toContain("Resident");
+});

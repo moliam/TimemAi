@@ -858,7 +858,8 @@ async function main() {
         reasoningSelectWidth: Math.round(document.querySelector('#header-model-popover .header-model-popover-select').getBoundingClientRect().width),
       };
     })()`);
-    assert(headerPopoverLayout.labels.length === 4 && headerPopoverLayout.labels.every((label) => label.h <= 16 && label.ws === 'nowrap'), `popover labels stay on one line: ${JSON.stringify(headerPopoverLayout)}`);
+    assert(headerPopoverLayout.labels.length === 5 && headerPopoverLayout.labels.every((label) => label.h <= 16 && label.ws === 'nowrap'), `popover labels stay on one line: ${JSON.stringify(headerPopoverLayout)}`);
+    assert(headerPopoverLayout.labels.map((label) => label.text).includes('Resident instruction files'), `popover carries the resident instruction files row: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.controlHeight === 30 && headerPopoverLayout.controlBorder === '1px' && headerPopoverLayout.controlBackground.includes('linear-gradient'), `header control surface: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.pillSize === '8.5px', `reasoning pill size: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.reasoningSelectWidth <= 120, `reasoning select hugs its content: ${JSON.stringify(headerPopoverLayout)}`);

@@ -51,6 +51,11 @@ pub struct StoredSession {
     pub group_id: Option<String>,
     #[serde(default)]
     pub ordinal: u32,
+    /// Per-file resident instruction selection (sorted candidate paths).
+    /// `None` keeps every discovered ecosystem instruction file resident,
+    /// preserving the pre-selection loading behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_instruction_selected_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1909,6 +1914,7 @@ pub fn new_stored_session(
         raw_chat_history_path: history_path.as_ref().display().to_string(),
         group_id: None,
         ordinal: 0,
+        work_instruction_selected_files: None,
     }
 }
 

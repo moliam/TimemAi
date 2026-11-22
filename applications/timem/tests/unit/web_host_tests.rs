@@ -834,6 +834,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
             .to_string(),
         group_id: None,
         ordinal: 0,
+        work_instruction_selected_files: None,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     let original = format!("{valid_line}\nnot-json\n");
@@ -4828,6 +4829,7 @@ fn missing_workspace_session_restores_with_silent_fallback_without_losing_metada
             raw_chat_history_path: history_path.display().to_string(),
             group_id: None,
             ordinal: 0,
+            work_instruction_selected_files: None,
         })
         .unwrap();
 
@@ -7050,6 +7052,7 @@ fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() 
             raw_chat_history_path: history_path.display().to_string(),
             group_id: None,
             ordinal: 0,
+            work_instruction_selected_files: None,
         })
         .unwrap();
 
@@ -8310,7 +8313,7 @@ fn ask_mode_does_not_announce_work_instructions_before_user_acceptance() {
     {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         session.current_dir = current_dir.display().to_string();
     }
     std::fs::write(current_dir.join("AGENTS.md"), "Wait for approval.").unwrap();
@@ -8499,6 +8502,11 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
     let context_id = test_context_id(session_id);
     let worker_id = test_worker_id(session_id);
     let settings = test_runtime_settings();
+    let work_instruction = WebWorkInstructionView {
+        mode: agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
+        files: Vec::new(),
+        session_work_file: String::new(),
+    };
     WebSession {
         session_id: session_id.to_string(),
         group_id: None,
@@ -8551,10 +8559,11 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
-        work_instruction_mode: WorkInstructionLoadMode::Off,
         restored_context_prompt_tokens: None,
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
+        work_instruction_selection: None,
+        work_instruction,
         runtime: WebSessionRuntime {
             model_endpoint_id: None,
             active_model_endpoint_id: None,
@@ -14013,7 +14022,7 @@ async fn direct_resume_survives_work_instruction_confirmation_as_shared_input() 
     let current_dir = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         PathBuf::from(&session.current_dir)
     };
     std::fs::write(
@@ -14477,7 +14486,7 @@ async fn targeted_cancel_finishes_a_turn_waiting_for_work_instruction_permission
     let current_dir = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         PathBuf::from(&session.current_dir)
     };
     std::fs::write(
@@ -14556,7 +14565,7 @@ async fn ask_mode_queues_the_first_turn_then_loads_work_instructions_after_match
     let current_dir = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         PathBuf::from(&session.current_dir)
     };
     std::fs::write(
@@ -14634,7 +14643,7 @@ async fn ask_mode_rejects_a_mismatched_reply_without_releasing_the_pending_turn(
     let current_dir = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         PathBuf::from(&session.current_dir)
     };
     std::fs::write(current_dir.join("AGENTS.md"), "Apply this guide.").unwrap();
@@ -14663,7 +14672,7 @@ async fn ask_mode_decline_continues_the_turn_without_loading_work_instructions()
     let current_dir = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Ask;
         PathBuf::from(&session.current_dir)
     };
     std::fs::write(current_dir.join("AGENTS.md"), "MUST_NOT_REACH_MODEL").unwrap();
@@ -25840,4 +25849,238 @@ fn resource_caps_startup_summary_humanizes_applied_limits() {
     assert_eq!(format_memory_limit("524288000"), "500 MB");
     assert_eq!(format_memory_limit("28310351872"), "26.37 GB");
     assert_eq!(format_cpu_cores("100000 100000").as_deref(), Some("1 core"));
+}
+
+fn work_instruction_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
+fn work_instruction_fixture_root(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(unique_web_id(prefix))
+}
+
+#[test]
+fn work_instruction_selection_updates_are_authoritative_and_persisted() {
+    let _env = work_instruction_env_guard();
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let root = work_instruction_fixture_root("timem_web_wi_sel");
+    let workspace = root.join("workspace");
+    let home = root.join("home");
+    std::fs::create_dir_all(workspace.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "project agents rules").unwrap();
+    std::fs::write(workspace.join(".claude/CLAUDE.md"), "nested claude rules").unwrap();
+    std::fs::write(home.join(".codex/AGENTS.md"), "global codex rules").unwrap();
+    std::env::set_var("TIMEM_WORK_INSTRUCTION_HOME", &home);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.current_dir = workspace.display().to_string();
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Silent;
+    }
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionRefresh {
+            session_id: session_id.to_string(),
+        },
+    )
+    .unwrap();
+
+    let agents_path = workspace.join("AGENTS.md").display().to_string();
+    let claude_path = workspace.join(".claude/CLAUDE.md").display().to_string();
+    let codex_path = home.join(".codex/AGENTS.md").display().to_string();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let view = &sessions[session_id].work_instruction;
+        assert_eq!(view.mode, "silent");
+        let paths: Vec<_> = view.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                agents_path.as_str(),
+                claude_path.as_str(),
+                codex_path.as_str()
+            ]
+        );
+        assert!(view.files.iter().all(|file| file.selected));
+        assert_eq!(view.files[0].source, "project");
+        assert_eq!(view.files[2].source, "global");
+        assert!(view.session_work_file.ends_with("Timem.md"));
+    }
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionSelectionUpdate {
+            session_id: session_id.to_string(),
+            path: agents_path.clone(),
+            selected: false,
+        },
+    )
+    .unwrap();
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let selection = session.work_instruction_selection.as_ref().unwrap();
+        assert!(!selection.contains(&agents_path));
+        let deselected = session
+            .work_instruction
+            .files
+            .iter()
+            .find(|file| file.path == agents_path)
+            .unwrap();
+        assert!(!deselected.selected);
+        assert!(session
+            .work_instruction
+            .files
+            .iter()
+            .filter(|file| file.path != agents_path)
+            .all(|file| file.selected));
+    }
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(session_id)
+        .unwrap()
+        .unwrap();
+    // The selection persists in stable sorted order, independent of the
+    // project-first discovery order used for context injection.
+    let mut expected_selection = vec![claude_path.clone(), codex_path.clone()];
+    expected_selection.sort();
+    assert_eq!(
+        stored.work_instruction_selected_files,
+        Some(expected_selection.clone())
+    );
+
+    let rejected = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionSelectionUpdate {
+            session_id: session_id.to_string(),
+            path: root.join("escape.md").display().to_string(),
+            selected: true,
+        },
+    );
+    assert_eq!(rejected.unwrap_err(), "work_instruction_selection_invalid");
+    // The rejected patch must not have mutated the persisted selection.
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.work_instruction_selected_files,
+        Some(expected_selection.clone())
+    );
+
+    std::env::remove_var("TIMEM_WORK_INSTRUCTION_HOME");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_context_includes_only_selected_work_instructions() {
+    let _env = work_instruction_env_guard();
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let root = work_instruction_fixture_root("timem_web_wi_ctx");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join(".claude")).unwrap();
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "project agents unique_wi_agents",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join(".claude/CLAUDE.md"),
+        "nested claude unique_wi_claude",
+    )
+    .unwrap();
+    std::env::remove_var("TIMEM_WORK_INSTRUCTION_HOME");
+    set_test_mem(&state, root.join("data"), ".test_mem");
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.current_dir = workspace.display().to_string();
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Silent;
+    }
+
+    let default_context = session_context(&state, session_id, &[]).unwrap().unwrap();
+    assert!(default_context.contains("unique_wi_agents"));
+    assert!(default_context.contains("unique_wi_claude"));
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionSelectionUpdate {
+            session_id: session_id.to_string(),
+            path: workspace.join("AGENTS.md").display().to_string(),
+            selected: false,
+        },
+    )
+    .unwrap();
+    let filtered = session_context(&state, session_id, &[]).unwrap().unwrap();
+    assert!(!filtered.contains("unique_wi_agents"));
+    assert!(filtered.contains("unique_wi_claude"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn restored_sessions_keep_work_instruction_selection() {
+    let _env = work_instruction_env_guard();
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let root = work_instruction_fixture_root("timem_web_wi_restore");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "keep selection rules").unwrap();
+    // The fixture home contains no instruction files, so the only candidate
+    // is the project AGENTS.md.
+    std::env::set_var("TIMEM_WORK_INSTRUCTION_HOME", root.join("home"));
+    set_test_mem(&state, root.join("data"), ".test_mem");
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.current_dir = workspace.display().to_string();
+        session.runtime.settings.work_instruction_mode = WorkInstructionLoadMode::Silent;
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionSelectionUpdate {
+            session_id: session_id.to_string(),
+            path: workspace.join("AGENTS.md").display().to_string(),
+            selected: true,
+        },
+    )
+    .unwrap();
+
+    state.sessions.lock().unwrap().clear();
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&state).unwrap(),
+        1
+    );
+    let sessions = state.sessions.lock().unwrap();
+    let selection = sessions[session_id]
+        .work_instruction_selection
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        selection,
+        &BTreeSet::from([workspace.join("AGENTS.md").display().to_string()])
+    );
+    let view = &sessions[session_id].work_instruction;
+    assert_eq!(view.files.len(), 1);
+    assert!(view.files[0].selected);
+
+    std::env::remove_var("TIMEM_WORK_INSTRUCTION_HOME");
+    let _ = std::fs::remove_dir_all(root);
 }
