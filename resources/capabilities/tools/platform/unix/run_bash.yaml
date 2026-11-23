@@ -100,8 +100,13 @@ example_json: |
     },
     {
       "run_bash": {
-        "cmd": "python3 -c \"import pathlib; p = pathlib.Path('/tmp/demo/config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))\"",
-        "edit": "/tmp/demo/config.ini"
+        "cmd": "cd /tmp/demo && python3 -c \"import pathlib; p = pathlib.Path('config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))\" && sed -i 's/log_level=info/log_level=debug/' app.conf && awk '{ gsub(/8080/, \"9090\"); print }' endpoints.list > endpoints.list.tmp && mv endpoints.list.tmp endpoints.list",
+        "edit": [
+          "/tmp/demo/config.ini",
+          "/tmp/demo/app.conf",
+          "/tmp/demo/endpoints.list",
+          "/tmp/demo/endpoints.list.tmp"
+        ]
       }
     }
   ]

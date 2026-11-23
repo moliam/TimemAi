@@ -827,7 +827,7 @@ fn run_bash_manifest_renders_every_example_array_element() {
         .find(r#"{"run_bash":{"cmd":"sed -i"#)
         .expect("sed example line");
     let python_at = section
-        .find(r#"{"run_bash":{"cmd":"python3 -c"#)
+        .find(r#"{"run_bash":{"cmd":"cd /tmp/demo && python3 -c"#)
         .expect("python example line");
     assert!(
         loop_at < sed_at && sed_at < python_at,
@@ -835,14 +835,14 @@ fn run_bash_manifest_renders_every_example_array_element() {
     );
 
     assert!(markdown.contains(r#"{"run_bash":{"cmd":"sed -i 's/3.0/3.1/' /tmp/demo/version.txt && rm /tmp/demo/config.old","edit":["/tmp/demo/version.txt","/tmp/demo/config.old"],"background":true}}"#));
-    assert!(markdown.contains(r#"{"run_bash":{"cmd":"python3 -c \"import pathlib; p = pathlib.Path('/tmp/demo/config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))\"","edit":"/tmp/demo/config.ini"}}"#));
+    assert!(markdown.contains(r#"{"run_bash":{"cmd":"cd /tmp/demo && python3 -c \"import pathlib; p = pathlib.Path('config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))\" && sed -i 's/log_level=info/log_level=debug/' app.conf && awk '{ gsub(/8080/, \"9090\"); print }' endpoints.list > endpoints.list.tmp && mv endpoints.list.tmp endpoints.list","edit":["/tmp/demo/config.ini","/tmp/demo/app.conf","/tmp/demo/endpoints.list","/tmp/demo/endpoints.list.tmp"]}}"#));
 
     let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
     assert!(xml.contains(
         "<run_bash><cmd>sed -i 's/3.0/3.1/' /tmp/demo/version.txt &amp;&amp; rm /tmp/demo/config.old</cmd><edit><item>/tmp/demo/version.txt</item><item>/tmp/demo/config.old</item></edit><background>true</background></run_bash>"
     ));
     assert!(xml.contains(
-        r#"<run_bash><cmd>python3 -c "import pathlib; p = pathlib.Path('/tmp/demo/config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))"</cmd><edit>/tmp/demo/config.ini</edit></run_bash>"#
+        r#"<run_bash><cmd>cd /tmp/demo &amp;&amp; python3 -c "import pathlib; p = pathlib.Path('config.ini'); p.write_text(p.read_text().replace('timeout=30', 'timeout=60'))" &amp;&amp; sed -i 's/log_level=info/log_level=debug/' app.conf &amp;&amp; awk '{ gsub(/8080/, "9090"); print }' endpoints.list &gt; endpoints.list.tmp &amp;&amp; mv endpoints.list.tmp endpoints.list</cmd><edit><item>/tmp/demo/config.ini</item><item>/tmp/demo/app.conf</item><item>/tmp/demo/endpoints.list</item><item>/tmp/demo/endpoints.list.tmp</item></edit></run_bash>"#
     ));
 
     let tools = registry.native_tool_definitions();
@@ -858,7 +858,10 @@ fn run_bash_manifest_renders_every_example_array_element() {
         .contains(r#""edit":["/tmp/demo/version.txt","/tmp/demo/config.old"]"#));
     assert!(run_bash
         .description
-        .contains(r#""edit":"/tmp/demo/config.ini""#));
+        .contains(r#""cmd":"cd /tmp/demo && python3 -c"#));
+    assert!(run_bash
+        .description
+        .contains(r#""edit":["/tmp/demo/config.ini","/tmp/demo/app.conf","/tmp/demo/endpoints.list","/tmp/demo/endpoints.list.tmp"]"#));
     assert!(!run_bash.description.contains(r#"{"run_bash":"#));
 }
 
