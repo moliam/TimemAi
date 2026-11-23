@@ -155,7 +155,7 @@ describe("file edits surfaces", () => {
     expect(section).not.toContain("border:");
     expect(section).not.toContain("background:");
     // 用户反馈：新建 / 修改 / 删除改成不同颜色的无框底色胶囊、白色文字；
-    // 色弱友好靠「色相 + 明度」双分离（青绿 / 琥珀 / 深红实底）。
+    // 新建取蓝色、修改取 diff 里 + 行的绿（同色相压深），删除保持深红。
     const opStart = styles.indexOf(".file-edit-op {");
     const op = styles.slice(opStart, styles.indexOf("}", opStart) + 1);
     expect(op).toContain("border: 0;");
@@ -164,8 +164,8 @@ describe("file edits surfaces", () => {
     expect(op).toContain("color: #fff;");
     expect(op).not.toContain("border: 1px");
     for (const [name, tint] of [
-      ["created", "#0c6f5a"],
-      ["modified", "#a1680f"],
+      ["created", "#1d64a0"],
+      ["modified", "#2b7d52"],
       ["deleted", "#93261f"],
     ] as const) {
       const start = styles.indexOf(`.file-edit-op-${name} {`);
@@ -176,8 +176,8 @@ describe("file edits surfaces", () => {
     }
     // 明色主题：同一套实底稍作提深，仍是白字、仍无边框。
     for (const [name, tint] of [
-      ["created", "#0a6a53"],
-      ["modified", "#96600c"],
+      ["created", "#17568c"],
+      ["modified", "#1a6b45"],
       ["deleted", "#8f231d"],
     ] as const) {
       const start = styles.indexOf(`:root[data-theme="light"] .file-edit-op-${name} {`);

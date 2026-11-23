@@ -1197,3 +1197,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Web 呈现：`tool_presentation.ts` 只丢弃 `unchanged` 与 `skipped`，`FILE_EDIT_SKIP_REASONS` 增加 `directory`；`file_edits_view.tsx` 把 `SKIP_LABEL_KEYS` 改为 `KIND_LABEL_KEYS`，在文件名后渲染 `.file-edit-kind` 类型标签（`title` 为「类型 · 大小」），删除原先整行的跳过提示。i18n 去掉 `fileSkip*`，新增 `fileKind*`：Binary / 文件夹 / 文件过大 / 无法读取 / 未记录基线 / 差异已省略（en 同步）。样式新增 `.file-edit-kind`（弱化色、10.5px、不伸缩），明色主题提深一档。
 - 兼容性：`FileEditOp::Skipped` 枚举保留，只为读旧存档 payload；运行时不再产生（仅内部两侧 Missing 用后即弃）。
 - 测试看护：core 用例改为断言真实 op 与 skip_reason（目录 `Modified/directory`、先捕获后建目录 `Created/directory`、稀疏大文件 `Binary`、64 MiB 文本 `TooLarge`、未捕获基线 `Modified/not_captured`、仅 Missing 不入摘要）；宿主用例断言二进制行为 `modified + binary`、只捕获 unchanged 得空摘要、modified 后 unchanged 仍保留 modified、旧 skipped 存档折叠为空；Web 用例断言 skipped 行被丢弃、真实改动保留、类型标签与 `title="Binary · 4.0 KB"`、面板不再出现跳过提示与「无变化」标记。验证：`cargo test -p agent_core --lib` 1043 过、`cargo test -p timem --lib` 535 过、web `pnpm test` 1060 过、tsc 过。
+
+## 2026-11-23 op 胶囊换色：新建取蓝、修改取 diff 中 `+` 行的绿
+
+- 用户反馈：胶囊配色要跟 diff 语义对齐——「修改」用 diff 框里 `+` 那一行的颜色，「新建」用蓝色。
+- 实现：`.file-edit-op-created` 改蓝（暗 `#1d64a0` / 明 `#17568c`），`.file-edit-op-modified` 改用 `+` 行的绿（暗 `#2b7d52` / 明 `#1a6b45`），删除保持深红（`#93261f` / `#8f231d`）。修改色与 `+` 行的底色基色 `rgba(64,180,120,…)`、符号色 `#7fd6a4` 同属绿相（约 149°），只是压深成实底以便承载白字（不能直接拿 `#7fd6a4` 当底：白字对比度仅约 1.5:1）。
+- 可读性与色弱：白字对比度 6.2:1（新建）/ 5.1:1（修改）/ 8.3:1（删除），均高于 WCAG AA 4.5:1；Machado 2009 绿盲模拟后 Lab ΔE——新建 vs 修改 56、新建 vs 删除 77、修改 vs 删除 23，色相与明度双重分离，不依赖红绿单通道。
+- 测试看护：`file_edits.test.ts` 的胶囊契约改为断言新的一组实底色值（暗/明各三色）且单 op 不覆盖文字色。验证：`pnpm exec vitest run tests/file_edits.test.ts` 30 过。

@@ -7350,8 +7350,10 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   line-height: 16px;
   letter-spacing: 0.2px;
 }
-.file-edit-op-created { background: #0c6f5a; }
-.file-edit-op-modified { background: #a1680f; }
+/* 用户反馈：新建用蓝色，修改用 diff 框里 + 行的绿。两者都取同色相压深的
+   实底，保证白字对比度（新建 6.2:1、修改 5.1:1）与色弱可分。 */
+.file-edit-op-created { background: #1d64a0; }
+.file-edit-op-modified { background: #2b7d52; }
 .file-edit-op-deleted { background: #93261f; }
 .file-edit-op-unchanged,
 .file-edit-op-skipped { background: #47585f; }
@@ -7473,8 +7475,8 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edits-panel {
   background: rgba(20, 40, 50, 0.02);
 }
-:root[data-theme="light"] .file-edit-op-created { background: #0a6a53; }
-:root[data-theme="light"] .file-edit-op-modified { background: #96600c; }
+:root[data-theme="light"] .file-edit-op-created { background: #17568c; }
+:root[data-theme="light"] .file-edit-op-modified { background: #1a6b45; }
 :root[data-theme="light"] .file-edit-op-deleted { background: #8f231d; }
 :root[data-theme="light"] .file-edit-op-unchanged,
 :root[data-theme="light"] .file-edit-op-skipped { background: #5a6b75; }
