@@ -366,8 +366,28 @@ export type WebTurn = {
    * action skeletons, snapshot tail). Clients fetch full detail via
    * turn_history_page instead of rendering `…[truncated]` previews. */
   events_slimmed?: boolean;
+  /** Host-folded begin-to-end file changes of this turn. Authoritative: the
+   * event list is a trimmed transport window and must not be re-aggregated. */
+  file_changes?: WebTurnFileChanges | null;
   final_answer?: string | null;
   completion?: TurnCompletion | null;
+};
+
+export type WebTurnFileChange = {
+  path: string;
+  op: string;
+  diff?: string | null;
+  added_lines?: number;
+  removed_lines?: number;
+  truncated?: boolean;
+  skip_reason?: string | null;
+  size_bytes?: number | null;
+  capture_count?: number;
+};
+
+export type WebTurnFileChanges = {
+  edits: WebTurnFileChange[];
+  overflow_count?: number;
 };
 
 

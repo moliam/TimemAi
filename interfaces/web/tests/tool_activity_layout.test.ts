@@ -191,9 +191,10 @@ it("keeps live text/tool spacing compact without shrinking touch targets", () =>
 it("shows the folded turn change summary beside the archived frame", () => {
   const turnScope = source.slice(source.indexOf("const turnEditsSummary = useMemo("), source.indexOf("{persistentToolGenItems.length > 0 && ("));
 
-  // Aggregation comes from the authoritative lifecycle items of the turn.
-  expect(turnScope).toContain("summarizeTurnEdits(");
-  expect(turnScope).toContain("lifecycleItems.map((item) => item.activity?.edits ?? undefined)");
+  // 总结由 Host 折叠并随 turn 下发，前端只校验渲染；从（被裁剪的）事件窗口
+  // 重新聚合会让长轮次在重启后只剩最后一个文件。
+  expect(turnScope).toContain("turnFileChangesSummary(turn.file_changes)");
+  expect(turnScope).not.toContain("summarizeTurnEdits(");
   // The turn summary appears whenever the finished turn captured file edits,
   // independent of whether the process area is archived or kept expanded.
   expect(turnScope).toContain("showWorkFrame && !isWorking && turnEditsSummary.edits.length > 0 && (");

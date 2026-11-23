@@ -81,9 +81,13 @@ describe("unified endpoint context window UI", () => {
     expect(main).toContain("handleWorkingMemoTooltipEnter");
     expect(main).toContain("visible={workingMemoVisible}");
     expect(main).toContain("onPointerEnter={onPointerEnter}");
+    // 空闲态气泡也走 portal（position: fixed + 视口夹取 + 内部滚动），否则导航栏
+    // 挪到输入框左侧后，气泡会被输入区的 overflow 裁掉或挂到屏幕外。
     const styles = read("styles.css");
-    expect(styles).toContain(".thread-memo-indicator:focus-within .thread-memo-tooltip");
-    expect(styles).toContain("pointer-events: auto;");
-    expect(styles).toContain("translateX(-10px)");
+    expect(styles).toContain(".thread-working-memo-tooltip.is-portal");
+    expect(styles).toContain("max-height: min(48dvh, 320px);");
+    expect(styles).not.toContain(".thread-memo-tooltip {");
+    expect(main).toContain("ref={setMemoIndicatorEl}");
+    expect(main).toContain("anchor={memoIndicatorEl}");
   });
 });

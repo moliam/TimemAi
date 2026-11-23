@@ -6,7 +6,7 @@ import { useStreamWorkInProgress } from "./stream_work_context";
 import { useFileEditsDuringWork } from "./stream_ui_mode";
 import { t } from "./i18n";
 import type { StringKey } from "./i18n";
-import { parseDiffRows } from "./tool_presentation";
+import { fileEditsPresentation, parseDiffRows } from "./tool_presentation";
 import type { DiffRow, FileEditOp, FileEditPresentation, FileEditsPresentation } from "./tool_presentation";
 import { redactSensitiveDisplayText } from "./view_model";
 
@@ -101,87 +101,26 @@ export type TurnEditsSummary = {
   overflowCount: number;
 };
 
-// Fail-closed budget: the folded summary stays bounded even when a turn
-// touched a huge number of files; the overflow note reports the remainder.
-const TURN_EDITS_SUMMARY_LIMIT = 64;
+// The host folds the turn's net begin-to-end file changes from the complete
+// history (server::TurnFileChangeAccumulator) and ships them on the turn, so the
+// client only validates and renders. Deriving the same fact here from the
+// transport event window is what made a long turn report a single file after a
+// restart: that window is trimmed for size, and the fact was derived from it.
+export const EMPTY_TURN_EDITS_SUMMARY: TurnEditsSummary = { edits: [], overflowCount: 0 };
 
-// Per-path capture state across the whole turn. The first non-skipped op
-// defines whether the path existed at the turn start ("created" means it did
-// not); the last non-skipped capture defines the end state.
-type TurnEditPathState = {
-  captures: number;
-  startOp: FileEditOp | null;
-  sawCaptured: boolean;
-  display: FileEditPresentation | null;
-};
-
-function trackTurnEditCapture(state: TurnEditPathState, next: FileEditPresentation): void {
-  state.captures += 1;
-  if (next.op === "skipped") {
-    // A skipped capture carries no fresh evidence about existence; while no
-    // real capture has landed yet, the latest skip reason is the only
-    // reportable fact for this path.
-    if (!state.sawCaptured) state.display = next;
-    return;
-  }
-  if (state.startOp === null) state.startOp = next.op;
-  state.sawCaptured = true;
-  state.display = next;
-}
-
-// Net change of one path across the whole turn (start state vs end state).
-// A file that was created mid-turn and deleted before the turn ended never
-// existed at either boundary, so it is dropped entirely instead of leaving a
-// misleading "deleted" row behind.
-function netTurnEditEntry(state: TurnEditPathState): TurnEditEntry | null {
-  const display = state.display;
-  if (!display) return null;
-  if (!state.sawCaptured) {
-    // Nothing was ever captured: report the latest skip verbatim.
-    return { ...display, capture_count: state.captures };
-  }
-  const startExisted = state.startOp !== "created";
-  const endExisted = display.op !== "deleted";
-  if (!startExisted && !endExisted) return null;
-  let op: FileEditOp = display.op;
-  if (!startExisted) op = "created";
-  else if (display.op === "created") op = "modified";
-  return { ...display, op, capture_count: state.captures };
-}
-
-// Aggregate every tool call's file edits of one turn into a per-path summary
-// of the net begin-to-end change: first-touch order, bounded size. The full
-// per-call evidence stays on the individual tool cards; only files that
-// actually differ between the turn's start and end appear here.
-export function summarizeTurnEdits(
-  groups: ReadonlyArray<FileEditsPresentation | undefined | null> | undefined | null,
-): TurnEditsSummary {
-  const states = new Map<string, TurnEditPathState>();
-  const list = Array.isArray(groups) ? groups : [];
-  for (const group of list) {
-    if (!Array.isArray(group)) continue;
-    for (const edit of group) {
-      if (!edit || typeof edit.path !== "string" || !edit.path) continue;
-      let state = states.get(edit.path);
-      if (!state) {
-        state = { captures: 0, startOp: null, sawCaptured: false, display: null };
-        states.set(edit.path, state);
-      }
-      trackTurnEditCapture(state, edit);
-    }
-  }
-  const edits: TurnEditEntry[] = [];
-  let overflowCount = 0;
-  for (const state of states.values()) {
-    const entry = netTurnEditEntry(state);
-    if (!entry) continue;
-    if (edits.length >= TURN_EDITS_SUMMARY_LIMIT) {
-      overflowCount += 1;
-      continue;
-    }
-    edits.push(entry);
-  }
-  return { edits, overflowCount };
+export function turnFileChangesSummary(value: unknown): TurnEditsSummary | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const summary = value as { edits?: unknown; overflow_count?: unknown };
+  // The host already folded the turn, so the entry budget is the host's own
+  // (64 paths) rather than the per-tool-call card budget.
+  const edits = fileEditsPresentation(summary.edits, { maxEntries: 64 });
+  if (!edits) return undefined;
+  const overflow = summary.overflow_count;
+  return {
+    edits,
+    overflowCount:
+      typeof overflow === "number" && Number.isSafeInteger(overflow) && overflow > 0 ? overflow : 0,
+  };
 }
 
 // Folded-turn change summary: rendered beside the archived Thought/Action
@@ -201,6 +140,21 @@ export function TurnEditsSummaryBox({ summary }: { summary: TurnEditsSummary }) 
       )}
     </section>
   );
+}
+
+// Byte counts only: a non-text edit has no diff, so its size is the evidence
+// the row can show. ASCII units keep this view file free of literal strings.
+function formatFileSize(bytes: number | null | undefined): string | undefined {
+  if (bytes === null || bytes === undefined) return undefined;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
 }
 
 function splitEditPath(path: string): { directory: string; name: string } {
@@ -240,6 +194,8 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
   const skipLabel = edit.skip_reason
     ? t(SKIP_LABEL_KEYS[edit.skip_reason] ?? ("tools.fileSkipUnreadable" as StringKey))
     : undefined;
+  // Non-text edits carry no diff; the capture size is their only evidence.
+  const sizeLabel = expandable ? undefined : formatFileSize(edit.size_bytes);
   const toggle = () => {
     if (!expandable) return;
     manualToggle.current = true;
@@ -329,7 +285,10 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
         <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>
       )}
       {!expandable && skipLabel && edit.op === "skipped" && (
-        <div className="file-edit-notice">{skipLabel}</div>
+        <div className="file-edit-notice">
+          {skipLabel}
+          {sizeLabel && <span className="file-edit-size"> · {sizeLabel}</span>}
+        </div>
       )}
     </div>
   );

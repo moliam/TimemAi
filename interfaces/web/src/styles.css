@@ -4117,7 +4117,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   display: grid;
   gap: 3px;
   width: max-content;
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 16px));
+  /* 长 memo 也不能超出视口：内部滚动，气泡整体始终留在屏幕内。 */
+  max-height: min(48dvh, 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px 10px;
   border: 1px solid #33473f99;
   border-radius: 8px;
@@ -5953,34 +5957,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
   display: inline-flex;
   align-items: center;
 }
-.user-message-navigation:has(.thread-memo-indicator:hover),
-.user-message-navigation:has(.thread-memo-indicator:focus-visible),
-.user-message-navigation:has(.thread-memo-indicator:focus-within) {
-  z-index: 41;
-}
-.thread-memo-tooltip {
-  position: absolute;
-  z-index: 42;
-  /* The indicator sits near the chat area's left edge: opening leftwards
-     slides under the session sidebar. Open to the right instead. */
-  left: 38px;
-  top: 50%;
-  transform: translateY(-50%) translateX(-4px);
-  width: max-content;
-  max-width: 320px;
-  padding: 8px 10px;
-  border: 1px solid #33473f99;
-  border-radius: 8px;
-  background: #1c2220f2;
-  color: #cfd6db;
-  font-size: 11px;
-  line-height: 1.5;
-  box-shadow: 0 2px 10px #00000052;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .15s ease, transform .15s ease;
-  white-space: normal;
-}
+/* 用户反馈：导航栏挪到输入框左侧后，memo 气泡被挤到屏幕外/被输入区裁掉。
+   气泡改走 portal（position: fixed，见 .thread-working-memo-tooltip.is-portal），
+   这里不再有绝对定位的内联气泡。 */
 .thread-memo-caption {
   display: block;
   color: #8db6d1;
@@ -5991,21 +5970,6 @@ body.workspace-modal-open .app-shell { user-select: none; }
   display: block;
   word-break: break-word;
   user-select: text;
-}
-.thread-memo-indicator:hover .thread-memo-tooltip,
-.thread-memo-indicator:focus-visible .thread-memo-tooltip,
-.thread-memo-indicator:focus-within .thread-memo-tooltip {
-  opacity: 1;
-  pointer-events: auto;
-  /* Overlap the trigger chip (absolute left starts inside its 1px border, so
-     -10px lands the tooltip edge on the chip's own edge): the pointer never
-     crosses a dead gap when reaching the copy button. */
-  transform: translateY(-50%) translateX(-10px);
-}
-:root[data-theme="light"] .thread-memo-tooltip {
-  background: #ffffffef;
-  border-color: #9aa8a2;
-  color: #33413c;
 }
 :root[data-theme="light"] .thread-memo-caption { color: #1f6f5f; }
 

@@ -1,7 +1,7 @@
 import { useThrottledValue } from "./use_throttled_value";
 import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
-import { FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, summarizeTurnEdits } from "./file_edits_view";
+import { EMPTY_TURN_EDITS_SUMMARY, FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, turnFileChangesSummary } from "./file_edits_view";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -9692,7 +9692,7 @@ const MemoCopyButton = memo(function MemoCopyButton({ text }: { text: string }) 
  * the left of the button, flips to the right when the left side is too
  * narrow (sidebar), and clamps vertically inside the viewport.
  */
-const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
+const MemoTooltip = memo(function MemoTooltip({
   anchor,
   caption,
   text,
@@ -10266,6 +10266,18 @@ function TimemThread({
   const workingMemoPointerInsideRef = useRef(false);
   const [workingMemoPinned, setWorkingMemoPinned] = useState(false);
   const [workingMemoVisible, setWorkingMemoVisible] = useState(false);
+  // Idle memo chip anchor: the tooltip is portalled and viewport-clamped, so it
+  // escapes the composer's overflow clip instead of hanging off the edges.
+  const [memoIndicatorEl, setMemoIndicatorEl] = useState<HTMLElement | null>(null);
+  // 键盘焦点落在气泡里的复制按钮上时不能把气泡收掉（portal 在 indicator 子树外，
+  // 所以按激活元素判断而不是 relatedTarget）。
+  const hideMemoTooltipUnlessFocusInside = () => {
+    window.setTimeout(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest(".thread-working-memo-tooltip.is-portal")) return;
+      hideWorkingMemoTooltip();
+    }, 0);
+  };
   const showWorkingMemoTooltip = () => {
     if (workingMemoHideTimerRef.current !== null) {
       window.clearTimeout(workingMemoHideTimerRef.current);
@@ -12275,7 +12287,7 @@ function TimemThread({
             onPointerEnter={showWorkingMemoTooltip}
             onPointerLeave={hideWorkingMemoTooltip}
             onFocus={showWorkingMemoTooltip}
-            onBlur={hideWorkingMemoTooltip}
+            onBlur={hideMemoTooltipUnlessFocusInside}
           >
             <span className="thread-edge-symbol" aria-hidden="true">
               {activeSession.state === "working" ? (
@@ -12310,31 +12322,36 @@ function TimemThread({
         )}
         {activeSession?.active_memo && activeSession.state !== "working" && (
           <span
+            ref={setMemoIndicatorEl}
             className="thread-memo-indicator"
             role="status"
             tabIndex={0}
-            title={t("messageNav.memoIndicator")}
             aria-label={t("messageNav.memoIndicator")}
+            onPointerEnter={showWorkingMemoTooltip}
+            onPointerLeave={hideWorkingMemoTooltip}
+            onFocus={showWorkingMemoTooltip}
+            onBlur={hideWorkingMemoTooltip}
           >
             <span className="thread-memo-icon" aria-hidden="true">
               <MemoIcon size={13} />
             </span>
-            <span className="thread-memo-tooltip" role="tooltip">
-              <span className="thread-memo-caption-row">
-                <span className="thread-memo-caption">
-                  {t("messageNav.memoIndicator")}
-                </span>
-                <MemoCopyButton text={activeSession.active_memo} />
-              </span>
-              <span className="thread-memo-text">{activeSession.active_memo}</span>
-            </span>
           </span>
+        )}
+        {memoIndicatorEl && activeSession?.active_memo && activeSession.state !== "working" && (
+          <MemoTooltip
+            anchor={memoIndicatorEl}
+            caption={t("messageNav.memoIndicator")}
+            text={activeSession.active_memo}
+            visible={workingMemoVisible}
+            onPointerEnter={handleWorkingMemoTooltipEnter}
+            onPointerLeave={handleWorkingMemoTooltipLeave}
+          />
         )}
         {activeSession?.state === "working" &&
           activeSession.active_memo &&
           workingMemoPinned &&
           workingAwayButtonRef.current && (
-            <WorkingMemoTooltip
+            <MemoTooltip
               anchor={workingAwayButtonRef.current}
               caption={t("messageNav.memoIndicator")}
               text={activeSession.active_memo}
@@ -12497,12 +12514,12 @@ const TurnInteraction = memo(function TurnInteraction({
       ),
     [lifecycleEvents, sessionId],
   );
+  // The host folds this summary from the full turn history and ships it on the
+  // turn; re-deriving it from the (trimmed) event window here is what made a
+  // long turn report only its last file after a restart.
   const turnEditsSummary = useMemo(
-    () =>
-      summarizeTurnEdits(
-        lifecycleItems.map((item) => item.activity?.edits ?? undefined),
-      ),
-    [lifecycleItems],
+    () => turnFileChangesSummary(turn.file_changes) ?? EMPTY_TURN_EDITS_SUMMARY,
+    [turn.file_changes],
   );
   const supplementItems = useMemo(
     () =>
