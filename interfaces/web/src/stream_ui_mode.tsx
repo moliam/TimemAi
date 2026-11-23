@@ -7,6 +7,15 @@ export function useStreamArchive() { return useBetaPreference("streamArchive"); 
 export function useToolResultStatus() { return useBetaPreference("toolResults"); }
 export function setFileEditsDuringWork(value: boolean) { setBetaPreference("fileEditsDuringWork", value); }
 export function useFileEditsDuringWork() { return useBetaPreference("fileEditsDuringWork"); }
+export function setToolPreviewDuringWork(value: boolean) { setBetaPreference("toolPreviewDuringWork", value); }
+export function useToolPreviewDuringWork() { return useBetaPreference("toolPreviewDuringWork"); }
+export function ToolPreviewDuringWorkSetting() {
+  const active = useToolPreviewDuringWork();
+  useT();
+  return <section className="settings-group system-feature-card"><div className="settings-group-heading"><div>
+    <strong>{t("system.toolPreviewDuringWorkTitle")}</strong><p>{t("system.toolPreviewDuringWorkDesc")}</p>
+    </div><button type="button" role="switch" className="settings-feature-switch" aria-label={t("system.toolPreviewDuringWorkAria")} aria-checked={active} onClick={() => setToolPreviewDuringWork(!active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
+}
 export function FileEditsDuringWorkSetting() {
   const active = useFileEditsDuringWork();
   useT();

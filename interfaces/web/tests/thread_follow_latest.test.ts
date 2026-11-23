@@ -33,11 +33,13 @@ describe("thread latest-content following", () => {
   });
 
   it("aligns a new turn again after the welcome-to-working layout frame", () => {
+    // 贴底目标一律是最新内容的底边（streamContentScrollTop），底部预留的空槽不算
+    // 内容——否则空槽存在期间会多滚一段，等空槽被吃掉时又回弹。
     expect(source).toMatch(
-      /followThreadLatest\.current = true;\s*viewport\.scrollTop = viewport\.scrollHeight;\s*const frame = window\.requestAnimationFrame/,
+      /followThreadLatest\.current = true;\s*viewport\.scrollTop = streamContentScrollTop\(viewport\);\s*const frame = window\.requestAnimationFrame/,
     );
     expect(source).toMatch(
-      /if \(!followThreadLatest\.current \|\| previousScrollMetrics\.current\) return;\s*viewport\.scrollTop = viewport\.scrollHeight/,
+      /if \(!followThreadLatest\.current \|\| previousScrollMetrics\.current\) return;\s*viewport\.scrollTop = streamContentScrollTop\(viewport\)/,
     );
     expect(source).toContain("window.cancelAnimationFrame(frame)");
   });

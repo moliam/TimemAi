@@ -80,9 +80,11 @@ describe("settings category regroup", () => {
   it("defaults the new switches on and pins them against the debug flag", () => {
     expect(prefs).toContain('autoCollapse: "timem-web-turn-auto-collapse-v1"');
     expect(prefs).toContain('fileEditsWrap: "timem-web-file-edits-wrap-v1"');
-    expect(prefs).toMatch(/const defaults: Record<Preference, boolean> = \{\s*stream: true, streamArchive: false, toolResults: true,\s*autoCollapse: true, fileEditsWrap: true, fileEditsDuringWork: true,\s*\};/);
+    // 工作过程中预览工具输出结果默认关：多跳命令的结果框不再一起展开再一起收起。
+    expect(prefs).toMatch(/const defaults: Record<Preference, boolean> = \{\s*stream: true, streamArchive: false, toolResults: true,\s*autoCollapse: true, fileEditsWrap: true, fileEditsDuringWork: true,\s*toolPreviewDuringWork: false,\s*\};/);
     expect(prefs).toContain('fileEditsDuringWork: "timem-web-file-edits-during-work-v1"');
-    for (const name of ["stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap", "fileEditsDuringWork"]) {
+    expect(prefs).toContain('toolPreviewDuringWork: "timem-web-tool-preview-during-work-v1"');
+    for (const name of ["stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap", "fileEditsDuringWork", "toolPreviewDuringWork"]) {
       expect(prefs).toContain(`"${name}"`);
     }
   });

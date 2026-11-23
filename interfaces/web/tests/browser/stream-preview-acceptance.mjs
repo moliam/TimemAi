@@ -1513,6 +1513,16 @@ async function main() {
           rows: document.querySelectorAll('.stream-tool-row').length,
           heads: document.querySelectorAll('.stream-tool-head').length,
           runHeight: Math.round(document.querySelector('.stream-tool-run').getBoundingClientRect().height)})`;
+        // 用户反馈：新增「工作过程中预览工具输出结果」开关，默认关——工作过程中
+        // 多条命令不再一起展开结果框（那是收拢幅度和跳动的大头），行尾只留眼睛徽章。
+        await setRound(finishedA, "");
+        await sleep(300);
+        assert(await browser.evaluate(`!document.querySelector('.stream-tool-result-preview')`),
+          "work preview must stay off by default");
+        assert(await browser.evaluate(`!!document.querySelector('.stream-tool-result-reopen')`),
+          "default-off row must still offer the eye badge");
+        await browser.evaluate(`localStorage.setItem("timem-web-tool-preview-during-work-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-preview-during-work-v1"}));`);
+        console.log("PASS Chrome work preview setting: default off leaves the eye badge only, switch turns the preview back on");
         const probes = {};
         for (const mode of ["following", "reading"]) {
           await setRound(finishedA, "");
@@ -1560,6 +1570,7 @@ async function main() {
         }
         // 量化的证据：预览限高后，交接只撤掉几行，而不是整块 240px。
         console.log("PASS Chrome tool handoff sizing", JSON.stringify(probes));
+        await browser.evaluate(`localStorage.removeItem("timem-web-tool-preview-during-work-v1")`);
         await browser.call("Emulation.clearDeviceMetricsOverride");
       }
       console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files, frameless diff card, handoff absorbs one row");

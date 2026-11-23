@@ -87,6 +87,9 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
 .turn-work-scroll { max-height: min(480px, 55vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px; }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
+/* 阅读区底部的临时空槽：吸收「工具结果收拢」带来的变矮，让 scrollTop 不被浏览器
+   夹到新的 max（否则贴底跟随时整列内容会被迫下移）。高度由 main.tsx 逐帧写入。 */
+.chat-scroll-shrink-gap { flex: none; width: 100%; height: 0; pointer-events: none; }
 .turn-work-item { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 9px 8px; color: #c4d2dc; font-size: 12px; line-height: 1.5; animation: work-row-enter .2s ease-out both; }
 .turn-work-item + .turn-work-item { border-top: 1px solid #1d2932; }
 .turn-work-item strong { color: #e0eaf0; font-weight: 650; }
@@ -7249,6 +7252,15 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 /* 文件名列表保持纯文本行：只有展开的 diff 正文渲染为内层框。 */
 .file-edit-section { min-width: 0; }
+/* 用户反馈：diff 框要和正文一样宽——它和正文一样是阅读内容。工具行本身保留 90%
+   的窄版式，只把其中的文件修改面板还原到阅读列宽度（100% / 90%），并去掉面板
+   自己的左右内边距，让 diff 行直接铺满这个宽度。 */
+.stream-tool-row .file-edits-panel {
+  width: calc(100% / .9);
+  max-width: calc(100% / .9);
+  padding-left: 0;
+  padding-right: 0;
+}
 .turn-edits-summary {
   margin: 10px 0 0;
   padding: 8px 10px 10px;
@@ -7273,6 +7285,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   border-radius: 0;
   background: transparent;
 }
+/* 用户反馈：diff 要和正文一样宽。总结卡改用「零内边距 + 头部/提示各自内缩」，
+   展开的 diff 就能铺满阅读列，不再被卡的 10px 内边距压窄。 */
+.turn-edits-summary { padding: 8px 0; }
+.turn-edits-summary-head { padding: 0 10px; }
+.turn-edits-summary > .file-edit-notice { padding-left: 10px; padding-right: 10px; }
 .file-edit-captures {
   flex: none;
   padding: 0 6px;

@@ -7,6 +7,7 @@ const keys = {
   toolResults: "timem-web-tool-result-status-v1",
   autoCollapse: "timem-web-turn-auto-collapse-v1",
   fileEditsDuringWork: "timem-web-file-edits-during-work-v1",
+  toolPreviewDuringWork: "timem-web-tool-preview-during-work-v1",
   fileEditsWrap: "timem-web-file-edits-wrap-v1",
 } as const;
 type Preference = keyof typeof keys;
@@ -22,6 +23,7 @@ const choices: Record<Preference, boolean | undefined> = {
   stream: read("stream"), streamArchive: read("streamArchive"), toolResults: read("toolResults"),
   autoCollapse: read("autoCollapse"), fileEditsWrap: read("fileEditsWrap"),
   fileEditsDuringWork: read("fileEditsDuringWork"),
+  toolPreviewDuringWork: read("toolPreviewDuringWork"),
 };
 // Per-preference defaults. Every current switch is user-facing, so each
 // keeps its fixed default in every mode: streaming display, tool status,
@@ -30,6 +32,7 @@ const choices: Record<Preference, boolean | undefined> = {
 const defaults: Record<Preference, boolean> = {
   stream: true, streamArchive: false, toolResults: true,
   autoCollapse: true, fileEditsWrap: true, fileEditsDuringWork: true,
+  toolPreviewDuringWork: false,
 };
 function notify() { listeners.forEach(listener => listener()); }
 // Debug-exempt switches ignore the Host debug default entirely: their
@@ -37,7 +40,7 @@ function notify() { listeners.forEach(listener => listener()); }
 // auto-collapse defaults on) in every mode.
 const debugExempt: ReadonlySet<Preference> = new Set([
   "stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap",
-  "fileEditsDuringWork",
+  "fileEditsDuringWork", "toolPreviewDuringWork",
 ]);
 export function applyBetaDebugDefault(debug: boolean) {
   if (debugDefault === debug) return;

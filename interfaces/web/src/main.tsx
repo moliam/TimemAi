@@ -8,7 +8,7 @@ import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_dr
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault, setBetaPreference, useBetaPreference } from "./beta_preferences";
-import { FileEditsDuringWorkSetting, StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { FileEditsDuringWorkSetting, StreamUiModeSetting, ToolPreviewDuringWorkSetting, useStreamArchive, useStreamUiMode, useToolPreviewDuringWork, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { StreamWorkProvider } from "./stream_work_context";
 import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
@@ -193,7 +193,6 @@ import {
   adjacentUserMessageIndex,
   anchorScrollDelta,
   canScrollInDirection,
-  foldAnchorScrollTop,
   isNearScrollBottom,
   pickViewportTurnAnchor,
   preservePrependScrollTop,
@@ -10181,6 +10180,23 @@ function TimemThread({
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const scrollGapHostRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    streamScrollGapHost = scrollGapHostRef.current;
+    if (streamScrollGapHost) streamScrollGapHost.style.height = `${streamScrollGap}px`;
+    return () => {
+      if (streamScrollGapHost === scrollGapHostRef.current) streamScrollGapHost = null;
+    };
+  }, []);
+  // 每次提交后让新内容吃掉底部空槽；切会话时把空槽清掉（滚动位置由既有恢复逻辑重设）。
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || streamScrollGap <= 0) return;
+    consumeStreamScrollGap(viewport);
+  });
+  useEffect(() => {
+    resetStreamScrollGap();
+  }, [activeSession?.session_id]);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachComposerTextarea = useCallback(
     (textarea: HTMLTextAreaElement | null) => {
@@ -10695,7 +10711,7 @@ function TimemThread({
         !nextUserMessageAvailable &&
         !isNearScrollBottom({
           scrollTop: viewport.scrollTop,
-          scrollHeight: viewport.scrollHeight,
+          scrollHeight: viewport.scrollHeight - streamScrollGap,
           clientHeight: viewport.clientHeight,
         }),
     };
@@ -11124,10 +11140,10 @@ function TimemThread({
       return;
     }
     followThreadLatest.current = true;
-    viewport.scrollTop = viewport.scrollHeight;
+    viewport.scrollTop = streamContentScrollTop(viewport);
     const frame = window.requestAnimationFrame(() => {
       if (!followThreadLatest.current || previousScrollMetrics.current) return;
-      viewport.scrollTop = viewport.scrollHeight;
+      viewport.scrollTop = streamContentScrollTop(viewport);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, latestTurn?.turn_id]);
@@ -11144,7 +11160,10 @@ function TimemThread({
       previousScrollMetrics.current
     )
       return;
-    viewport.scrollTop = viewport.scrollHeight;
+    // 只跟随「变高」：变矮（工具收纳、工作过程归档）绝不能把内容整体推下去。
+    // 目标是最新内容的底边，底部预留空槽不算内容。
+    const target = streamContentScrollTop(viewport);
+    if (target > viewport.scrollTop) viewport.scrollTop = target;
   }, [latestTurnVersion]);
 
   // Pin the captured hydration anchor back to its viewport offset. Growth
@@ -11413,7 +11432,7 @@ function TimemThread({
         onScroll={(event) => {
           const nearBottom = isNearScrollBottom({
             scrollTop: event.currentTarget.scrollTop,
-            scrollHeight: event.currentTarget.scrollHeight,
+            scrollHeight: event.currentTarget.scrollHeight - streamScrollGap,
             clientHeight: event.currentTarget.clientHeight,
           });
           followThreadLatest.current = nearBottom;
@@ -11476,6 +11495,11 @@ function TimemThread({
             onRequestMessageDelete={onRequestMessageDelete}
           />
         ))}
+        <div
+          className="chat-scroll-shrink-gap"
+          ref={scrollGapHostRef}
+          aria-hidden="true"
+        />
       </ThreadPrimitive.Viewport>
 
       <div className="composer-wrap aui-thread-footer">
@@ -12669,8 +12693,17 @@ const TurnInteraction = memo(function TurnInteraction({
     const content = workContentRef.current;
     if (!scroll || !content || typeof ResizeObserver === "undefined") return;
     let scrollFrame: number | undefined;
+    let lastHeight = scroll.scrollHeight;
     const observer = new ResizeObserver(() => {
-      if (!followLatest.current || scrollFrame !== undefined) return;
+      const nextHeight = scroll.scrollHeight;
+      // 只跟随「变高」：贴底时内容变矮，把 scrollTop 拉到新的 max 会把正在阅读的
+      // 内容整块推下去（用户反馈的「整个界面往下掉」就是这条路）。
+      if (!followLatest.current || nextHeight <= lastHeight) {
+        lastHeight = nextHeight;
+        return;
+      }
+      lastHeight = nextHeight;
+      if (scrollFrame !== undefined) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = undefined;
         if (!followLatest.current) return;
@@ -13017,15 +13050,12 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </section>
       )}
-      {showWorkFrame &&
-        (!streamRetentionActive ||
-          (turn.state !== "working" && streamArchive) ||
-          decisions.length > 0) &&
-        !isWorking &&
-        !workStreamVisible &&
-        turnEditsSummary.edits.length > 0 && (
-          <TurnEditsSummaryBox summary={turnEditsSummary} />
-        )}
+      {/* 用户反馈：重启后「本轮文件修改」总结卡片不见了——它原来只在归档布局里
+          渲染，一旦「任务完成后收起中间对话」是关的就整块消失。总结是这一轮改了
+          哪些文件的独立信息，不该取决于过程区怎么展示，所以两种布局都渲染。 */}
+      {showWorkFrame && !isWorking && turnEditsSummary.edits.length > 0 && (
+        <TurnEditsSummaryBox summary={turnEditsSummary} />
+      )}
       {persistentToolGenItems.length > 0 && (
         <div className="turn-persistent-toolgen" aria-label="ToolGen result">
           {persistentToolGenItems.map(({ key, activity }) =>
@@ -13149,6 +13179,58 @@ function subscribeStreamInteraction(update: () => void) {
   };
 }
 
+// 用户反馈：工具结果收拢时整个界面还是会往下掉。根因不是位移快慢，而是「贴底
+// 跟随」这个状态本身：上方内容一变矮，浏览器就把 scrollTop 夹到新的 max，整列
+// 可见内容被迫下移（实测一次收拢下移 ~130px）。
+// 修法：在阅读区底部留一个临时空槽吸收这次变矮——收拢开始前按整块当前高度一次
+// 预留到位，变化期间总高度不缩水，浏览器就不会把 scrollTop 夹到新的 max，于是
+// 上方内容原地不动、下方内容被连续上推。随后新到达的内容再把空槽吃掉，归零后
+// 恢复原来的贴底跟随。
+let streamScrollGap = 0;
+let streamScrollGapHost: HTMLElement | null = null;
+let streamScrollGapContent = 0;
+
+function applyStreamScrollGap(value: number) {
+  const next = Math.max(0, Math.round(value));
+  streamScrollGap = next;
+  if (streamScrollGapHost) streamScrollGapHost.style.height = `${next}px`;
+}
+
+function resetStreamScrollGap() {
+  applyStreamScrollGap(0);
+  streamScrollGapContent = 0;
+}
+
+// 新内容（流式文字等）长出来时优先吃掉空槽：总高度不变，滚动位置也不动。
+function consumeStreamScrollGap(viewport: HTMLElement) {
+  const content = viewport.scrollHeight - streamScrollGap;
+  const growth = content - streamScrollGapContent;
+  streamScrollGapContent = content;
+  if (growth > 0 && streamScrollGap > 0)
+    applyStreamScrollGap(streamScrollGap - growth);
+}
+
+// 收纳过程逐帧变矮：布局已经生效、还没绘制时把这一帧的变矮补进空槽，并把被浏览器
+// 夹掉的 scrollTop 还原到原位，视觉上就是「上方不动、下方连续上推」。
+function streamContentScrollTop(viewport: HTMLElement) {
+  return Math.max(
+    0,
+    viewport.scrollHeight - viewport.clientHeight - streamScrollGap,
+  );
+}
+
+// 收纳前先在底部预留同样高度的空槽。收拢期间整段变矮时，浏览器不会再因为新
+// max 变小而夹 scrollTop：上方内容原地不动，下方内容被连续上推；空槽随后被
+// 新到达的内容逐帧吃掉（consumeStreamScrollGap），归零后恢复原来的贴底跟随。
+function reserveStreamScrollGap(height: number, viewport: HTMLElement) {
+  if (!(height > 0.5)) return;
+  const pinned =
+    viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1;
+  applyStreamScrollGap(streamScrollGap + height);
+  if (pinned) viewport.scrollTop = streamContentScrollTop(viewport);
+  streamScrollGapContent = viewport.scrollHeight - streamScrollGap;
+}
+
 /** Height collapse keeps the live nodes mounted until the final handoff finishes. */
 function StreamProcess({ closing, onArchived, hostId, children }: {
   closing: boolean; onArchived: () => void; hostId?: string; children: ReactNode;
@@ -13179,9 +13261,14 @@ function StreamProcess({ closing, onArchived, hostId, children }: {
       { height: `${height}px`, opacity: 1 },
       { height: "0px", opacity: 0 },
     ], { duration, easing: "cubic-bezier(.22, 1, .36, 1)", fill: "forwards" });
+    let followedHeight = viewport?.scrollHeight ?? 0;
     const follow = () => {
       if (!followBottom || !viewport) return;
-      viewport.scrollTop = viewport.scrollHeight;
+      // 归档动画是在变矮；只有下方新内容让整体变高时才重新贴底，否则会把正在
+      // 阅读的内容整块推下去。
+      const height = viewport.scrollHeight;
+      if (height > followedHeight) viewport.scrollTop = height;
+      followedHeight = height;
       frame = requestAnimationFrame(follow);
     };
     if (followBottom) frame = requestAnimationFrame(follow);
@@ -13297,35 +13384,6 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   </section>;
 }
 
-// 用户反馈：工具收起（往往连带结果预览一起收起，变化很大）时界面上下跳得
-// 厉害，加缓动也没用——问题不是快慢，而是这几百像素的位移把正在阅读的内容推走。
-// 这里做局部滚动锚定：本组只要「变矮」（行被收纳、结果预览被收起，含组里还有
-// 运行中行的部分收纳），就把高度差反向补进 scrollTop（用户没滚动、也没在跟底部
-// 时），组下方的内容原地不动。变高不补偿：那是新内容往下长，跟随时照常贴底。
-function useStreamShrinkAnchor(ref: { current: HTMLDivElement | null }) {
-  const previous = useRef<{ bottom: number; scrollTop: number } | null>(null);
-  useLayoutEffect(() => {
-    const node = ref.current;
-    const viewport = node?.closest<HTMLElement>(".chat-scroll");
-    if (!node || !viewport) return;
-    const bottom = node.getBoundingClientRect().bottom;
-    const last = previous.current;
-    if (last && Math.abs(bottom - last.bottom) > 1) {
-      const anchored = foldAnchorScrollTop({
-        previousBottom: last.bottom,
-        bottom,
-        scrollTop: viewport.scrollTop,
-        previousScrollTop: last.scrollTop,
-        scrollHeight: viewport.scrollHeight,
-        clientHeight: viewport.clientHeight,
-        viewportTop: viewport.getBoundingClientRect().top,
-      });
-      if (anchored !== null) viewport.scrollTop = anchored;
-    }
-    previous.current = { bottom: node.getBoundingClientRect().bottom, scrollTop: viewport.scrollTop };
-  });
-}
-
 function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
   const showResults = useToolResultStatus();
   const [expanded, setExpanded] = useState(false);
@@ -13366,7 +13424,14 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 组内第一行（流内、靠右），展开只让下面的行向下长高，徽章位置不变；
   // 容器也不再归零高度——折叠行本身 0fr 已无高度，容器就恰好只有徽章这一行。
   const folded = merged && completedIds.size === activities.length;
-  useStreamShrinkAnchor(runRef);
+  // 收纳开始前按当前整块高度预留底部空槽，见 reserveStreamScrollGap：变化期间
+  // 总高度不缩水，贴底状态下的 scrollTop 就不会被夹、上方内容不会整体下移。
+  useLayoutEffect(() => {
+    const run = merged ? runRef.current : null;
+    const viewport = run?.closest<HTMLElement>(".chat-scroll");
+    if (!run || !viewport) return;
+    reserveStreamScrollGap(run.getBoundingClientRect().height, viewport);
+  }, [merged]);
   // Visual contract: pulse when NEW results actually enter collapsed Tools,
   // including deferred handoff after completion. Completion alone must not pulse.
   // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
@@ -13394,9 +13459,11 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
       <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={10} strokeWidth={1.65} /> : <Minus size={10} strokeWidth={1.65} />}</span><Wrench size={12} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
-    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
+    {activities.map((activity, index) => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
-      <div><StreamToolRow activity={activity} absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))} /></div>
+      {/* 用户反馈：多条命令的结果框同时展开再一起收起，是收拢幅度和跳动的大头。
+          只让最下面一条自动展开结果预览；上面几条保留行尾眼睛徽章可手动展开。 */}
+      <div><StreamToolRow activity={activity} previewLead={index === activities.length - 1} absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))} /></div>
     </div>)}
   </div>;
 
@@ -13436,7 +13503,7 @@ function ToolActivityIcon({
   return toolName;
 }
 
-const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { activity: Activity; absorbed?: boolean }) {
+const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewLead = true }: { activity: Activity; absorbed?: boolean; previewLead?: boolean }) {
   useT();
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
@@ -13490,7 +13557,10 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
   const [previewDismissed, setPreviewDismissed] = useState(false);
   // 用户反馈：带文件修改证据的命令优先显示 diff 框，不再默认展开结果预览；
   // 预览只在用户主动点行尾眼睛徽章后出现。
-  const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !settledAbsorbed)));
+  // 只有组里最下面那条命令自动展开结果预览（previewLead）；其余行默认收起，
+  // 避免多条结果框同时占据高度、再一起收起时的整页跳动。
+  const previewDuringWork = useToolPreviewDuringWork();
+  const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (previewDuringWork && previewLead && !hasEdits && (running || !settledAbsorbed)));
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -17595,6 +17665,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 </section>
                 <StreamUiModeSetting />
                 <FileEditsDuringWorkSetting />
+                <ToolPreviewDuringWorkSetting />
                 <ToolResultStatusSetting />
               </section>
             )}

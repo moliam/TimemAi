@@ -130,10 +130,19 @@ describe("result preview surfaces and contracts", () => {
     // 收纳或手动收起后仅在工具行头行尾保留图标徽章（不单独占行）再展开。
     // 用户反馈：命令带 diff 框时优先显示 diff，结果预览不再默认展开（仅眼睛徽章可开）。
     // 收纳后预览要在收拢动画结束后才撤掉，否则过渡从更矮的高度起步。
-    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !settledAbsorbed)));");
+    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (previewDuringWork && previewLead && !hasEdits && (running || !settledAbsorbed)));");
+    // 用户反馈：新增「工作过程中预览工具输出结果」开关（默认关）——关闭时工作过程中
+    // 结果框完全不自动展开，行尾只留眼睛徽章。
+    expect(main).toContain("const previewDuringWork = useToolPreviewDuringWork();");
+    expect(main).toContain("<ToolPreviewDuringWorkSetting />");
+    // 用户反馈：多跳命令的结果框同时展开再一起收起，是整页跳动的大头；只让同组
+    // 最下面一条自动展开预览，其余只能靠行尾眼睛徽章手动开。
+    expect(main).toContain("previewLead={index === activities.length - 1}");
     expect(main).toContain("{previewVisible && (");
-    // 用户反馈：收起带来的位移不能让阅读位置跑掉——由流内局部滚动锚定补偿。
-    expect(main).toContain("useStreamShrinkAnchor(runRef);");
+    // 用户反馈：收起带来的位移不能让阅读位置跑掉——收拢前预留底部空槽，
+    // 变化期间总高度不缩水，贴底状态的 scrollTop 就不会被夹（旧锚定方案已删除）。
+    expect(main).not.toContain("useStreamShrinkAnchor");
+    expect(main).toContain("reserveStreamScrollGap(run.getBoundingClientRect().height, viewport);");
     expect(main).toContain("!running && resultPreview && !previewVisible && (");
     expect(main).toContain('aria-label={t("tools.resultPreview")}');
     expect(main).not.toContain("stream-tool-result-preview-badge");

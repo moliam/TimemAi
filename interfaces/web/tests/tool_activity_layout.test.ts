@@ -141,14 +141,21 @@ it("collapses tool rows continuously and never animates the viewport", () => {
   expect(rule).toContain("transition: grid-template-rows .22s");
   expect(source).toContain("const STREAM_COLLAPSE_MS = 220;");
   expect(source).toContain("setSettledAbsorbed(true), STREAM_COLLAPSE_MS");
-  expect(source).toContain("function useStreamShrinkAnchor(");
-  expect(source).toContain("useStreamShrinkAnchor(runRef);");
-  // 什么时候补偿交给 foldAnchorScrollTop 判定：整块已滚出视口上方才补，
-  // 块自身还在视口里时从头收起（含结果预览收起），补偿反而会把可见部分往下拖。
-  expect(source).toContain("Math.abs(bottom - last.bottom) > 1");
-  expect(source).toContain("viewportTop: viewport.getBoundingClientRect().top,");
-  expect(source).toContain("if (anchored !== null) viewport.scrollTop = anchored;");
-  expect(source).toContain("foldAnchorScrollTop({");
+  // 用户反馈：贴底跟随时收拢仍整页下移。旧方案（useStreamShrinkAnchor /
+  // foldAnchorScrollTop 逐帧反向补 scrollTop）在贴底场景永远无效——浏览器先把
+  // scrollTop 夹到新的 max，补偿已经晚了；两者连同测试一起删除。
+  // 现契约：收拢开始前按整块当前高度在底部一次预留等高空槽，变化期间总高度不缩水，
+  // 于是贴底状态下不会被夹、上方内容不动；新内容到达后逐帧吃掉空槽。
+  expect(source).not.toContain("useStreamShrinkAnchor");
+  expect(source).not.toContain("foldAnchorScrollTop");
+  expect(source).toContain("function reserveStreamScrollGap(");
+  expect(source).toContain("reserveStreamScrollGap(run.getBoundingClientRect().height, viewport);");
+  expect(source).toContain("function consumeStreamScrollGap(");
+  expect(source).toContain("streamScrollGapHost.style.height");
+  expect(styles).toContain(".chat-scroll-shrink-gap {");
+  // 跟随语义：只跟随「变高」，目标是最新内容底边（空槽不算内容）。
+  expect(source).toContain("const target = streamContentScrollTop(viewport);");
+  expect(source).toContain("if (target > viewport.scrollTop) viewport.scrollTop = target;");
   expect(styles).toContain(".stream-tool-count.incremented { animation:");
 });
 
@@ -187,11 +194,10 @@ it("shows the folded turn change summary beside the archived frame", () => {
   // Aggregation comes from the authoritative lifecycle items of the turn.
   expect(turnScope).toContain("summarizeTurnEdits(");
   expect(turnScope).toContain("lifecycleItems.map((item) => item.activity?.edits ?? undefined)");
-  // The folded summary only appears when the turn ended, the work frame is
-  // collapsed, and the turn actually captured file edits.
-  expect(turnScope).toContain("showWorkFrame &&");
-  expect(turnScope).toContain("!isWorking &&");
-  expect(turnScope).toContain("!workStreamVisible &&");
+  // The turn summary appears whenever the finished turn captured file edits,
+  // independent of whether the process area is archived or kept expanded.
+  expect(turnScope).toContain("showWorkFrame && !isWorking && turnEditsSummary.edits.length > 0 && (");
+  expect(turnScope).not.toContain("!workStreamVisible && turnEditsSummary");
   expect(turnScope).toContain("turnEditsSummary.edits.length > 0 && (");
   expect(turnScope).toContain("<TurnEditsSummaryBox summary={turnEditsSummary} />");
   expect(styles).toContain(".turn-edits-summary");
