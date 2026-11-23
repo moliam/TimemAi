@@ -282,22 +282,17 @@ const FILE_EDIT_OPS = new Set<FileEditOp>([
 ]);
 const FILE_EDIT_SKIP_REASONS = new Set([
   "binary",
+  "directory",
   "too_large",
   "missing",
   "unreadable",
   "not_captured",
   "budget_exhausted",
 ]);
-// Cards that show no human-actionable change stay out of the panel: no-op
-// writes and capture-side skips (declared path absent/unreadable, evidence
-// overflow). Binary/too-large skips keep their card because the tool did
-// touch the file even though no diff can be shown.
-const HIDDEN_EDIT_SKIP_REASONS = new Set([
-  "missing",
-  "unreadable",
-  "not_captured",
-  "budget_exhausted",
-]);
+// Cards that show no human-actionable change stay out of the panel: a no-op
+// write ("unchanged") and the legacy "skipped" marker, which the runtime no
+// longer emits (every real capture now carries created/modified/deleted plus a
+// kind tag such as Binary or 文件夹).
 const MAX_FILE_EDIT_ENTRIES = 16;
 const MAX_FILE_EDIT_DIFF_CHARS = 40_000;
 
@@ -330,10 +325,7 @@ export function fileEditsPresentation(
     if (item.capture_count !== undefined
       && (typeof item.capture_count !== "number" || !Number.isSafeInteger(item.capture_count) || item.capture_count < 1)) return;
     if (Object.keys(item).some(key => !["path", "op", "diff", "added_lines", "removed_lines", "truncated", "skip_reason", "size_bytes", "capture_count"].includes(key))) return;
-    if ((item.op === "unchanged" && item.diff === null)
-      || (item.op === "skipped"
-        && typeof item.skip_reason === "string"
-        && HIDDEN_EDIT_SKIP_REASONS.has(item.skip_reason))) continue;
+    if (item.op === "unchanged" || item.op === "skipped") continue;
     edits.push({
       path: item.path,
       op: item.op as FileEditOp,

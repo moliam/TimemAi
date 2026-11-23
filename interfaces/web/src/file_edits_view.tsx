@@ -18,12 +18,16 @@ const OP_LABEL_KEYS: Record<FileEditOp, StringKey> = {
   skipped: "tools.fileOpSkipped",
 };
 
-const SKIP_LABEL_KEYS: Record<string, StringKey> = {
-  binary: "tools.fileSkipBinary",
-  too_large: "tools.fileSkipTooLarge",
-  unreadable: "tools.fileSkipUnreadable",
-  not_captured: "tools.fileSkipNotCaptured",
-  budget_exhausted: "tools.fileSkipBudget",
+// Compact kind tag for captures that carry no diff. The op text itself is
+// always created/modified/deleted; this tag only says what the path is or why
+// the diff is missing (Binary, folder, too large ...).
+const KIND_LABEL_KEYS: Record<string, StringKey> = {
+  binary: "tools.fileKindBinary",
+  directory: "tools.fileKindDirectory",
+  too_large: "tools.fileKindTooLarge",
+  unreadable: "tools.fileKindUnreadable",
+  not_captured: "tools.fileKindNoBaseline",
+  budget_exhausted: "tools.fileKindDiffOmitted",
 };
 
 
@@ -191,11 +195,14 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
   const rows = useMemo(() => (edit.diff ? parseDiffRows(edit.diff) : []), [edit.diff]);
   const { directory, name } = splitEditPath(edit.path);
   const expandable = !!edit.diff;
-  const skipLabel = edit.skip_reason
-    ? t(SKIP_LABEL_KEYS[edit.skip_reason] ?? ("tools.fileSkipUnreadable" as StringKey))
+  // Non-text edits carry no diff; the capture size rides in the tag tooltip.
+  const kindLabel = !expandable && edit.skip_reason
+    ? t(KIND_LABEL_KEYS[edit.skip_reason] ?? ("tools.fileKindUnreadable" as StringKey))
     : undefined;
-  // Non-text edits carry no diff; the capture size is their only evidence.
   const sizeLabel = expandable ? undefined : formatFileSize(edit.size_bytes);
+  const kindTitle = kindLabel
+    ? sizeLabel ? `${kindLabel} · ${sizeLabel}` : kindLabel
+    : undefined;
   const toggle = () => {
     if (!expandable) return;
     manualToggle.current = true;
@@ -231,6 +238,9 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
           >
             ×{edit.capture_count}
           </span>
+        )}
+        {kindLabel && (
+          <span className="file-edit-kind" title={kindTitle}>{kindLabel}</span>
         )}
         {(edit.added_lines > 0 || edit.removed_lines > 0) && (
           <span className="file-edit-stats">
@@ -283,12 +293,6 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
       )}
       {!expandable && edit.truncated && (
         <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>
-      )}
-      {!expandable && skipLabel && edit.op === "skipped" && (
-        <div className="file-edit-notice">
-          {skipLabel}
-          {sizeLabel && <span className="file-edit-size"> · {sizeLabel}</span>}
-        </div>
       )}
     </div>
   );

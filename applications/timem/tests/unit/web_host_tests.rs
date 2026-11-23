@@ -442,11 +442,25 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     assert_eq!(rebuilt.edits[0].op, "modified");
     assert_eq!(rebuilt.edits[0].capture_count, 3);
 
-    // 非文本：只保留路径/op/大小，没有 diff。
-    let binary = fold(&[edit("assets/logo.png", "skipped", None, 0)]);
-    assert_eq!(binary.edits[0].op, "skipped");
+    // 非文本：op 仍是修改，类型作为标签，只保留路径/大小，没有 diff。
+    let binary = fold(&[json!([{
+        "path": "assets/logo.png",
+        "op": "modified",
+        "diff": null,
+        "added_lines": 0,
+        "removed_lines": 0,
+        "truncated": false,
+        "skip_reason": "binary",
+        "size_bytes": 4096,
+    }])]);
+    assert_eq!(binary.edits[0].op, "modified");
+    assert_eq!(binary.edits[0].skip_reason.as_deref(), Some("binary"));
     assert_eq!(binary.edits[0].size_bytes, Some(4096));
     assert!(binary.edits[0].diff.is_none());
+
+    // 旧记录里的 skipped 捕获（没有基线）不会再形成总结行。
+    let legacy_skipped = fold(&[edit("old.bin", "skipped", None, 0)]);
+    assert!(legacy_skipped.edits.is_empty());
 
     // 先有文本 diff、后来只有一次无法对比的捕获：保留上一次的 diff。
     let kept = fold(&[
@@ -455,6 +469,19 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     ]);
     assert_eq!(kept.edits[0].op, "modified");
     assert!(kept.edits[0].diff.is_some());
+
+    // 只捕获到「无变化」：不进总结，总结只列真正的改动。
+    let untouched = fold(&[edit("same.txt", "unchanged", None, 0)]);
+    assert!(untouched.edits.is_empty());
+
+    // 修改后再「无变化」：保留那次修改，捕获次数照记，不被 no-op 覆盖。
+    let modified_then_untouched = fold(&[
+        edit("edited.txt", "modified", Some("--- a\n+x\n"), 1),
+        edit("edited.txt", "unchanged", None, 0),
+    ]);
+    assert_eq!(modified_then_untouched.edits[0].op, "modified");
+    assert_eq!(modified_then_untouched.edits[0].capture_count, 2);
+    assert!(modified_then_untouched.edits[0].diff.is_some());
 
     // 上限 64 个文件，其余计入 overflow。
     let many: Vec<Value> = (0..66)
@@ -585,12 +612,12 @@ fn restored_long_turns_keep_every_file_in_the_turn_summary() {
     for (offset, path) in edited_paths.iter().enumerate() {
         records.push(event_record(1 + offset as i64, Some(text_edit(path))));
     }
-    // 二进制修改：只有元信息，没有 diff。
+    // 二进制修改：op 仍是「修改」，只有类型标签与元信息，没有 diff。
     records.push(event_record(
         6,
         Some(json!([{
             "path": "assets/logo.png",
-            "op": "skipped",
+            "op": "modified",
             "diff": null,
             "added_lines": 0,
             "removed_lines": 0,
@@ -634,7 +661,7 @@ fn restored_long_turns_keep_every_file_in_the_turn_summary() {
         .is_some_and(|diff| diff.contains("+++ b/file")));
     assert_eq!(text.capture_count, 1);
     let binary = &summary.edits[5];
-    assert_eq!(binary.op, "skipped");
+    assert_eq!(binary.op, "modified");
     assert_eq!(binary.skip_reason.as_deref(), Some("binary"));
     assert_eq!(binary.size_bytes, Some(4096));
     assert!(binary.diff.is_none(), "non-text edits keep no diff");

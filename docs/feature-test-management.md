@@ -1187,3 +1187,13 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 明色主题：同一套实底各提深一档（`#0a6a53` / `#96600c` / `#8f231d` / `#5a6b75`），依旧白字、无边框。行高锁 16px，文件名行仍是单行高度，不挤压 diff。
 - 覆盖范围：动作卡片的 `FileEditsPanel` 与轮次总结卡片共用同一 `FileEditSection`，一处样式两处生效。
 - 测试看护：`file_edits.test.ts` 的「面板无框」契约同步改写——断言胶囊形状（无边框 + 圆角 + 内边距 + 白字）、三色实底与明色主题提深值，单个 op 不再覆盖文字色。验证：`pnpm exec vitest run tests/file_edits.test.ts` 29 过、`pnpm test` 1059 过、tsc 过；dist 已重建（entry JS 内容未变，文件名随 CSS 依赖哈希变化）。
+
+## 2026-11-23 diff 卡片与轮次总结：动作类型只保留新建/修改/删除，非文本改标类型标签
+
+- 用户口径：diff 卡片与轮次总结里的动作永远只有「新建 / 修改 / 删除」，不再出现「跳过」；二进制文件在行尾标 `Binary`，文件夹标 `文件夹`；「无变化」不进 diff 总结。
+- 根因：非文本捕获（二进制、目录、超限、不可读、未记录基线、预算省略）一律被压成 `FileEditOp::Skipped`，宿主与界面再把 `skipped` 隐去，于是「改了一个二进制」在一轮里彻底消失；目录在 core 侧被当作普通文件读失败，也走了跳过分支。
+- Core 语义（`resources/capabilities/tools/file_edits.rs`）：`FileContentSnapshot` 新增 `Directory`；`read_snapshot` 先查 `metadata.is_dir()`，目录直接判 `Directory`，其它非普通文件判 `Unreadable`；超过 64 MiB 时先读前 8 KiB（`BINARY_SNIFF_BYTES`）嗅探 NUL 字节，含 NUL 记 `Binary`，否则记 `TooLarge`——大二进制不再被误报成「文件过大」。`build_entry` 对非可 diff 捕获不再写死 Skipped，改为按前后存在性推导真实 op：`Missing→存在` 为 `Created`、`存在→Missing` 为 `Deleted`、其余为 `Modified`，具体原因只作为 `skip_reason`（新增 `directory`）。`compute_evidence` 只丢弃内部真正无意义的条目（两侧都 Missing），并在缺基线（before 为 `None`）时用 after 补 size，标 `not_captured`。`apply_payload_budget` 压缩时保留原 op，只丢 diff 并标 `budget_exhausted`。
+- 宿主折叠（`applications/timem/src/server.rs`）：`observe()` 同时忽略 `skipped` 与 `unchanged` 两类捕获——不再进入轮次变更状态，也不覆盖已有行；`saw_captured` 字段与 `net_turn_file_change` 中对应分支随之删除。净变化为 `created` 时仍取创建捕获的整文件行数与 diff（沿用上一轮修复）。
+- Web 呈现：`tool_presentation.ts` 只丢弃 `unchanged` 与 `skipped`，`FILE_EDIT_SKIP_REASONS` 增加 `directory`；`file_edits_view.tsx` 把 `SKIP_LABEL_KEYS` 改为 `KIND_LABEL_KEYS`，在文件名后渲染 `.file-edit-kind` 类型标签（`title` 为「类型 · 大小」），删除原先整行的跳过提示。i18n 去掉 `fileSkip*`，新增 `fileKind*`：Binary / 文件夹 / 文件过大 / 无法读取 / 未记录基线 / 差异已省略（en 同步）。样式新增 `.file-edit-kind`（弱化色、10.5px、不伸缩），明色主题提深一档。
+- 兼容性：`FileEditOp::Skipped` 枚举保留，只为读旧存档 payload；运行时不再产生（仅内部两侧 Missing 用后即弃）。
+- 测试看护：core 用例改为断言真实 op 与 skip_reason（目录 `Modified/directory`、先捕获后建目录 `Created/directory`、稀疏大文件 `Binary`、64 MiB 文本 `TooLarge`、未捕获基线 `Modified/not_captured`、仅 Missing 不入摘要）；宿主用例断言二进制行为 `modified + binary`、只捕获 unchanged 得空摘要、modified 后 unchanged 仍保留 modified、旧 skipped 存档折叠为空；Web 用例断言 skipped 行被丢弃、真实改动保留、类型标签与 `title="Binary · 4.0 KB"`、面板不再出现跳过提示与「无变化」标记。验证：`cargo test -p agent_core --lib` 1043 过、`cargo test -p timem --lib` 535 过、web `pnpm test` 1060 过、tsc 过。

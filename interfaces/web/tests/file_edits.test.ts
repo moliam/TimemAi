@@ -30,43 +30,36 @@ describe("fileEditsPresentation", () => {
     expect(parsed![0]).toEqual(validEntry);
   });
 
-  it("accepts skipped entries without diff text", () => {
+  it("drops legacy skipped entries entirely", () => {
+    // The runtime no longer emits "skipped": a non-text capture arrives as
+    // modified/created/deleted with a kind tag. Old stored payloads keep the
+    // marker, and those rows must not surface as a "跳过" card.
     const parsed = fileEditsPresentation([
       { path: "blob.bin", op: "skipped", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: "binary" },
     ]);
-    expect(parsed![0].skip_reason).toBe("binary");
-    expect(parsed![0].diff).toBeNull();
+    expect(parsed).toEqual([]);
   });
 
-  it("parses missing-skip entries and hides capture-side no-change cards", () => {
-    const skipped = (reason: string, index: number) => ({
-      path: `f-${index}-${reason}.txt`,
-      op: "skipped",
+  it("keeps real edits and drops no-op rows", () => {
+    const tagged = (reason: string, path: string) => ({
+      path,
+      op: "modified",
       diff: null,
       added_lines: 0,
       removed_lines: 0,
       truncated: false,
       skip_reason: reason,
     });
-    // The strict whitelist must accept "missing" (an unknown reason would
-    // reject the whole payload), and the card itself stays hidden.
-    const parsed = fileEditsPresentation([skipped("missing", 0), validEntry]);
-    expect(parsed).toHaveLength(1);
-    expect(parsed![0].op).toBe("modified");
-
     const filtered = fileEditsPresentation([
       { path: "same.txt", op: "unchanged", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: null },
-      skipped("missing", 1),
-      skipped("unreadable", 2),
-      skipped("not_captured", 3),
-      skipped("budget_exhausted", 4),
-      skipped("binary", 5),
-      skipped("too_large", 6),
+      { path: "legacy.txt", op: "skipped", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: "missing" },
+      tagged("binary", "target/debug/timem"),
+      tagged("directory", "target/"),
       validEntry,
     ]);
     expect(filtered!.map(item => item.skip_reason ?? item.op)).toEqual([
       "binary",
-      "too_large",
+      "directory",
       "modified",
     ]);
   });
@@ -240,11 +233,12 @@ describe("file edits surfaces", () => {
       "copyDiff",
       "diffCopied",
       "copyFailed",
-      "fileSkipBinary",
-      "fileSkipTooLarge",
-      "fileSkipUnreadable",
-      "fileSkipNotCaptured",
-      "fileSkipBudget",
+      "fileKindBinary",
+      "fileKindDirectory",
+      "fileKindTooLarge",
+      "fileKindUnreadable",
+      "fileKindNoBaseline",
+      "fileKindDiffOmitted",
       "collapseCommand",
       "turnEditsTitle",
       "turnEditsOverflow",
@@ -349,16 +343,15 @@ describe("file edits components render server-side", () => {
     expect(html).toContain("\u3010\u5df2\u7701\u7565\u3011");
   });
 
-  it("panel default-expands diff sections and keeps skipped notice-only", () => {
+  it("panel default-expands diff sections and tags non-text sections", () => {
     const html = renderToString(createElement(FileEditsPanel, {
       edits: [
         { ...validEntry },
-        { path: "blob.bin", op: "skipped", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: "binary" },
+        { path: "blob.bin", op: "modified", diff: null, added_lines: 0, removed_lines: 0, truncated: false, skip_reason: "binary", size_bytes: 4096 },
       ],
     }));
     expect(html).toContain("file-edits-panel");
     expect(html).toContain("file-edit-op-modified");
-    expect(html).toContain("file-edit-op-skipped");
     expect(html).toContain("main.rs");
     // 用户反馈：有 diff 的文件段默认直接展开，diff 正文随首帧渲染。
     expect(html).toContain(`aria-expanded="true"`);
@@ -366,8 +359,10 @@ describe("file edits components render server-side", () => {
     expect(html).toContain("file-edit-row-del");
     expect(html).toContain(">old</span>");
     expect(html).toContain(">new</span>");
-    // 无 diff 的 skipped 段没有可展开正文，仅显示原因提示。
-    expect(html).toContain("file-edit-notice");
+    // 无 diff 的段只带类型标签（op 仍是「修改」），不再有「跳过」或整行提示。
+    expect(html).toContain("file-edit-kind");
+    expect(html).not.toContain("file-edit-op-skipped");
+    expect(html).not.toContain("file-edit-notice");
   });
 });
 
@@ -428,7 +423,7 @@ describe("turnFileChangesSummary", () => {
   it("shows the capture size for a non-text edit instead of a diff", () => {
     const binary = {
       path: "assets/logo.png",
-      op: "skipped" as const,
+      op: "modified" as const,
       diff: null,
       added_lines: 0,
       removed_lines: 0,
@@ -439,8 +434,9 @@ describe("turnFileChangesSummary", () => {
     const html = renderToString(
       createElement(FileEditsPanel, { edits: [binary] }),
     ).replace(/<!-- -->/g, "");
-    expect(html).toContain("4.0 KB");
-    expect(html).toContain("file-edit-size");
+    // 大小并入类型标签的 title，行内不再单独显示。
+    expect(html).toContain('title="Binary · 4.0 KB"');
+    expect(html).not.toContain("file-edit-diff-table");
   });
 });
 
@@ -470,6 +466,41 @@ describe("turn edits summary box renders server-side", () => {
       createElement(TurnEditsSummaryBox, { summary }),
     );
     expect(html).toContain("file-edit-notice");
+  });
+});
+
+describe("file edits kind tags", () => {
+  it("labels non-text captures with a kind tag instead of a skipped op", () => {
+    const html = renderToString(createElement(FileEditsPanel, {
+      edits: [
+        {
+          path: "target/debug/timem",
+          op: "modified",
+          diff: null,
+          added_lines: 0,
+          removed_lines: 0,
+          truncated: false,
+          skip_reason: "binary",
+          size_bytes: 260_000_000,
+        },
+        {
+          path: "target/",
+          op: "created",
+          diff: null,
+          added_lines: 0,
+          removed_lines: 0,
+          truncated: false,
+          skip_reason: "directory",
+        },
+      ],
+    })).replace(/<!-- -->/g, "");
+    expect(html).toContain("file-edit-op-modified");
+    expect(html).toContain("file-edit-op-created");
+    expect(html).toContain("file-edit-kind");
+    // Binary / size ride on the tag; the folder tag needs no size.
+    expect(html).toContain('title="Binary · 248 MB"');
+    expect(html).not.toContain("file-edit-op-skipped");
+    expect(html).not.toContain("file-edit-notice");
   });
 });
 

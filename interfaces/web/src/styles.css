@@ -7373,6 +7373,12 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
 }
+.file-edit-kind {
+  flex: none;
+  color: #8fa3ae;
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+}
 .file-edit-additions { color: #7fd6a4; }
 .file-edit-deletions { color: #e59a94; }
 /* 用户反馈：复制差异用图标表示，不要框——只留字形 + 悬停底色。 */
@@ -7475,6 +7481,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-index { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-name { color: #24333a; }
+:root[data-theme="light"] .file-edit-kind { color: #6a7c86; }
 :root[data-theme="light"] .file-edit-additions { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-deletions { color: #b23a31; }
 :root[data-theme="light"] .file-edit-copy { color: #5c6f7c; }

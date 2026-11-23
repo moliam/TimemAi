@@ -962,7 +962,6 @@ fn is_zero_usize(value: &usize) -> bool {
 struct TurnFileChangeState {
     captures: u32,
     start_op: Option<String>,
-    saw_captured: bool,
     /// First comparable capture. When the path did not exist at the turn
     /// boundary this is the creation itself, i.e. whole-file evidence.
     opening: Option<WebTurnFileChange>,
@@ -1014,18 +1013,16 @@ impl TurnFileChangeAccumulator {
             };
             let state = &mut self.states[slot];
             state.captures += 1;
-            if change.op == "skipped" {
-                // A skipped capture carries no fresh existence evidence; while
-                // nothing was captured yet it is the only reportable fact.
-                if !state.saw_captured {
-                    state.display = Some(change);
-                }
+            if change.op == "skipped" || change.op == "unchanged" {
+                // Neither is a change worth summarizing: a skipped capture has
+                // no comparable baseline, and an unchanged capture would add a
+                // "no change" row next to real edits. The capture still counts,
+                // so an earlier real edit is not erased by a later no-op.
                 continue;
             }
             if state.start_op.is_none() {
                 state.start_op = Some(change.op.clone());
             }
-            state.saw_captured = true;
             if state.opening.is_none() {
                 state.opening = Some(change.clone());
             }
@@ -1093,10 +1090,6 @@ fn web_turn_file_change(edit: &Value) -> Option<WebTurnFileChange> {
 /// leaving a misleading row behind.
 fn net_turn_file_change(state: &TurnFileChangeState) -> Option<WebTurnFileChange> {
     let mut change = state.display.clone()?;
-    if !state.saw_captured {
-        change.capture_count = state.captures;
-        return Some(change);
-    }
     let start_existed = state.start_op.as_deref() != Some("created");
     let end_existed = change.op != "deleted";
     if !start_existed && !end_existed {

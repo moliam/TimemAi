@@ -373,13 +373,28 @@ fn read_snapshot_classifies_missing_binary_and_oversized() {
     assert_eq!(snapshot, FileContentSnapshot::Binary);
 
     let (snapshot, _) = read_snapshot(&dir);
-    assert_eq!(snapshot, FileContentSnapshot::Unreadable);
+    assert_eq!(snapshot, FileContentSnapshot::Directory);
 
+    // Sparse all-zero content sniffs as binary, so the oversized path reports
+    // the more specific kind instead of the vaguer "too large".
     let big = dir.join("big.txt");
     let handle = fs::File::create(&big).unwrap();
     handle.set_len(64 * 1024 * 1024 + 1).unwrap();
     drop(handle);
     let (snapshot, _) = read_snapshot(&big);
+    assert_eq!(snapshot, FileContentSnapshot::Binary);
+
+    let big_text = dir.join("big_text.txt");
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&big_text).unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..64 {
+            file.write_all(&chunk).unwrap();
+        }
+        file.write_all(b"x").unwrap();
+    }
+    let (snapshot, _) = read_snapshot(&big_text);
     assert_eq!(snapshot, FileContentSnapshot::TooLarge);
 
     let large_text = dir.join("large_text.txt");
@@ -426,9 +441,13 @@ fn capture_caps_file_count_and_reports_not_captured() {
     let evidence = context.compute_evidence();
     assert_eq!(evidence.edits.len(), MAX_EDIT_FILES + 2);
     let overflow = &evidence.edits[MAX_EDIT_FILES..];
-    assert!(overflow
-        .iter()
-        .all(|entry| entry.op == FileEditOp::Skipped && entry.skip_reason == Some("not_captured")));
+    // No baseline, but the paths exist now: a real op plus a "no baseline" tag.
+    assert!(
+        overflow
+            .iter()
+            .all(|entry| entry.op == FileEditOp::Modified
+                && entry.skip_reason == Some("not_captured"))
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -469,21 +488,23 @@ fn compute_evidence_tracks_create_modify_delete_and_unchanged() {
     let same = by_path.next().unwrap();
     assert_eq!(same.op, FileEditOp::Unchanged);
     assert!(same.diff.is_none());
-    let never = by_path.next().unwrap();
-    assert_eq!(never.op, FileEditOp::Skipped);
-    assert_eq!(never.skip_reason, Some("missing"));
+    // A declared path that never existed is dropped entirely: no "skipped"
+    // row ships and the reader never sees an op outside 新建/修改/删除.
+    assert!(by_path.next().is_none());
+    assert_eq!(evidence.edits.len(), 4);
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn compute_evidence_skips_binary_and_oversized_after_states() {
+fn compute_evidence_labels_binary_after_states_with_a_real_op() {
     let dir = temp_dir("skip");
     write_file(&dir.join("was_text.bin"), "text\n");
     let context = EditContext::capture(&dir, &["was_text.bin".to_string()]);
     fs::write(dir.join("was_text.bin"), [0u8, 1, 2]).unwrap();
     let evidence = context.compute_evidence();
     assert_eq!(evidence.edits.len(), 1);
-    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    // 文本变成二进制仍是一次修改：op 保持 modified，类型作为标签。
+    assert_eq!(evidence.edits[0].op, FileEditOp::Modified);
     assert_eq!(evidence.edits[0].skip_reason, Some("binary"));
     // 二进制文件没有 diff，只有路径/op/大小这组元信息。
     assert_eq!(evidence.edits[0].size_bytes, Some(3));
@@ -492,7 +513,7 @@ fn compute_evidence_skips_binary_and_oversized_after_states() {
 
 #[cfg(unix)]
 #[test]
-fn compute_evidence_skips_unreadable_files() {
+fn compute_evidence_labels_unreadable_files_with_a_real_op() {
     use std::os::unix::fs::PermissionsExt;
     let dir = temp_dir("unreadable");
     let locked = dir.join("locked.txt");
@@ -501,7 +522,7 @@ fn compute_evidence_skips_unreadable_files() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     let evidence = context.compute_evidence();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    assert_eq!(evidence.edits[0].op, FileEditOp::Modified);
     assert_eq!(evidence.edits[0].skip_reason, Some("unreadable"));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -687,14 +708,37 @@ fn capture_of_only_missing_paths_avoids_staging() {
     let context = EditContext::capture(&dir, &["absent.txt".to_string()]);
     assert!(context.snapshot_dir.is_none());
     let evidence = context.compute_evidence();
-    assert_eq!(evidence.edits.len(), 1);
-    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
-    assert_eq!(evidence.edits[0].skip_reason, Some("missing"));
+    // A path that never existed is not an edit: no row at all, not a "skipped"
+    // row the reader would have to interpret.
+    assert!(evidence.edits.is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn capture_degrades_oversized_files_too_large() {
+fn directories_report_a_real_op_with_a_directory_tag() {
+    // A declared folder is not an edit we can diff, but the row still says
+    // 修改/新建 and trails a "文件夹" kind tag instead of "skipped".
+    let dir = temp_dir("dircap");
+    fs::create_dir(dir.join("sub")).unwrap();
+    let existing = EditContext::capture(&dir, &["sub".to_string()]);
+    let evidence = existing.compute_evidence();
+    assert_eq!(evidence.edits.len(), 1);
+    assert_eq!(evidence.edits[0].op, FileEditOp::Modified);
+    assert_eq!(evidence.edits[0].skip_reason, Some("directory"));
+    assert!(evidence.edits[0].diff.is_none());
+
+    let fresh = temp_dir("dircap_created");
+    let created = EditContext::capture(&fresh, &["newdir".to_string()]);
+    fs::create_dir(fresh.join("newdir")).unwrap();
+    let evidence = created.compute_evidence();
+    assert_eq!(evidence.edits[0].op, FileEditOp::Created);
+    assert_eq!(evidence.edits[0].skip_reason, Some("directory"));
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&fresh);
+}
+
+#[test]
+fn capture_labels_oversized_files_by_sniffed_kind() {
     let dir = temp_dir("toobig");
     let name = "huge.bin";
     let handle = fs::File::create(dir.join(name)).unwrap();
@@ -702,8 +746,9 @@ fn capture_degrades_oversized_files_too_large() {
     drop(handle);
     let context = EditContext::capture(&dir, &[name.to_string()]);
     let evidence = context.compute_evidence();
-    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
-    assert_eq!(evidence.edits[0].skip_reason, Some("too_large"));
+    // Sparse zeros sniff as binary; the op is still a real one.
+    assert_eq!(evidence.edits[0].op, FileEditOp::Modified);
+    assert_eq!(evidence.edits[0].skip_reason, Some("binary"));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -723,7 +768,7 @@ fn capture_probe_skips_binary_files_before_copy() {
         .to_path_buf();
     assert_eq!(fs::read_dir(&*staged).unwrap().count(), 0);
     let evidence = context.compute_evidence();
-    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    assert_eq!(evidence.edits[0].op, FileEditOp::Modified);
     assert_eq!(evidence.edits[0].skip_reason, Some("binary"));
     drop(context);
     assert!(!staged.exists());

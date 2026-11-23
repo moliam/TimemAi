@@ -53,6 +53,11 @@ const SKIP_UNREADABLE: &str = "unreadable";
 const SKIP_NOT_CAPTURED: &str = "not_captured";
 const SKIP_BUDGET: &str = "budget_exhausted";
 const SKIP_MISSING: &str = "missing";
+const SKIP_DIRECTORY: &str = "directory";
+/// How many leading bytes are inspected before an oversized file is called
+/// binary: executables and archives are recognizable from the prefix, and the
+/// row then reads "Binary" instead of the vaguer "too large".
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// Meta marker rendered when only line endings or the final newline changed.
 const WHITESPACE_ONLY_NOTE: &str = "# Whitespace-only change: line endings or the final newline differ; content lines are identical.";
 
@@ -108,9 +113,14 @@ pub struct FileEditsEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FileContentSnapshot {
     Lines(String),
-    OnDisk { path: PathBuf },
+    OnDisk {
+        path: PathBuf,
+    },
     Binary,
     TooLarge,
+    /// Declared path is a directory (or another non-file entry): there is no
+    /// file content to diff, but the row still reports a real op.
+    Directory,
     Unreadable,
     Missing,
 }
@@ -124,6 +134,7 @@ impl FileContentSnapshot {
         match self {
             Self::Binary => SKIP_BINARY,
             Self::TooLarge => SKIP_TOO_LARGE,
+            Self::Directory => SKIP_DIRECTORY,
             _ => SKIP_UNREADABLE,
         }
     }
@@ -239,15 +250,22 @@ impl EditContext {
         let mut entries = Vec::with_capacity(self.files.len());
         for file in &self.files {
             let Some(before) = file.before.as_ref() else {
+                // Baseline missing (capture limit or staging unavailable). The
+                // row still reports a real op when the path exists now, tagged
+                // as "no baseline"; a path that does not exist is not an edit.
+                let (after, after_size) = read_snapshot(&file.path);
+                if matches!(after, FileContentSnapshot::Missing) {
+                    continue;
+                }
                 entries.push(FileEditEntry {
                     path: file.declared.clone(),
-                    op: FileEditOp::Skipped,
+                    op: FileEditOp::Modified,
                     diff: None,
                     added_lines: 0,
                     removed_lines: 0,
                     truncated: false,
                     skip_reason: Some(SKIP_NOT_CAPTURED),
-                    size_bytes: None,
+                    size_bytes: (after_size > 0).then_some(after_size as u64),
                 });
                 continue;
             };
@@ -265,7 +283,14 @@ impl EditContext {
             } else {
                 None
             };
-            entries.push(build_entry(&file.declared, &before, &after, size_bytes));
+            let entry = build_entry(&file.declared, &before, &after, size_bytes);
+            // "Absent before and after" is not an edit: keep the internal
+            // marker for the unit contract, but never ship a row the reader
+            // would have to interpret as "skipped".
+            if entry.op == FileEditOp::Skipped {
+                continue;
+            }
+            entries.push(entry);
         }
         FileEditsEvidence {
             edits: apply_payload_budget(entries),
@@ -392,11 +417,21 @@ fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
         }
         Err(_) => return (FileContentSnapshot::Unreadable, 0),
     };
+    if metadata.is_dir() {
+        return (FileContentSnapshot::Directory, 0);
+    }
     if !metadata.is_file() {
         return (FileContentSnapshot::Unreadable, 0);
     }
     if metadata.len() > MAX_SNAPSHOT_FILE_BYTES as u64 {
-        return (FileContentSnapshot::TooLarge, metadata.len() as usize);
+        let size = metadata.len() as usize;
+        // The size cap only bounds what we diff, not what we report: sniffing
+        // the prefix keeps binaries labelled as binaries.
+        return if sniff_binary(path) {
+            (FileContentSnapshot::Binary, size)
+        } else {
+            (FileContentSnapshot::TooLarge, size)
+        };
     }
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -418,6 +453,20 @@ fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
         return (FileContentSnapshot::Binary, size);
     };
     (FileContentSnapshot::Lines(text), size)
+}
+
+/// Cheap binary probe for paths too large to load: a NUL byte in the leading
+/// bytes is the same signal `read_snapshot` uses on fully read files.
+fn sniff_binary(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut buffer = [0u8; BINARY_SNIFF_BYTES];
+    let mut handle = file.take(BINARY_SNIFF_BYTES as u64);
+    match handle.read(&mut buffer) {
+        Ok(read) => buffer[..read].contains(&0),
+        Err(_) => false,
+    }
 }
 
 fn split_diff_lines(text: &str) -> Vec<String> {
@@ -493,12 +542,23 @@ fn build_entry(
             entry
         }
         _ => {
+            // Non-text captures still get a real op: the UI never says
+            // "skipped", it says 新建/修改/删除 plus a short kind tag
+            // (Binary / 文件夹 / 文件过大). Only "absent before and after" stays
+            // skipped, and that row is dropped by the presentation layer.
             let mut entry = base;
-            entry.op = FileEditOp::Skipped;
-            entry.skip_reason = Some(if before.is_diffable() {
-                after.skip_reason()
-            } else {
-                before.skip_reason()
+            entry.op = match (
+                matches!(before, FileContentSnapshot::Missing),
+                matches!(after, FileContentSnapshot::Missing),
+            ) {
+                (false, true) => FileEditOp::Deleted,
+                (true, false) => FileEditOp::Created,
+                _ => FileEditOp::Modified,
+            };
+            entry.skip_reason = Some(match after {
+                FileContentSnapshot::Missing => before.skip_reason(),
+                after if !after.is_diffable() => after.skip_reason(),
+                _ => before.skip_reason(),
             });
             entry
         }
@@ -579,7 +639,8 @@ fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
         }
         let minimal = FileEditEntry {
             path: clamp_chars(&entry.path, 128),
-            op: FileEditOp::Skipped,
+            // Keep the real op: budget pressure drops the diff, not the edit.
+            op: entry.op,
             diff: None,
             added_lines: 0,
             removed_lines: 0,
