@@ -8944,12 +8944,8 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
             }
         }
     }
-    const RESTORED_TURN_EVENT_LIMIT: usize = 40;
     for turn in turns.values_mut() {
-        if turn.events.len() > RESTORED_TURN_EVENT_LIMIT {
-            let excess = turn.events.len() - RESTORED_TURN_EVENT_LIMIT;
-            turn.events.drain(0..excess);
-        }
+        trim_restored_turn_events(&mut turn.events);
     }
     let mut restored = turns.into_values().collect::<Vec<_>>();
     restored.sort_by_key(|turn| turn.created_at_ms);
@@ -19356,6 +19352,96 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
     }
 }
 
+/// Restored turns and terminal snapshot turns ship a bounded event window, but
+/// the 「本轮文件修改」summary card aggregates file edits from those events and is
+/// recomputed on every render. Cutting the oldest events blindly made a long
+/// working turn lose every file edited early on: after a restart the summary
+/// only listed the last touched file. Edit carrying events therefore get their
+/// own count/byte budget, and the newest event of every path is kept first so a
+/// file never disappears from the summary just because the turn was long.
+const RESTORED_PLAIN_EVENT_LIMIT: usize = 40;
+const RESTORED_EDIT_EVENT_LIMIT: usize = 64;
+const RESTORED_EDIT_EVENT_BYTES: usize = 256 * 1024;
+
+fn payload_carries_edits(payload: &Value) -> bool {
+    payload
+        .get("payload")
+        .and_then(|inner| inner.get("edits"))
+        .is_some()
+}
+
+fn payload_edited_paths(payload: &Value) -> Vec<String> {
+    payload
+        .get("payload")
+        .and_then(|inner| inner.get("edits"))
+        .and_then(Value::as_array)
+        .map(|edits| {
+            edits
+                .iter()
+                .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Drop events outside the budget and report whether anything was dropped.
+/// Order of the kept events is preserved so the client can still derive the
+/// turn's net begin-to-end change per path.
+fn trim_restored_turn_events(events: &mut Vec<WebTurnEvent>) -> bool {
+    let mut keep = vec![false; events.len()];
+    let mut seen_paths = BTreeSet::new();
+    let mut edit_events = 0usize;
+    let mut edit_bytes = 0usize;
+    // 第一遍：每个文件的最新一条修改事件必须先保住，否则「本轮文件修改」总结卡会
+    // 漏掉早改过的文件。第二遍：预算还有余量时按从新到旧补齐其余修改事件。
+    for pass in 0..2 {
+        for index in (0..events.len()).rev() {
+            if keep[index] || !payload_carries_edits(&events[index].payload) {
+                continue;
+            }
+            let paths = payload_edited_paths(&events[index].payload);
+            if pass == 0 && paths.iter().all(|path| seen_paths.contains(path)) {
+                continue;
+            }
+            let size = events[index].payload.to_string().len();
+            let fits = edit_events == 0
+                || (edit_events < RESTORED_EDIT_EVENT_LIMIT
+                    && edit_bytes + size <= RESTORED_EDIT_EVENT_BYTES);
+            if !fits {
+                // 预算用尽也不能把没覆盖到的文件丢掉：继续向前找体积能装下的。
+                continue;
+            }
+            keep[index] = true;
+            edit_events += 1;
+            edit_bytes += size;
+            seen_paths.extend(paths);
+        }
+    }
+    let mut plain = 0usize;
+    for index in (0..events.len()).rev() {
+        if keep[index] || payload_carries_edits(&events[index].payload) {
+            continue;
+        }
+        if plain < RESTORED_PLAIN_EVENT_LIMIT {
+            plain += 1;
+            keep[index] = true;
+        }
+    }
+    let dropped = keep.iter().filter(|kept| !**kept).count();
+    if dropped == 0 {
+        return false;
+    }
+    let mut retained = Vec::with_capacity(events.len() - dropped);
+    for (index, event) in events.drain(..).enumerate() {
+        if keep[index] {
+            retained.push(event);
+        }
+    }
+    *events = retained;
+    true
+}
+
 /// Snapshot-only projection: terminal (non-working) turns are rendered
 /// collapsed first, so their events only need the preview skeleton. The
 /// in-memory WebSession keeps full events for live delivery; this clone is
@@ -19382,44 +19468,7 @@ fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
             }
         })
         .collect();
-    const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
-    if slim.events.len() > SNAPSHOT_TURN_EVENT_LIMIT {
-        // 截断不能把文件修改证据整段丢掉：「本轮文件修改」总结卡只从事件的 edits
-        // 聚合，先丢最早的不带修改的事件，再丢其余最早的事件。
-        let mut excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
-        let mut drop = vec![false; slim.events.len()];
-        let carries_edits = |event: &WebTurnEvent| {
-            event
-                .payload
-                .get("payload")
-                .and_then(|inner| inner.get("edits"))
-                .is_some()
-        };
-        for (index, event) in slim.events.iter().enumerate() {
-            if excess == 0 {
-                break;
-            }
-            if !carries_edits(event) {
-                drop[index] = true;
-                excess -= 1;
-            }
-        }
-        for (index, _) in slim.events.iter().enumerate() {
-            if excess == 0 {
-                break;
-            }
-            if !drop[index] {
-                drop[index] = true;
-                excess -= 1;
-            }
-        }
-        let mut kept = Vec::with_capacity(SNAPSHOT_TURN_EVENT_LIMIT);
-        for (index, event) in slim.events.drain(..).enumerate() {
-            if !drop[index] {
-                kept.push(event);
-            }
-        }
-        slim.events = kept;
+    if trim_restored_turn_events(&mut slim.events) {
         events_slimmed = true;
     }
     slim.events_slimmed = events_slimmed;

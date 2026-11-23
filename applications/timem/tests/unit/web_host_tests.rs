@@ -397,7 +397,18 @@ fn snapshot_trimming_keeps_the_file_edit_events() {
 
     let slim = slim_restored_turn_for_snapshot(&turn);
 
-    assert_eq!(slim.events.len(), 40);
+    // 带修改证据的事件走独立预算，普通事件仍保留最新的 40 条预览窗口。
+    assert_eq!(slim.events.len(), 40 + 5);
+    let first_plain = slim
+        .events
+        .iter()
+        .find(|event| !payload_carries_edits(&event.payload))
+        .map(|event| event.event_id.as_str());
+    assert_eq!(
+        first_plain,
+        Some("event_20"),
+        "plain events must still keep only the newest preview window"
+    );
     let kept_edits = slim
         .events
         .iter()
@@ -502,6 +513,95 @@ fn restored_action_events_keep_the_file_edit_evidence() {
     );
     assert!(diff.ends_with("[truncated]"));
     assert_eq!(entries[0]["truncated"], true);
+}
+
+#[test]
+fn restored_long_turns_keep_every_file_edit_event() {
+    // 用户反馈：重启后「本轮文件修改」只剩最后一个文件。恢复路径原先按「保留最后
+    // 40 条事件」直接砍掉最早的事件，一次改了几十个文件的长轮次里前面改过的文件
+    // 全被砍掉，只剩轮末的那一个；带修改证据的事件必须有独立预算。
+    let event_record = |index: i64, path: Option<&str>| {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "payload".to_string(),
+            json!({
+                "context_id": "context_1",
+                "payload": match path {
+                    Some(path) => json!({
+                        "action": "run_bash",
+                        "edits": [{
+                            "path": path,
+                            "op": "modified",
+                            "diff": "--- a/file\n+++ b/file\n",
+                            "added_lines": 1,
+                            "removed_lines": 0,
+                            "truncated": false,
+                            "skip_reason": null,
+                        }],
+                    }),
+                    None => json!({ "action": "run_bash" }),
+                },
+                "topic": { "name": "core.action", "attributes": {} },
+            }),
+        );
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: index,
+            kind: ChatHistoryEventKind::Action,
+            content: "core.action".to_string(),
+            extra,
+        }
+    };
+    let mut records = vec![ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_long".to_string(),
+        created_at_ms: 0,
+        kind: Some("task".to_string()),
+        command_id: None,
+        delivery_state: None,
+        content: "edit many files".to_string(),
+    }];
+    let edited_paths = [
+        "src/first.rs",
+        "src/second.rs",
+        "src/third.rs",
+        "src/fourth.rs",
+        "src/fifth.rs",
+    ];
+    for (offset, path) in edited_paths.iter().enumerate() {
+        records.push(event_record(1 + offset as i64, Some(path)));
+    }
+    // 长轮次：后面再堆 90 条不带修改的事件，旧的截断会把上面 5 条全砍掉。
+    records.extend((6..96).map(|index| event_record(index, None)));
+
+    let turns = restored_turns_from_history_records(&records);
+
+    let edited = turns[0]
+        .events
+        .iter()
+        .filter(|event| payload_carries_edits(&event.payload))
+        .count();
+    assert_eq!(
+        edited,
+        edited_paths.len(),
+        "every file-edit event must survive restored turn trimming"
+    );
+    assert!(turns[0].events.len() <= 40 + edited_paths.len());
+    let last_edited = turns[0]
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            event
+                .payload
+                .get("payload")
+                .and_then(|inner| inner.get("edits"))
+                .and_then(Value::as_array)
+                .and_then(|edits| edits.first())
+        })
+        .expect("the newest edit event must stay in the window");
+    assert_eq!(last_edited["path"], "src/fifth.rs");
 }
 
 #[test]
