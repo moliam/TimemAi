@@ -573,10 +573,13 @@ export TIMEM_SPACE=/absolute/path/to/project-mem
 Relative paths such as `--space .test_mem` are rejected.
 
 When the `timem` Web mode resolves the MEM directory to the system default
-`~/.timem/mem` and no `--port` is supplied, it tries port `13764` first. If that
-port is unavailable, it continues through the existing automatic port range
-(`12345`–`23456`). A custom MEM uses the rotating automatic selection order,
-and an explicit `--port` always has priority over either automatic strategy.
+`~/.timem/mem` and no `--port` is supplied, it tries port `13764` first. A custom
+MEM gets its own stable preferred port, derived from the workspace path inside
+the same range, so restarts keep serving the same `scheme://host:port` origin
+and browser-local UI state (collapse options, appearance, drafts) survives. If
+the preferred port is unavailable, the process continues through the automatic
+port range (`12345`–`23456`) in rotating order. An explicit `--port` always has
+priority over either automatic strategy.
 
 The selected MEM is the complete workspace root. Workspace configuration,
 capability overlays, Sessions, memory, audit files, and Web diagnostics all live

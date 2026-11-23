@@ -2140,7 +2140,7 @@ pub async fn run(
         crate::os::LaunchParent::capture()
     };
     let template = WorkerTemplate::from_environment(&launch)?;
-    let prefer_default_mem_port = uses_system_default_mem(&template.initial_space);
+    let preferred_web_port = preferred_web_port(&template.initial_space);
     println!("Starting Timem Web and restoring the selected workspace...");
     let token = launch
         .public_access
@@ -2275,7 +2275,7 @@ pub async fn run(
     spawn_mailbox_scheduler(state.clone());
     spawn_conversation_rolling_loop(state.clone());
 
-    let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
+    let listener = bind_web_listener(launch.port, launch.public_access, preferred_web_port)
         .await
         .map_err(|error| friendly_bind_error(error, launch.port))?;
     let port = listener
@@ -20552,16 +20552,35 @@ fn uses_system_default_mem(memory_dir: &str) -> bool {
     default_memory_dir().is_ok_and(|default| Path::new(memory_dir) == default)
 }
 
-fn automatic_web_port_candidates(prefer_default_mem_port: bool, offset: u16) -> Vec<u16> {
+/// 每个 MEM 自己的首选端口。浏览器按 `scheme://host:port` 隔离 localStorage 与
+/// cookie，自动端口每次漂移会让折叠、外观、草稿等界面偏好在重启后像是被重置；
+/// 因此非默认 MEM 也用由空间路径决定的稳定端口（被占用时仍回落到扫描顺序）。
+fn per_mem_preferred_port(memory_dir: &str) -> u16 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in memory_dir.trim_end_matches('/').as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let span = u64::from(PORT_END - PORT_START + 1);
+    PORT_START + (hash % span) as u16
+}
+
+fn preferred_web_port(memory_dir: &str) -> u16 {
+    if uses_system_default_mem(memory_dir) {
+        DEFAULT_MEM_PREFERRED_PORT
+    } else {
+        per_mem_preferred_port(memory_dir)
+    }
+}
+
+fn automatic_web_port_candidates(preferred_port: u16, offset: u16) -> Vec<u16> {
     let port_count = PORT_END - PORT_START + 1;
     let mut ports = Vec::with_capacity(usize::from(port_count));
-    if prefer_default_mem_port {
-        ports.push(DEFAULT_MEM_PREFERRED_PORT);
-    }
+    ports.push(preferred_port);
     ports.extend(
         (0..port_count)
             .map(|index| PORT_START + ((offset + index) % port_count))
-            .filter(|port| !prefer_default_mem_port || *port != DEFAULT_MEM_PREFERRED_PORT),
+            .filter(|port| *port != preferred_port),
     );
     ports
 }
@@ -20569,7 +20588,7 @@ fn automatic_web_port_candidates(prefer_default_mem_port: bool, offset: u16) -> 
 async fn bind_web_listener(
     requested_port: Option<u16>,
     public_access: bool,
-    prefer_default_mem_port: bool,
+    preferred_port: u16,
 ) -> Result<TcpListener, String> {
     let explicitly_requested = requested_port.is_some();
     let ports = match requested_port {
@@ -20577,7 +20596,7 @@ async fn bind_web_listener(
         None => {
             let port_count = PORT_END - PORT_START + 1;
             let offset = (now_ms() % u128::from(port_count)) as u16;
-            automatic_web_port_candidates(prefer_default_mem_port, offset)
+            automatic_web_port_candidates(preferred_port, offset)
         }
     };
     let bind_ip = if public_access {

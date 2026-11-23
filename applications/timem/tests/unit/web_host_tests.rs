@@ -17935,32 +17935,43 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
 }
 
 #[test]
-fn default_mem_auto_port_candidates_prefer_13764_once() {
+fn auto_port_candidates_prefer_the_mem_port_once() {
     let offset = 777;
-    let candidates = automatic_web_port_candidates(true, offset);
+    let preferred = DEFAULT_MEM_PREFERRED_PORT;
+    let candidates = automatic_web_port_candidates(preferred, offset);
+    assert_eq!(candidates.first().copied(), Some(preferred));
     assert_eq!(
-        candidates.first().copied(),
-        Some(DEFAULT_MEM_PREFERRED_PORT)
-    );
-    assert_eq!(
-        candidates
-            .iter()
-            .filter(|port| **port == DEFAULT_MEM_PREFERRED_PORT)
-            .count(),
+        candidates.iter().filter(|port| **port == preferred).count(),
         1
     );
     assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
     assert!(candidates
         .iter()
         .all(|port| (PORT_START..=PORT_END).contains(port)));
+    // 首选端口被占用时才轮到扫描顺序，扫描仍覆盖整个区间。
+    assert_eq!(candidates[1], PORT_START + offset);
 }
 
 #[test]
-fn non_default_mem_auto_port_candidates_keep_rotating_pool_order() {
-    let offset = 777;
-    let candidates = automatic_web_port_candidates(false, offset);
-    assert_eq!(candidates.first().copied(), Some(PORT_START + offset));
-    assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+fn every_mem_gets_a_stable_preferred_port() {
+    // 端口决定浏览器 origin。同一 MEM 每次启动必须解析到同一个首选端口，
+    // 否则 localStorage 里的界面偏好（折叠、外观、草稿）会随重启像是被重置。
+    let default = agent_core::default_memory_dir().unwrap();
+    assert_eq!(
+        preferred_web_port(default.to_str().unwrap()),
+        DEFAULT_MEM_PREFERRED_PORT
+    );
+    for space in ["/spaces/one", "/spaces/two", "/home/user/repo/.test_mem"] {
+        let port = preferred_web_port(space);
+        assert_eq!(port, preferred_web_port(space));
+        // 尾随斜杠不算另一个 MEM。
+        assert_eq!(port, preferred_web_port(&format!("{space}/")));
+        assert!((PORT_START..=PORT_END).contains(&port));
+        let candidates = automatic_web_port_candidates(port, 777);
+        assert_eq!(candidates.first().copied(), Some(port));
+        assert_eq!(candidates.iter().filter(|value| **value == port).count(), 1);
+        assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+    }
 }
 
 #[test]
@@ -17973,16 +17984,16 @@ fn system_default_mem_detection_uses_the_resolved_path() {
 }
 
 #[tokio::test]
-async fn occupied_default_mem_preferred_port_falls_back_to_another_supported_port() {
-    let occupied = match TcpListener::bind((Ipv4Addr::LOCALHOST, DEFAULT_MEM_PREFERRED_PORT)).await
-    {
+async fn occupied_preferred_port_falls_back_to_another_supported_port() {
+    let preferred = preferred_web_port("/spaces/occupied-preferred-port");
+    let occupied = match TcpListener::bind((Ipv4Addr::LOCALHOST, preferred)).await {
         Ok(listener) => Some(listener),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
         Err(error) => panic!("failed to occupy preferred port: {error}"),
     };
-    let selected = bind_web_listener(None, false, true).await.unwrap();
+    let selected = bind_web_listener(None, false, preferred).await.unwrap();
     let selected_port = selected.local_addr().unwrap().port();
-    assert_ne!(selected_port, DEFAULT_MEM_PREFERRED_PORT);
+    assert_ne!(selected_port, preferred);
     assert!((PORT_START..=PORT_END).contains(&selected_port));
     drop(selected);
     drop(occupied);
@@ -17996,7 +18007,7 @@ async fn explicit_port_remains_higher_priority_than_default_mem_preference() {
     if !(PORT_START..=PORT_END).contains(&explicit_port) {
         return;
     }
-    let selected = bind_web_listener(Some(explicit_port), false, true)
+    let selected = bind_web_listener(Some(explicit_port), false, DEFAULT_MEM_PREFERRED_PORT)
         .await
         .unwrap();
     assert_eq!(selected.local_addr().unwrap().port(), explicit_port);
