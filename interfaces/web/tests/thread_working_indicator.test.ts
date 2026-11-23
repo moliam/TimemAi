@@ -31,6 +31,17 @@ describe("thread working indicator", () => {
     expect(source).not.toContain("thread-working-orbit");
   });
 
+  it("renders the memo body with the agent chat typography", () => {
+    const body = rule(".thread-memo-text");
+    // 用户反馈：字号/字体跟 agent 聊天区一致；颜色在两种主题下都要读得清。
+    expect(body).toContain("font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif");
+    expect(body).toContain("font-weight: var(--agent-font-weight)");
+    expect(body).toContain("font-size: var(--content-size)");
+    expect(body).toContain("line-height: 1.68");
+    expect(body).toContain("color: #dce6ea");
+    expect(styles).toContain(':root[data-theme="light"] .thread-memo-text { color: #2f3d38; }');
+  });
+
   it("uses a thicker rotating arc with rounded ends", () => {
     const arc = rule(".thread-working-arc");
     const stroke = rule(".thread-working-arc circle");

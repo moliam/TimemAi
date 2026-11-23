@@ -1230,3 +1230,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 明色主题：淡底再浅一档（`#e6f0fb` / `#e6f4ec` / `#fce9e7`），文字换同色系深色（`#1b5a92` / `#14603f` / `#96271f`）。
 - 可读性：淡底配浅/深字后对比度仍为 6.2~8.4:1（深色主题按卡片底色 `#131c24` 合成后测量），高于 WCAG AA；白字在浅底上只有 1.5:1 左右，因此这一步放弃了「白字」约束——若仍要白字，底色只能保持实底。
 - 测试看护：`file_edits.test.ts` 的胶囊契约改为断言三组淡底色值与配套文字色，并明确基础规则不再写死白字。验证：`pnpm exec vitest run tests/file_edits.test.ts` 30 过。
+
+## 2026-11-23 备忘录气泡正文改用 agent 聊天区字体，并修掉浅色主题下的灰字
+
+- 用户反馈：鼠标悬停备忘录指示器弹出的气泡里，文字颜色太浅，字体和字号也要跟 agent 聊天区一致。
+- 根因：`.thread-memo-text` 写死了 `font-size: 11.5px` 与 `color: #c9d5d8`，而 `:root[data-theme="light"]` 只覆盖了气泡底色与标题色——浅色主题下白底 + 浅灰正文，对比度只有约 1.5:1，几乎读不出来。
+- 修法：正文改用 agent 聊天区同一套排版变量——`font-family: var(--agent-other-font), var(--agent-chinese-font)`、`font-weight: var(--agent-font-weight)`、`font-size: var(--content-size)`、`line-height: 1.68`（与 `.turn-final-delivery > .message-content` 一致）；深色文字改 `#dce6ea`，并补 `:root[data-theme="light"] .thread-memo-text { color: #2f3d38; }`。对比度：深色 12:1、浅色 11:1。
+- 测试看护：`thread_working_indicator.test.ts` 新增用例断言正文的四项排版变量、深色文字与浅色主题覆盖。验证：该文件 5 过。
