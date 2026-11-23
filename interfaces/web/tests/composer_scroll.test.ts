@@ -45,6 +45,10 @@ describe("fixed composer scroll ownership", () => {
       /\.queued-message-items \{[^}]*max-height: 224px;[^}]*overflow-y: auto;[^}]*overscroll-behavior: contain;/,
     );
     expect(styles).not.toMatch(/\.queued-message-list\.(?:collapsed|expanded)/);
+    // 用户反馈：待发送队列与输入框外框同宽、同左缘（聊天内容列左缘），不再
+    // 右移让出导航按钮列的 gutter；对应变量也已移除。
+    expect(styles).toMatch(/\.queued-message-list \{[^}]*width: 100%;/);
+    expect(styles).not.toMatch(/composer-nav-gutter/);
   });
 
   it("widens the chat measure and keeps composer, cwd, and turn widths in step", () => {
