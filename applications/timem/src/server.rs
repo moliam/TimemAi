@@ -911,6 +911,194 @@ struct WebTurn {
     /// instead of rendering `…[truncated]` previews.
     #[serde(skip_serializing_if = "is_false")]
     events_slimmed: bool,
+    /// Authoritative begin-to-end file-change summary of the turn. The host
+    /// folds it as events arrive (and once from the full raw history when a
+    /// turn is restored), so the client renders it instead of re-deriving the
+    /// fact from an event stream that is trimmed for transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_changes: Option<WebTurnFileChanges>,
+    /// Folding state behind `file_changes`; transport-only, never serialized.
+    #[serde(skip)]
+    file_change_state: TurnFileChangeAccumulator,
+}
+
+/// Turn-level file-change summary. Bounded: at most `TURN_FILE_CHANGES_LIMIT`
+/// paths, one bounded diff per text path, metadata only for everything else.
+#[derive(Debug, Clone, Serialize, Default)]
+struct WebTurnFileChanges {
+    edits: Vec<WebTurnFileChange>,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    overflow_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebTurnFileChange {
+    path: String,
+    op: String,
+    /// Text files keep the final diff; non-text captures carry no diff at all.
+    diff: Option<String>,
+    added_lines: u32,
+    removed_lines: u32,
+    truncated: bool,
+    skip_reason: Option<String>,
+    /// Size at capture time: the only evidence for binary/oversized files.
+    size_bytes: Option<u64>,
+    capture_count: u32,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Per-path folding state across one turn: the first non-skipped capture says
+/// whether the path existed when the turn started, the last one is the end
+/// state.
+#[derive(Debug, Clone, Default)]
+struct TurnFileChangeState {
+    captures: u32,
+    start_op: Option<String>,
+    saw_captured: bool,
+    display: Option<WebTurnFileChange>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TurnFileChangeAccumulator {
+    states: Vec<TurnFileChangeState>,
+    index: HashMap<String, usize>,
+}
+
+const TURN_FILE_CHANGES_LIMIT: usize = 64;
+const TURN_FILE_CHANGE_DIFF_BYTES: usize = 8 * 1024;
+
+/// The `edits` array of a `core.action` topic payload, if it carries one.
+fn action_event_edits(payload: &Value) -> Vec<Value> {
+    if payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str)
+        != Some(CORE_TOPIC_ACTION)
+    {
+        return Vec::new();
+    }
+    payload
+        .get("payload")
+        .and_then(|inner| inner.get("edits"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+impl TurnFileChangeAccumulator {
+    /// Fold one `core.action` payload's `edits` array into the turn summary.
+    fn observe(&mut self, edits: &[Value]) {
+        for edit in edits {
+            let Some(change) = web_turn_file_change(edit) else {
+                continue;
+            };
+            let slot = match self.index.get(&change.path) {
+                Some(slot) => *slot,
+                None => {
+                    self.states.push(TurnFileChangeState::default());
+                    self.index
+                        .insert(change.path.clone(), self.states.len() - 1);
+                    self.states.len() - 1
+                }
+            };
+            let state = &mut self.states[slot];
+            state.captures += 1;
+            if change.op == "skipped" {
+                // A skipped capture carries no fresh existence evidence; while
+                // nothing was captured yet it is the only reportable fact.
+                if !state.saw_captured {
+                    state.display = Some(change);
+                }
+                continue;
+            }
+            if state.start_op.is_none() {
+                state.start_op = Some(change.op.clone());
+            }
+            state.saw_captured = true;
+            state.display = Some(change);
+        }
+    }
+
+    fn summary(&self) -> WebTurnFileChanges {
+        let mut edits = Vec::new();
+        let mut overflow_count = 0usize;
+        for state in &self.states {
+            let Some(change) = net_turn_file_change(state) else {
+                continue;
+            };
+            if edits.len() >= TURN_FILE_CHANGES_LIMIT {
+                overflow_count += 1;
+                continue;
+            }
+            edits.push(change);
+        }
+        WebTurnFileChanges {
+            edits,
+            overflow_count,
+        }
+    }
+
+    fn summary_if_any(&self) -> Option<WebTurnFileChanges> {
+        (!self.states.is_empty()).then(|| self.summary())
+    }
+}
+
+fn web_turn_file_change(edit: &Value) -> Option<WebTurnFileChange> {
+    let path = edit.get("path").and_then(Value::as_str)?.to_string();
+    let op = edit.get("op").and_then(Value::as_str)?.to_string();
+    let diff = edit
+        .get("diff")
+        .and_then(Value::as_str)
+        .map(|text| clamp_restored_diff(text, TURN_FILE_CHANGE_DIFF_BYTES))
+        .map(|(text, cut)| (text, cut));
+    let truncated = edit
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || diff.as_ref().is_some_and(|(_, cut)| *cut);
+    Some(WebTurnFileChange {
+        path,
+        op,
+        diff: diff.map(|(text, _)| text),
+        added_lines: edit.get("added_lines").and_then(Value::as_u64).unwrap_or(0) as u32,
+        removed_lines: edit
+            .get("removed_lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+        truncated,
+        skip_reason: edit
+            .get("skip_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        size_bytes: edit.get("size_bytes").and_then(Value::as_u64),
+        capture_count: 1,
+    })
+}
+
+/// Net begin-to-end change of one path. A path created and deleted inside the
+/// same turn never existed at either boundary, so it is dropped instead of
+/// leaving a misleading row behind.
+fn net_turn_file_change(state: &TurnFileChangeState) -> Option<WebTurnFileChange> {
+    let mut change = state.display.clone()?;
+    if !state.saw_captured {
+        change.capture_count = state.captures;
+        return Some(change);
+    }
+    let start_existed = state.start_op.as_deref() != Some("created");
+    let end_existed = change.op != "deleted";
+    if !start_existed && !end_existed {
+        return None;
+    }
+    if !start_existed {
+        change.op = "created".to_string();
+    } else if change.op == "created" {
+        change.op = "modified".to_string();
+    }
+    change.capture_count = state.captures;
+    Some(change)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -8130,6 +8318,9 @@ fn interrupted_turn_from_queued_message(
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         },
     )
 }
@@ -8802,6 +8993,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     final_answer: None,
                     completion: None,
                     events_slimmed: false,
+
+                    file_changes: None,
+                    file_change_state: TurnFileChangeAccumulator::default(),
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 // Older builds recorded the work-file notice as a user entry.
@@ -8924,6 +9118,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     final_answer: None,
                     completion: None,
                     events_slimmed: false,
+
+                    file_changes: None,
+                    file_change_state: TurnFileChangeAccumulator::default(),
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 if let Some(completion) = completion {
@@ -8931,6 +9128,10 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn.completion = Some(completion);
                 }
                 turn.events_slimmed = turn.events_slimmed || events_slimmed;
+                let folded_edits = action_event_edits(&payload);
+                if !folded_edits.is_empty() {
+                    turn.file_change_state.observe(&folded_edits);
+                }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
                         "history_event_{turn_id}_{created_at_ms}_{}",
@@ -8945,6 +9146,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
         }
     }
     for turn in turns.values_mut() {
+        // The summary is folded from the complete history above, so trimming
+        // the transport window can never shrink the reported file set.
+        turn.file_changes = turn.file_change_state.summary_if_any();
         trim_restored_turn_events(&mut turn.events);
     }
     let mut restored = turns.into_values().collect::<Vec<_>>();
@@ -16387,6 +16591,9 @@ fn start_web_turn_with_selected_attachments_and_roles(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.turns.push(turn.clone());
@@ -16559,6 +16766,9 @@ fn start_web_toolgen_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.pending_completion_message_id = None;
@@ -16875,6 +17085,9 @@ fn append_turn_event(
         next_turn_timeline_seq(turn)
     };
     let created_at_ms = now_ms();
+    // Fold file-change evidence in the same step the event enters the turn, so
+    // the client renders an authoritative summary instead of re-deriving it.
+    let folded_edits = action_event_edits(&payload);
     turn.events.push(WebTurnEvent {
         event_id: event_id.clone(),
         source: source.to_string(),
@@ -16882,6 +17095,10 @@ fn append_turn_event(
         created_at_ms,
         timeline_seq: Some(timeline_seq),
     });
+    if !folded_edits.is_empty() {
+        turn.file_change_state.observe(&folded_edits);
+        turn.file_changes = turn.file_change_state.summary_if_any();
+    }
     // Mid-run `core.action` "output" snapshots are live-only projection
     // events (capped per action): the authoritative finish event carries the
     // final bounded preview into history, so streaming updates stay transient.
@@ -17987,6 +18204,9 @@ fn activate_core_started_turn(
                 final_answer: None,
                 completion: None,
                 events_slimmed: false,
+
+                file_changes: None,
+                file_change_state: TurnFileChangeAccumulator::default(),
             };
             session.turns.push(turn);
             if session.turns.len() > MAX_SESSION_TURNS {
@@ -19198,6 +19418,9 @@ fn submit_unconsumed_supplement_handoff(
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         };
         session.pending_turn_id = Some(turn.turn_id.clone());
         session.turns.push(turn.clone());
@@ -19352,93 +19575,21 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
     }
 }
 
-/// Restored turns and terminal snapshot turns ship a bounded event window, but
-/// the 「本轮文件修改」summary card aggregates file edits from those events and is
-/// recomputed on every render. Cutting the oldest events blindly made a long
-/// working turn lose every file edited early on: after a restart the summary
-/// only listed the last touched file. Edit carrying events therefore get their
-/// own count/byte budget, and the newest event of every path is kept first so a
-/// file never disappears from the summary just because the turn was long.
-const RESTORED_PLAIN_EVENT_LIMIT: usize = 40;
-const RESTORED_EDIT_EVENT_LIMIT: usize = 64;
-const RESTORED_EDIT_EVENT_BYTES: usize = 256 * 1024;
+/// Restored turns and terminal snapshot turns ship a bounded event window.
+/// The window only feeds the collapsed Thought/Action preview: the turn's file
+/// changes travel as their own projection (`WebTurn::file_changes`), folded from
+/// the complete history before this trim, so dropping old events can never
+/// shrink the reported file set.
+const RESTORED_TURN_EVENT_LIMIT: usize = 40;
 
-fn payload_carries_edits(payload: &Value) -> bool {
-    payload
-        .get("payload")
-        .and_then(|inner| inner.get("edits"))
-        .is_some()
-}
-
-fn payload_edited_paths(payload: &Value) -> Vec<String> {
-    payload
-        .get("payload")
-        .and_then(|inner| inner.get("edits"))
-        .and_then(Value::as_array)
-        .map(|edits| {
-            edits
-                .iter()
-                .filter_map(|edit| edit.get("path").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Drop events outside the budget and report whether anything was dropped.
-/// Order of the kept events is preserved so the client can still derive the
-/// turn's net begin-to-end change per path.
+/// Keep the newest `RESTORED_TURN_EVENT_LIMIT` events and report whether
+/// anything was dropped.
 fn trim_restored_turn_events(events: &mut Vec<WebTurnEvent>) -> bool {
-    let mut keep = vec![false; events.len()];
-    let mut seen_paths = BTreeSet::new();
-    let mut edit_events = 0usize;
-    let mut edit_bytes = 0usize;
-    // 第一遍：每个文件的最新一条修改事件必须先保住，否则「本轮文件修改」总结卡会
-    // 漏掉早改过的文件。第二遍：预算还有余量时按从新到旧补齐其余修改事件。
-    for pass in 0..2 {
-        for index in (0..events.len()).rev() {
-            if keep[index] || !payload_carries_edits(&events[index].payload) {
-                continue;
-            }
-            let paths = payload_edited_paths(&events[index].payload);
-            if pass == 0 && paths.iter().all(|path| seen_paths.contains(path)) {
-                continue;
-            }
-            let size = events[index].payload.to_string().len();
-            let fits = edit_events == 0
-                || (edit_events < RESTORED_EDIT_EVENT_LIMIT
-                    && edit_bytes + size <= RESTORED_EDIT_EVENT_BYTES);
-            if !fits {
-                // 预算用尽也不能把没覆盖到的文件丢掉：继续向前找体积能装下的。
-                continue;
-            }
-            keep[index] = true;
-            edit_events += 1;
-            edit_bytes += size;
-            seen_paths.extend(paths);
-        }
-    }
-    let mut plain = 0usize;
-    for index in (0..events.len()).rev() {
-        if keep[index] || payload_carries_edits(&events[index].payload) {
-            continue;
-        }
-        if plain < RESTORED_PLAIN_EVENT_LIMIT {
-            plain += 1;
-            keep[index] = true;
-        }
-    }
-    let dropped = keep.iter().filter(|kept| !**kept).count();
-    if dropped == 0 {
+    let excess = events.len().saturating_sub(RESTORED_TURN_EVENT_LIMIT);
+    if excess == 0 {
         return false;
     }
-    let mut retained = Vec::with_capacity(events.len() - dropped);
-    for (index, event) in events.drain(..).enumerate() {
-        if keep[index] {
-            retained.push(event);
-        }
-    }
-    *events = retained;
+    events.drain(0..excess);
     true
 }
 

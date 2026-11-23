@@ -352,36 +352,122 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
 }
 
 #[test]
-fn snapshot_trimming_keeps_the_file_edit_events() {
-    // 终态 turn 的快照只保留 40 个事件；「本轮文件修改」总结卡只从事件里的 edits
-    // 聚合，所以截断必须先丢不带修改证据的事件，不能把修改证据整段丢掉。
-    let action_event = |index: usize, edits: bool| WebTurnEvent {
+fn turn_file_change_summary_folds_net_begin_to_end_change() {
+    // 净变化规则从浏览器搬到了 Host：这一轮改了哪些文件、最终是新建/修改/删除，
+    // 只由这一处决定。
+    let edit = |path: &str, op: &str, diff: Option<&str>, removed: u32| {
+        json!([{
+            "path": path,
+            "op": op,
+            "diff": diff,
+            "added_lines": if diff.is_some() { 1 } else { 0 },
+            "removed_lines": removed,
+            "truncated": false,
+            "skip_reason": if op == "skipped" { json!("binary") } else { Value::Null },
+            "size_bytes": if op == "skipped" { json!(4096) } else { Value::Null },
+        }])
+    };
+    let fold = |groups: &[Value]| {
+        let mut state = TurnFileChangeAccumulator::default();
+        for group in groups {
+            state.observe(group.as_array().unwrap());
+        }
+        state.summary()
+    };
+
+    // 同一个文件多次修改：保留末态 diff，记录捕获次数。
+    let first = fold(&[
+        edit("src/a.rs", "modified", Some("--- a\n+x\n"), 0),
+        edit("src/a.rs", "modified", Some("--- a\n+y\n"), 2),
+    ]);
+    assert_eq!(first.edits.len(), 1);
+    assert_eq!(first.edits[0].capture_count, 2);
+    assert_eq!(first.edits[0].removed_lines, 2);
+    assert!(first.edits[0].diff.as_deref().unwrap().contains("+y"));
+
+    // 轮内新建后继续修改：最终仍算新建。
+    let created = fold(&[
+        edit("new.txt", "created", Some("--- /dev/null\n+x\n"), 0),
+        edit("new.txt", "modified", Some("--- a\n+y\n"), 0),
+    ]);
+    assert_eq!(created.edits[0].op, "created");
+
+    // 轮内新建又删除：整轮边界上都不存在，不出现在总结里。
+    let vanished = fold(&[
+        edit("gone.txt", "created", Some("--- /dev/null\n+x\n"), 0),
+        edit("gone.txt", "deleted", None, 4),
+    ]);
+    assert!(vanished.edits.is_empty());
+
+    // 删除后重建：对使用者而言是一次修改。
+    let rebuilt = fold(&[
+        edit("b.txt", "modified", Some("--- a\n+x\n"), 0),
+        edit("b.txt", "deleted", None, 2),
+        edit("b.txt", "created", Some("--- /dev/null\n+y\n"), 0),
+    ]);
+    assert_eq!(rebuilt.edits[0].op, "modified");
+    assert_eq!(rebuilt.edits[0].capture_count, 3);
+
+    // 非文本：只保留路径/op/大小，没有 diff。
+    let binary = fold(&[edit("assets/logo.png", "skipped", None, 0)]);
+    assert_eq!(binary.edits[0].op, "skipped");
+    assert_eq!(binary.edits[0].size_bytes, Some(4096));
+    assert!(binary.edits[0].diff.is_none());
+
+    // 先有文本 diff、后来只有一次无法对比的捕获：保留上一次的 diff。
+    let kept = fold(&[
+        edit("keep.txt", "modified", Some("--- a\n+x\n"), 0),
+        edit("keep.txt", "skipped", None, 0),
+    ]);
+    assert_eq!(kept.edits[0].op, "modified");
+    assert!(kept.edits[0].diff.is_some());
+
+    // 上限 64 个文件，其余计入 overflow。
+    let many: Vec<Value> = (0..66)
+        .map(|index| edit(&format!("f{index}.txt"), "modified", Some("--- a\n+x\n"), 0))
+        .collect();
+    let capped = fold(&many);
+    assert_eq!(capped.edits.len(), 64);
+    assert_eq!(capped.overflow_count, 2);
+}
+
+#[test]
+fn snapshot_trimming_keeps_the_turn_file_change_summary() {
+    // 终态 turn 的快照只保留最新 40 个事件；「本轮文件修改」是 turn 自己的投影，
+    // 不在事件窗口里推导，所以截断不能改变它列出的文件。
+    let action_event = |index: usize, path: Option<&str>| WebTurnEvent {
         event_id: format!("event_{index}"),
         source: "core_topic".to_string(),
         payload: json!({
-            "payload": if edits {
-                json!({
+            "payload": match path {
+                Some(path) => json!({
                     "action": "run_bash",
                     "edits": [{
-                        "path": format!("src/{index}.rs"),
+                        "path": path,
                         "op": "modified",
-                        "diff": "--- a/src/file.rs\n+++ b/src/file.rs\n",
+                        "diff": "--- a/file\n+++ b/file\n",
                         "added_lines": 1,
                         "removed_lines": 0,
                         "truncated": false,
                         "skip_reason": null,
+                        "size_bytes": 12,
                     }],
-                })
-            } else {
-                json!({"action": "run_bash"})
+                }),
+                None => json!({ "action": "run_bash" }),
             },
-            "topic": {"name": "core.action", "attributes": {}},
+            "topic": { "name": "core.action", "attributes": {} },
         }),
         created_at_ms: index as u128,
         timeline_seq: None,
     };
-    let mut events: Vec<WebTurnEvent> = (0..5).map(|index| action_event(index, true)).collect();
-    events.extend((5..60).map(|index| action_event(index, false)));
+    let mut events: Vec<WebTurnEvent> = (0..5)
+        .map(|index| action_event(index, Some(&format!("src/{index}.rs"))))
+        .collect();
+    events.extend((5..60).map(|index| action_event(index, None)));
+    let mut state = TurnFileChangeAccumulator::default();
+    for event in &events {
+        state.observe(&action_event_edits(&event.payload));
+    }
     let turn = WebTurn {
         preview: None,
         turn_id: "turn_long".to_string(),
@@ -393,37 +479,131 @@ fn snapshot_trimming_keeps_the_file_edit_events() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        file_changes: state.summary_if_any(),
+        file_change_state: state,
     };
 
     let slim = slim_restored_turn_for_snapshot(&turn);
 
-    // 带修改证据的事件走独立预算，普通事件仍保留最新的 40 条预览窗口。
-    assert_eq!(slim.events.len(), 40 + 5);
-    let first_plain = slim
-        .events
+    assert_eq!(slim.events.len(), 40);
+    let summary = slim
+        .file_changes
+        .expect("the turn file-change summary must survive the snapshot trim");
+    assert_eq!(summary.edits.len(), 5);
+    assert_eq!(summary.edits[4].path, "src/4.rs");
+}
+
+#[test]
+fn restored_long_turns_keep_every_file_in_the_turn_summary() {
+    // 用户反馈：重启后「本轮文件修改」只剩最后一个文件。恢复时先在完整历史上折叠出
+    // turn 级总结，再裁剪事件窗口，所以窗口变短不会让早改过的文件消失；非文本修改
+    // 只保留路径/op/大小这组元信息，不带 diff。
+    let event_record = |index: i64, edits: Option<Value>| {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "payload".to_string(),
+            json!({
+                "context_id": "context_1",
+                "payload": match edits {
+                    Some(edits) => json!({ "action": "run_bash", "edits": edits }),
+                    None => json!({ "action": "run_bash" }),
+                },
+                "topic": { "name": "core.action", "attributes": {} },
+            }),
+        );
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_long".to_string(),
+            created_at_ms: index,
+            kind: ChatHistoryEventKind::Action,
+            content: "core.action".to_string(),
+            extra,
+        }
+    };
+    let text_edit = |path: &str| {
+        json!([{
+            "path": path,
+            "op": "modified",
+            "diff": "--- a/file\n+++ b/file\n",
+            "added_lines": 1,
+            "removed_lines": 0,
+            "truncated": false,
+            "skip_reason": null,
+            "size_bytes": 10,
+        }])
+    };
+    let mut records = vec![ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_long".to_string(),
+        created_at_ms: 0,
+        kind: Some("task".to_string()),
+        command_id: None,
+        delivery_state: None,
+        content: "edit many files".to_string(),
+    }];
+    let edited_paths = [
+        "src/first.rs",
+        "src/second.rs",
+        "src/third.rs",
+        "src/fourth.rs",
+        "src/fifth.rs",
+    ];
+    for (offset, path) in edited_paths.iter().enumerate() {
+        records.push(event_record(1 + offset as i64, Some(text_edit(path))));
+    }
+    // 二进制修改：只有元信息，没有 diff。
+    records.push(event_record(
+        6,
+        Some(json!([{
+            "path": "assets/logo.png",
+            "op": "skipped",
+            "diff": null,
+            "added_lines": 0,
+            "removed_lines": 0,
+            "truncated": false,
+            "skip_reason": "binary",
+            "size_bytes": 4096,
+        }])),
+    ));
+    // 长轮次：再堆 90 条不带修改的事件，事件窗口只剩最新的 40 条。
+    records.extend((7..97).map(|index| event_record(index, None)));
+
+    let turns = restored_turns_from_history_records(&records);
+
+    assert_eq!(turns[0].events.len(), 40, "event window stays bounded");
+    let summary = turns[0]
+        .file_changes
+        .as_ref()
+        .expect("restored turn must carry its file-change summary");
+    let paths: Vec<&str> = summary
+        .edits
         .iter()
-        .find(|event| !payload_carries_edits(&event.payload))
-        .map(|event| event.event_id.as_str());
+        .map(|edit| edit.path.as_str())
+        .collect();
     assert_eq!(
-        first_plain,
-        Some("event_20"),
-        "plain events must still keep only the newest preview window"
+        paths,
+        vec![
+            "src/first.rs",
+            "src/second.rs",
+            "src/third.rs",
+            "src/fourth.rs",
+            "src/fifth.rs",
+            "assets/logo.png",
+        ]
     );
-    let kept_edits = slim
-        .events
-        .iter()
-        .filter(|event| {
-            event
-                .payload
-                .get("payload")
-                .and_then(|inner| inner.get("edits"))
-                .is_some()
-        })
-        .count();
-    assert_eq!(
-        kept_edits, 5,
-        "every file-edit event must survive snapshot trimming"
-    );
+    assert_eq!(summary.overflow_count, 0);
+    let text = &summary.edits[0];
+    assert_eq!(text.op, "modified");
+    assert!(text
+        .diff
+        .as_deref()
+        .is_some_and(|diff| diff.contains("+++ b/file")));
+    assert_eq!(text.capture_count, 1);
+    let binary = &summary.edits[5];
+    assert_eq!(binary.op, "skipped");
+    assert_eq!(binary.skip_reason.as_deref(), Some("binary"));
+    assert_eq!(binary.size_bytes, Some(4096));
+    assert!(binary.diff.is_none(), "non-text edits keep no diff");
 }
 
 #[test]
@@ -452,6 +632,7 @@ fn restored_action_events_keep_the_file_edit_evidence() {
                     "removed_lines": 0,
                     "truncated": false,
                     "skip_reason": null,
+                    "size_bytes": 40960,
                 },
                 {
                     "path": "src/other.rs",
@@ -461,6 +642,7 @@ fn restored_action_events_keep_the_file_edit_evidence() {
                     "removed_lines": 0,
                     "truncated": false,
                     "skip_reason": null,
+                    "size_bytes": 20,
                 }
             ],
         },
@@ -505,6 +687,7 @@ fn restored_action_events_keep_the_file_edit_evidence() {
     assert_eq!(entries[1]["path"], "src/other.rs");
     assert_eq!(entries[1]["op"], "created");
     assert_eq!(entries[1]["added_lines"], 2);
+    assert_eq!(entries[1]["size_bytes"], 20);
     let diff = entries[0]["diff"].as_str().unwrap();
     assert!(
         diff.len() <= 8 * 1024 + 64,
@@ -513,95 +696,6 @@ fn restored_action_events_keep_the_file_edit_evidence() {
     );
     assert!(diff.ends_with("[truncated]"));
     assert_eq!(entries[0]["truncated"], true);
-}
-
-#[test]
-fn restored_long_turns_keep_every_file_edit_event() {
-    // 用户反馈：重启后「本轮文件修改」只剩最后一个文件。恢复路径原先按「保留最后
-    // 40 条事件」直接砍掉最早的事件，一次改了几十个文件的长轮次里前面改过的文件
-    // 全被砍掉，只剩轮末的那一个；带修改证据的事件必须有独立预算。
-    let event_record = |index: i64, path: Option<&str>| {
-        let mut extra = BTreeMap::new();
-        extra.insert(
-            "payload".to_string(),
-            json!({
-                "context_id": "context_1",
-                "payload": match path {
-                    Some(path) => json!({
-                        "action": "run_bash",
-                        "edits": [{
-                            "path": path,
-                            "op": "modified",
-                            "diff": "--- a/file\n+++ b/file\n",
-                            "added_lines": 1,
-                            "removed_lines": 0,
-                            "truncated": false,
-                            "skip_reason": null,
-                        }],
-                    }),
-                    None => json!({ "action": "run_bash" }),
-                },
-                "topic": { "name": "core.action", "attributes": {} },
-            }),
-        );
-        ChatHistoryRecord::Event {
-            role: ChatHistoryRole::System,
-            turn_id: "turn_long".to_string(),
-            created_at_ms: index,
-            kind: ChatHistoryEventKind::Action,
-            content: "core.action".to_string(),
-            extra,
-        }
-    };
-    let mut records = vec![ChatHistoryRecord::Message {
-        role: ChatHistoryRole::User,
-        turn_id: "turn_long".to_string(),
-        created_at_ms: 0,
-        kind: Some("task".to_string()),
-        command_id: None,
-        delivery_state: None,
-        content: "edit many files".to_string(),
-    }];
-    let edited_paths = [
-        "src/first.rs",
-        "src/second.rs",
-        "src/third.rs",
-        "src/fourth.rs",
-        "src/fifth.rs",
-    ];
-    for (offset, path) in edited_paths.iter().enumerate() {
-        records.push(event_record(1 + offset as i64, Some(path)));
-    }
-    // 长轮次：后面再堆 90 条不带修改的事件，旧的截断会把上面 5 条全砍掉。
-    records.extend((6..96).map(|index| event_record(index, None)));
-
-    let turns = restored_turns_from_history_records(&records);
-
-    let edited = turns[0]
-        .events
-        .iter()
-        .filter(|event| payload_carries_edits(&event.payload))
-        .count();
-    assert_eq!(
-        edited,
-        edited_paths.len(),
-        "every file-edit event must survive restored turn trimming"
-    );
-    assert!(turns[0].events.len() <= 40 + edited_paths.len());
-    let last_edited = turns[0]
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| {
-            event
-                .payload
-                .get("payload")
-                .and_then(|inner| inner.get("edits"))
-                .and_then(Value::as_array)
-                .and_then(|edits| edits.first())
-        })
-        .expect("the newest edit event must stay in the window");
-    assert_eq!(last_edited["path"], "src/fifth.rs");
 }
 
 #[test]
@@ -1817,6 +1911,9 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         },
         WebTurn {
             preview: None,
@@ -1829,6 +1926,9 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         },
     ];
 
@@ -1856,6 +1956,9 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     };
     let unfinished = WebTurn {
         preview: None,
@@ -1868,6 +1971,9 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     };
     let mut turns = vec![unfinished, terminal];
 
@@ -1887,6 +1993,9 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     }];
     mark_restored_interrupted_turn(
         &mut ready_turns,
@@ -1962,6 +2071,9 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     });
 
     let stored = stored_session_from_web_session(&state, &session);
@@ -1993,6 +2105,9 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         });
     }
 
@@ -2064,6 +2179,9 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         });
     }
 
@@ -4758,6 +4876,9 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         });
     }
 
@@ -4823,6 +4944,9 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
     });
     drop(sessions);
     let error = update_session_api_key(&state, "session_a", "new-secret".to_string()).unwrap_err();
@@ -13293,6 +13417,9 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         });
         session.active_turn_id = Some("turn_newer".to_string());
     }
@@ -18116,6 +18243,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             preview: None,
             completion: None,
             events_slimmed: false,
+
+            file_changes: None,
+            file_change_state: TurnFileChangeAccumulator::default(),
         });
     }
     let mut updated = previous.clone();
@@ -25906,6 +26036,9 @@ mod session_work_file_update_persistence_tests {
                 final_answer: Some("done".to_string()),
                 completion: Some(serde_json::json!({ "stop_reason": "Completed" })),
                 events_slimmed: false,
+
+                file_changes: None,
+                file_change_state: TurnFileChangeAccumulator::default(),
             });
         }
 

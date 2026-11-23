@@ -86,6 +86,10 @@ pub struct FileEditEntry {
     pub removed_lines: u32,
     pub truncated: bool,
     pub skip_reason: Option<&'static str>,
+    /// Size of the path at capture time (after-state when it exists, otherwise
+    /// the last known size). Non-text edits carry no diff, so the size is the
+    /// only bounded evidence the UI can show for them.
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -243,15 +247,25 @@ impl EditContext {
                     removed_lines: 0,
                     truncated: false,
                     skip_reason: Some(SKIP_NOT_CAPTURED),
+                    size_bytes: None,
                 });
                 continue;
             };
-            let before = match before {
-                FileContentSnapshot::OnDisk { path } => read_snapshot(path).0,
-                other => other.clone(),
+            let (before, before_size) = match before {
+                FileContentSnapshot::OnDisk { path } => read_snapshot(path),
+                other => (other.clone(), 0),
             };
-            let (after, _) = read_snapshot(&file.path);
-            entries.push(build_entry(&file.declared, &before, &after));
+            let (after, after_size) = read_snapshot(&file.path);
+            // A deleted path has no after-size; keep the last known one so the
+            // metadata row can still report how large the removed file was.
+            let size_bytes = if after_size > 0 {
+                Some(after_size as u64)
+            } else if before_size > 0 {
+                Some(before_size as u64)
+            } else {
+                None
+            };
+            entries.push(build_entry(&file.declared, &before, &after, size_bytes));
         }
         FileEditsEvidence {
             edits: apply_payload_budget(entries),
@@ -382,7 +396,7 @@ fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
         return (FileContentSnapshot::Unreadable, 0);
     }
     if metadata.len() > MAX_SNAPSHOT_FILE_BYTES as u64 {
-        return (FileContentSnapshot::TooLarge, 0);
+        return (FileContentSnapshot::TooLarge, metadata.len() as usize);
     }
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -394,7 +408,7 @@ fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
         return (FileContentSnapshot::Unreadable, 0);
     }
     if bytes.len() as u64 > MAX_SNAPSHOT_FILE_BYTES as u64 {
-        return (FileContentSnapshot::TooLarge, 0);
+        return (FileContentSnapshot::TooLarge, bytes.len());
     }
     let size = bytes.len();
     if bytes.contains(&0) {
@@ -421,6 +435,7 @@ fn build_entry(
     declared: &str,
     before: &FileContentSnapshot,
     after: &FileContentSnapshot,
+    size_bytes: Option<u64>,
 ) -> FileEditEntry {
     let base = FileEditEntry {
         path: declared.to_string(),
@@ -430,6 +445,7 @@ fn build_entry(
         removed_lines: 0,
         truncated: false,
         skip_reason: None,
+        size_bytes,
     };
     match (before, after) {
         (FileContentSnapshot::Lines(old_text), FileContentSnapshot::Lines(new_text)) => {
@@ -532,6 +548,7 @@ fn entry_json(entry: &FileEditEntry) -> Value {
         "removed_lines": entry.removed_lines,
         "truncated": entry.truncated,
         "skip_reason": entry.skip_reason,
+        "size_bytes": entry.size_bytes,
     })
 }
 
@@ -568,6 +585,7 @@ fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
             removed_lines: 0,
             truncated: false,
             skip_reason: Some(SKIP_BUDGET),
+            size_bytes: entry.size_bytes,
         };
         let minimal_len = entry_json(&minimal).to_string().len() + 1;
         if used + minimal_len > MAX_EDITS_PAYLOAD_BYTES {

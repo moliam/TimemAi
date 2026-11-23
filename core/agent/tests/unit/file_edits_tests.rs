@@ -145,6 +145,7 @@ fn modified_large_file_diff_stays_bounded_and_untruncated() {
         "big.css",
         &FileContentSnapshot::Lines(old.join("\n")),
         &FileContentSnapshot::Lines(new.join("\n")),
+        None,
     );
     assert_eq!(entry.op, FileEditOp::Modified);
     assert_eq!((entry.added_lines, entry.removed_lines), (2, 2));
@@ -164,6 +165,7 @@ fn build_entry_reports_missing_paths_as_skipped_missing() {
         "absent.txt",
         &FileContentSnapshot::Missing,
         &FileContentSnapshot::Missing,
+        None,
     );
     assert_eq!(entry.op, FileEditOp::Skipped);
     assert_eq!(entry.skip_reason, Some("missing"));
@@ -177,6 +179,7 @@ fn whitespace_only_rewrites_report_modified_with_meta_note() {
         "notes.txt",
         &FileContentSnapshot::Lines("a\nb\n".to_string()),
         &FileContentSnapshot::Lines("a\nb".to_string()),
+        None,
     );
     assert_eq!(entry.op, FileEditOp::Modified);
     assert_eq!((entry.added_lines, entry.removed_lines), (0, 0));
@@ -189,6 +192,7 @@ fn whitespace_only_rewrites_report_modified_with_meta_note() {
         "notes.txt",
         &FileContentSnapshot::Lines("a\nb\n".to_string()),
         &FileContentSnapshot::Lines("a\r\nb\r\n".to_string()),
+        None,
     );
     assert_eq!(crlf.op, FileEditOp::Modified);
     assert!(crlf
@@ -200,6 +204,7 @@ fn whitespace_only_rewrites_report_modified_with_meta_note() {
         "notes.txt",
         &FileContentSnapshot::Lines("a\nb\n".to_string()),
         &FileContentSnapshot::Lines("a\nb\n".to_string()),
+        None,
     );
     assert_eq!(identical.op, FileEditOp::Unchanged);
     assert!(identical.diff.is_none());
@@ -292,6 +297,8 @@ fn created_file_uses_dev_null_header_and_zero_range() {
         removed_lines: 0,
         truncated: false,
         skip_reason: None,
+
+        size_bytes: None,
     };
     entry.extend_from_diff("notes/a.txt", &[], &lines(&["x", "y"]));
     let diff = entry.diff.expect("diff text");
@@ -311,6 +318,8 @@ fn deleted_file_uses_dev_null_target() {
         removed_lines: 0,
         truncated: false,
         skip_reason: None,
+
+        size_bytes: None,
     };
     entry.extend_from_diff("gone.txt", &lines(&["x", "y"]), &[]);
     let diff = entry.diff.expect("diff text");
@@ -336,6 +345,8 @@ fn oversized_diff_text_is_truncated_but_stats_stay_full() {
         removed_lines: 0,
         truncated: false,
         skip_reason: None,
+
+        size_bytes: None,
     };
     entry.extend_from_diff("big.txt", &old, &new);
     assert!(entry.truncated);
@@ -445,12 +456,16 @@ fn compute_evidence_tracks_create_modify_delete_and_unchanged() {
     let created = by_path.next().unwrap();
     assert_eq!(created.op, FileEditOp::Created);
     assert_eq!((created.added_lines, created.removed_lines), (2, 0));
+    // 非文本修改只有元信息可展示；文本修改也带一份最终大小，便于总结行显示。
+    assert_eq!(created.size_bytes, Some("hello\nworld\n".len() as u64));
     let modified = by_path.next().unwrap();
     assert_eq!(modified.op, FileEditOp::Modified);
     assert_eq!((modified.added_lines, modified.removed_lines), (1, 1));
     assert!(modified.diff.as_deref().expect("diff").contains("+B\n"));
     let deleted = by_path.next().unwrap();
     assert_eq!(deleted.op, FileEditOp::Deleted);
+    // 删除后没有 after 侧，大小取删除前的最后已知值。
+    assert!(deleted.size_bytes.is_some_and(|size| size > 0));
     let same = by_path.next().unwrap();
     assert_eq!(same.op, FileEditOp::Unchanged);
     assert!(same.diff.is_none());
@@ -470,6 +485,8 @@ fn compute_evidence_skips_binary_and_oversized_after_states() {
     assert_eq!(evidence.edits.len(), 1);
     assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
     assert_eq!(evidence.edits[0].skip_reason, Some("binary"));
+    // 二进制文件没有 diff，只有路径/op/大小这组元信息。
+    assert_eq!(evidence.edits[0].size_bytes, Some(3));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -529,6 +546,8 @@ fn payload_budget_degrades_large_sets_without_losing_paths() {
             removed_lines: 0,
             truncated: false,
             skip_reason: None,
+
+            size_bytes: None,
         };
         entry.extend_from_diff(name, &old, &new);
         entries.push(entry);
@@ -553,6 +572,8 @@ fn edits_payload_shape_is_stable_for_interfaces() {
         removed_lines: 2,
         truncated: true,
         skip_reason: None,
+
+        size_bytes: None,
     };
     let payload = edits_payload(&FileEditsEvidence { edits: vec![entry] });
     let object = payload.as_array().expect("array")[0]
