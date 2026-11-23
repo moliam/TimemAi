@@ -161,27 +161,31 @@ describe("file edits surfaces", () => {
     const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
     expect(section).not.toContain("border:");
     expect(section).not.toContain("background:");
-    // 用户反馈：新建 / 修改 / 删除改成不同颜色的无框底色胶囊，不再只是裸文字。
+    // 用户反馈：新建 / 修改 / 删除改成不同颜色的无框底色胶囊、白色文字；
+    // 色弱友好靠「色相 + 明度」双分离（青绿 / 琥珀 / 深红实底）。
     const opStart = styles.indexOf(".file-edit-op {");
     const op = styles.slice(opStart, styles.indexOf("}", opStart) + 1);
     expect(op).toContain("border: 0;");
     expect(op).toContain("border-radius: 999px;");
     expect(op).toContain("padding: 0 7px;");
+    expect(op).toContain("color: #fff;");
     expect(op).not.toContain("border: 1px");
     for (const [name, tint] of [
-      ["created", "rgba(64, 186, 124, 0.2)"],
-      ["modified", "rgba(214, 168, 64, 0.2)"],
-      ["deleted", "rgba(214, 96, 88, 0.2)"],
+      ["created", "#0c6f5a"],
+      ["modified", "#a1680f"],
+      ["deleted", "#93261f"],
     ] as const) {
       const start = styles.indexOf(`.file-edit-op-${name} {`);
       const block = styles.slice(start, styles.indexOf("}", start) + 1);
       expect(block).toContain(`background: ${tint};`);
+      // 白字由基础规则统一提供，单个 op 不再覆盖文字色。
+      expect(block).not.toContain("color:");
     }
-    // 明色主题同一颗胶囊换成浅底，仍是各自颜色、仍无边框。
+    // 明色主题：同一套实底稍作提深，仍是白字、仍无边框。
     for (const [name, tint] of [
-      ["created", "rgba(28, 122, 78, 0.13)"],
-      ["modified", "rgba(176, 138, 38, 0.16)"],
-      ["deleted", "rgba(178, 58, 49, 0.13)"],
+      ["created", "#0a6a53"],
+      ["modified", "#96600c"],
+      ["deleted", "#8f231d"],
     ] as const) {
       const start = styles.indexOf(`:root[data-theme="light"] .file-edit-op-${name} {`);
       const block = styles.slice(start, styles.indexOf("}", start) + 1);
