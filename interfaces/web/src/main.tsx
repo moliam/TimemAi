@@ -10272,6 +10272,7 @@ function TimemThread({
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    syncStreamScrollGapLimit(viewport);
     // 只吸收「工作过程中」的变矮：任务结束时归档会一次性收起大段过程内容，
     // 那时补偿会留下整屏空白（验收里就抓到过），结束态由归档布局自己接管。
     if (!followThreadLatest.current || !streamFollowing) {
@@ -10281,6 +10282,7 @@ function TimemThread({
     const previous = pinnedScrollTopRef.current;
     const clamped = previous - viewport.scrollTop;
     if (clamped > 1) {
+      // 补偿同样走 applyStreamScrollGap 的总量夹取，不会随提交次数累加。
       applyStreamScrollGap(streamScrollGap + clamped);
       viewport.scrollTop = previous;
     }
@@ -11500,6 +11502,22 @@ function TimemThread({
             scrollHeight: event.currentTarget.scrollHeight - streamScrollGap,
             clientHeight: event.currentTarget.clientHeight,
           });
+          // 用户反馈：工作时空槽会被滚成整屏空白，把聊天区顶出屏幕、滚回来还像在
+          // 刷新。空槽只是布局锚：存在时把滚动位置夹在内容底边，滚到底就是最新
+          // 内容，永远进不了那片空白；上滚超过空槽高度后（此时缩短总高度不会夹
+          // scrollTop）直接撤销，免得它一直占着滚动范围。
+          if (streamScrollGap > 0) {
+            const contentTop = streamContentScrollTop(event.currentTarget);
+            if (event.currentTarget.scrollTop > contentTop + 1) {
+              event.currentTarget.scrollTop = contentTop;
+              return;
+            }
+            if (
+              event.currentTarget.scrollTop + event.currentTarget.clientHeight <
+              contentTop - streamScrollGap
+            )
+              resetStreamScrollGap();
+          }
           followThreadLatest.current = nearBottom;
           setThreadAwayFromBottom(!nearBottom);
           if (activeSessionId)
@@ -13261,10 +13279,35 @@ let streamScrollGap = 0;
 let streamScrollGapHost: HTMLElement | null = null;
 let streamScrollGapContent = 0;
 
+// 用户反馈：工作时空槽能被滚成整屏空白，把聊天区顶出屏幕。空槽只是布局锚、不是
+// 可读内容，因此两层约束：预留仍按整块高度（收拢期间不跳动），但
+//   1) 空槽存在时滚动位置夹在「内容底边」，滚到底就是最新内容，进不了那片空白；
+//   2) 空槽总量最多两个视口高，避免重复收拢把它堆成无意义的滚动范围。
+const STREAM_SCROLL_GAP_VIEWPORTS = 2;
+
+// 空槽的硬上限：所有写入路径（收拢预留、提交级补偿）都从这里夹一次，避免重复
+// 收拢把总量堆成没有意义的滚动范围。
+let streamScrollGapLimit = Number.POSITIVE_INFINITY;
+
 function applyStreamScrollGap(value: number) {
-  const next = Math.max(0, Math.round(value));
+  const next = Math.max(0, Math.min(Math.round(value), streamScrollGapLimit));
   streamScrollGap = next;
   if (streamScrollGapHost) streamScrollGapHost.style.height = `${next}px`;
+}
+
+function syncStreamScrollGapLimit(viewport: HTMLElement) {
+  const limit = Math.round(viewport.clientHeight * STREAM_SCROLL_GAP_VIEWPORTS);
+  if (limit === streamScrollGapLimit) return;
+  streamScrollGapLimit = limit;
+  applyStreamScrollGap(streamScrollGap);
+}
+
+/** 内容底边对应的滚动位置；空槽属于布局锚，不算可读内容。 */
+function streamContentScrollTop(viewport: HTMLElement) {
+  return Math.max(
+    0,
+    viewport.scrollHeight - viewport.clientHeight - streamScrollGap,
+  );
 }
 
 function resetStreamScrollGap() {
@@ -13281,23 +13324,17 @@ function consumeStreamScrollGap(viewport: HTMLElement) {
     applyStreamScrollGap(streamScrollGap - growth);
 }
 
-// 收纳过程逐帧变矮：布局已经生效、还没绘制时把这一帧的变矮补进空槽，并把被浏览器
-// 夹掉的 scrollTop 还原到原位，视觉上就是「上方不动、下方连续上推」。
-function streamContentScrollTop(viewport: HTMLElement) {
-  return Math.max(
-    0,
-    viewport.scrollHeight - viewport.clientHeight - streamScrollGap,
-  );
-}
-
 // 收纳前先在底部预留同样高度的空槽。收拢期间整段变矮时，浏览器不会再因为新
 // max 变小而夹 scrollTop：上方内容原地不动，下方内容被连续上推；空槽随后被
 // 新到达的内容逐帧吃掉（consumeStreamScrollGap），归零后恢复原来的贴底跟随。
 function reserveStreamScrollGap(height: number, viewport: HTMLElement) {
-  if (!(height > 0.5)) return;
+  syncStreamScrollGapLimit(viewport);
+  // 预留按整块高度：收拢期间总高度不缩水，贴底状态才不会被浏览器夹。
+  const reserved = Math.min(height, streamScrollGapLimit - streamScrollGap);
+  if (!(reserved > 0.5)) return;
   const pinned =
     viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1;
-  applyStreamScrollGap(streamScrollGap + height);
+  applyStreamScrollGap(streamScrollGap + reserved);
   if (pinned) viewport.scrollTop = streamContentScrollTop(viewport);
   streamScrollGapContent = viewport.scrollHeight - streamScrollGap;
 }

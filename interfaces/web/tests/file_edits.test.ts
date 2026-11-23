@@ -334,13 +334,22 @@ describe("file edits components render server-side", () => {
     expect(html).toContain("\u3010\u5df2\u7701\u7565\u3011");
   });
 
-  it("marks payload-slimmed edits even when no diff body remains", () => {
+  it("labels payload-slimmed edits with the omitted tag, not a truncation notice", () => {
     const html = renderToString(createElement(FileEditsPanel, {
-      edits: [{ ...validEntry, diff: null, truncated: true }],
+      edits: [{
+        ...validEntry,
+        op: "deleted",
+        diff: null,
+        added_lines: 0,
+        removed_lines: 1,
+        truncated: true,
+        skip_reason: "budget_exhausted",
+      }],
     }));
     expect(html).not.toContain("file-edit-diff-table");
-    expect(html).toContain("file-edit-notice");
-    expect(html).toContain("\u3010\u5df2\u7701\u7565\u3011");
+    // 用户反馈：只删一行却写「超出限制、已截断」自相矛盾——预算省略只用类型标签说明。
+    expect(html).toContain("file-edit-kind");
+    expect(html).not.toContain("file-edit-notice");
   });
 
   it("panel default-expands diff sections and tags non-text sections", () => {

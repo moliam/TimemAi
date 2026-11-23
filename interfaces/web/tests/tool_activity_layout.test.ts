@@ -150,6 +150,13 @@ it("collapses tool rows continuously and never animates the viewport", () => {
   expect(source).not.toContain("foldAnchorScrollTop");
   expect(source).toContain("function reserveStreamScrollGap(");
   expect(source).toContain("reserveStreamScrollGap(run.getBoundingClientRect().height, viewport);");
+  // 用户反馈：空槽不能被滚成整屏空白——预留仍按整块高度（收拢期间不跳动），但空槽
+  // 存在时滚动位置夹在内容底边，上滚越过空槽高度即撤销；总量限制在两个视口高。
+  expect(source).toContain("const STREAM_SCROLL_GAP_VIEWPORTS = 2;");
+  expect(source).toContain("Math.min(Math.round(value), streamScrollGapLimit)");
+  expect(source).toContain("if (event.currentTarget.scrollTop > contentTop + 1) {");
+  expect(source).toContain("event.currentTarget.scrollTop = contentTop;");
+  expect(source).toContain("resetStreamScrollGap();");
   expect(source).toContain("function consumeStreamScrollGap(");
   expect(source).toContain("streamScrollGapHost.style.height");
   expect(styles).toContain(".chat-scroll-shrink-gap {");

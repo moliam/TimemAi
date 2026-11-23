@@ -291,7 +291,10 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
           {edit.truncated && <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>}
         </div>
       )}
-      {!expandable && edit.truncated && (
+      {/* Budget trimming already shows the "diff omitted" kind tag; repeating a
+          truncation notice there read as a contradiction (1 line yet "over the
+          limit"), because that limit is the turn payload, not this file. */}
+      {!expandable && edit.truncated && !edit.skip_reason && (
         <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>
       )}
     </div>

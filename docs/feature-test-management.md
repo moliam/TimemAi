@@ -1204,3 +1204,21 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 实现：`.file-edit-op-created` 改蓝（暗 `#1d64a0` / 明 `#17568c`），`.file-edit-op-modified` 改用 `+` 行的绿（暗 `#2b7d52` / 明 `#1a6b45`），删除保持深红（`#93261f` / `#8f231d`）。修改色与 `+` 行的底色基色 `rgba(64,180,120,…)`、符号色 `#7fd6a4` 同属绿相（约 149°），只是压深成实底以便承载白字（不能直接拿 `#7fd6a4` 当底：白字对比度仅约 1.5:1）。
 - 可读性与色弱：白字对比度 6.2:1（新建）/ 5.1:1（修改）/ 8.3:1（删除），均高于 WCAG AA 4.5:1；Machado 2009 绿盲模拟后 Lab ΔE——新建 vs 修改 56、新建 vs 删除 77、修改 vs 删除 23，色相与明度双重分离，不依赖红绿单通道。
 - 测试看护：`file_edits.test.ts` 的胶囊契约改为断言新的一组实底色值（暗/明各三色）且单 op 不覆盖文字色。验证：`pnpm exec vitest run tests/file_edits.test.ts` 30 过。
+
+## 2026-11-23 工具收拢的底部空槽不再能被滚进空白，总量限制在两个视口高
+
+- 用户反馈：工作时与结束后滚动，整段聊天能被滚出屏幕只剩空白；没有新的大块输出时空槽不断把聊天区往上顶、滚不下来，像「一直在刷新」。
+- 机制与根因：收拢前按「整块当前高度」预留底部空槽（`.chat-scroll-shrink-gap`）本身是必要的——否则收拢期间浏览器把 `scrollTop` 夹到新 max，上方内容整体下移（实测 176px 级）。问题出在空槽只是布局锚，却被当成了可读内容：贴底时空槽就在内容下方，往下滚会整段滚进空白；而任何新提交的跟随又把位置拉回内容底边，于是「越滚越空、还老被拉回」；重复收拢还能把空槽累加。
+- 否决的方案：给预留量设上限（视口 1/3 或固定像素）。它与「收拢不整页下移」在数学上冲突——上限之内的变矮不再被吸收，`following: scroll must never step backwards` 验收立即复现 3~5px/帧回退，故不采用。
+- 修法一（空白不可达）：新增 `streamContentScrollTop()` 明确「内容底边」不含空槽；scroll 事件里若 `scrollTop` 越过内容底边，直接夹回并 return。滚到底就是最新内容，那片空白永远滚不进去。
+- 修法二（空白不滞留）：上滚超过空槽高度后（此时缩短总高度不会夹 `scrollTop`）直接 `resetStreamScrollGap()`，空槽不再占着滚动范围。
+- 修法三（总量有界）：所有写入路径统一在 `applyStreamScrollGap` 里按 `streamScrollGapLimit` 夹一次，上限 = `STREAM_SCROLL_GAP_VIEWPORTS`(2) × `clientHeight`，重复收拢不会把滚动范围堆成无意义的长条。
+- 语义边界：预留量仍是整块高度，收拢期间上方内容的零位移契约不变；空槽只影响滚动范围，不产生可见内容。
+- 测试看护：`tool_activity_layout.test.ts` 断言总量常量、统一夹取、内容底边夹回与撤销条件；Chrome 验收 `stream-preview-acceptance.mjs` 全 PASS——`followingTrack` 的 scrollTop 全程 218 不出现回退，80 个工具的大块归档后 `trailing < 150`。
+
+## 2026-11-23 预算省略的差异不再重复「超出限制、已截断」
+
+- 用户反馈：一条「删除 `/tmp/prev.css` −1」却跟着「差异超出限制，已截断」，只有一行却说超限，自相矛盾。
+- 根因：`−1` 是真实行数；`truncated` 来自整轮证据的字节预算（`apply_payload_budget` 为省空间只丢 diff 正文并置 `truncated`），界面复用了「单个 diff 太长被截断」的文案，把「整轮预算」说成了「这个文件太大」。
+- 修法：预算省略的条目已由 `skip_reason=budget_exhausted` 渲染成「差异已省略」类型标签，不再叠加那条提示——提示只在「单个 diff 真的被截断」时出现（`truncated && !skip_reason`）。
+- 测试看护：`file_edits.test.ts` 的 slim 用例改为断言类型标签存在、`file-edit-notice` 不存在。验证：web `pnpm test` 1066（83 文件）、tsc、Chrome 验收全 PASS。
