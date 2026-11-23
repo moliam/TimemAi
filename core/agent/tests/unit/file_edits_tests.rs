@@ -348,30 +348,38 @@ fn oversized_diff_text_is_truncated_but_stats_stay_full() {
 fn read_snapshot_classifies_missing_binary_and_oversized() {
     let dir = temp_dir("classify");
     let missing = dir.join("missing.txt");
-    let (snapshot, _) = read_snapshot(&missing, None);
+    let (snapshot, _) = read_snapshot(&missing);
     assert_eq!(snapshot, FileContentSnapshot::Missing);
 
     let binary = dir.join("blob.bin");
     fs::write(&binary, [b'a', 0, b'b']).unwrap();
-    let (snapshot, _) = read_snapshot(&binary, None);
+    let (snapshot, _) = read_snapshot(&binary);
     assert_eq!(snapshot, FileContentSnapshot::Binary);
 
     let invalid_utf8 = dir.join("latin.bin");
     fs::write(&invalid_utf8, [0xC3, 0x28]).unwrap();
-    let (snapshot, _) = read_snapshot(&invalid_utf8, None);
+    let (snapshot, _) = read_snapshot(&invalid_utf8);
     assert_eq!(snapshot, FileContentSnapshot::Binary);
 
-    let (snapshot, _) = read_snapshot(&dir, None);
+    let (snapshot, _) = read_snapshot(&dir);
     assert_eq!(snapshot, FileContentSnapshot::Unreadable);
 
     let big = dir.join("big.txt");
-    fs::write(&big, vec![b'x'; 512 * 1024 + 1]).unwrap();
-    let (snapshot, _) = read_snapshot(&big, None);
+    let handle = fs::File::create(&big).unwrap();
+    handle.set_len(64 * 1024 * 1024 + 1).unwrap();
+    drop(handle);
+    let (snapshot, _) = read_snapshot(&big);
     assert_eq!(snapshot, FileContentSnapshot::TooLarge);
+
+    let large_text = dir.join("large_text.txt");
+    let content = "x".repeat(700 * 1024) + "\n";
+    fs::write(&large_text, &content).unwrap();
+    let (snapshot, _) = read_snapshot(&large_text);
+    assert_eq!(snapshot, FileContentSnapshot::Lines(content));
 
     let empty = dir.join("empty.txt");
     fs::write(&empty, "").unwrap();
-    let (snapshot, _) = read_snapshot(&empty, None);
+    let (snapshot, _) = read_snapshot(&empty);
     assert_eq!(snapshot, FileContentSnapshot::Lines(String::new()));
     let _ = fs::remove_dir_all(&dir);
 }
@@ -573,4 +581,130 @@ fn empty_context_has_no_evidence() {
     let evidence = context.compute_evidence();
     assert!(evidence.edits.is_empty());
     assert_eq!(edits_payload(&evidence), Value::Array(Vec::new()));
+}
+
+#[test]
+fn capture_stages_large_files_on_disk_and_diffs_small_edits() {
+    let dir = temp_dir("bigstage");
+    let name = "app.js";
+    let old: Vec<String> = (0..24000)
+        .map(|index| format!("console.log('line-{index}');"))
+        .collect();
+    let before_content = old.join("\n");
+    write_file(&dir.join(name), &before_content);
+    let context = EditContext::capture(&dir, &[name.to_string()]);
+    let staged = context
+        .snapshot_dir
+        .as_ref()
+        .expect("staging dir")
+        .as_ref()
+        .to_path_buf();
+    let staged_copy = staged.join("before_00");
+    assert_eq!(
+        fs::metadata(&staged_copy).expect("staged copy").len(),
+        before_content.len() as u64
+    );
+    let mut new = old.clone();
+    new[12] = "console.log('edited-line-12');".to_string();
+    write_file(&dir.join(name), &new.join("\n"));
+    let evidence = context.compute_evidence();
+    assert_eq!(evidence.edits.len(), 1);
+    let entry = &evidence.edits[0];
+    assert_eq!(entry.op, FileEditOp::Modified);
+    assert_eq!((entry.added_lines, entry.removed_lines), (1, 1));
+    assert!(!entry.truncated);
+    assert!(entry.skip_reason.is_none());
+    let diff = entry.diff.as_deref().expect("diff");
+    assert!(diff.contains("-console.log('line-12');"));
+    assert!(diff.contains("+console.log('edited-line-12');"));
+    drop(context);
+    assert!(!staged.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn snapshot_dir_survives_until_the_last_clone_drops() {
+    let dir = temp_dir("cloneshare");
+    write_file(&dir.join("a.txt"), "one\n");
+    let context = EditContext::capture(&dir, &["a.txt".to_string()]);
+    let staged = context
+        .snapshot_dir
+        .as_ref()
+        .expect("staging dir")
+        .as_ref()
+        .to_path_buf();
+    let job_copy = context.clone();
+    drop(context);
+    assert!(staged.exists());
+    let evidence = job_copy.compute_evidence();
+    assert_eq!(evidence.edits[0].op, FileEditOp::Unchanged);
+    drop(job_copy);
+    assert!(!staged.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn snapshot_staging_dir_is_removed_on_drop() {
+    let dir = temp_dir("staging");
+    write_file(&dir.join("a.txt"), "content\n");
+    let context = EditContext::capture(&dir, &["a.txt".to_string()]);
+    let staged = context
+        .snapshot_dir
+        .as_ref()
+        .expect("staging dir")
+        .as_ref()
+        .to_path_buf();
+    assert!(staged.exists());
+    drop(context);
+    assert!(!staged.exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn capture_of_only_missing_paths_avoids_staging() {
+    let dir = temp_dir("nostage");
+    let context = EditContext::capture(&dir, &["absent.txt".to_string()]);
+    assert!(context.snapshot_dir.is_none());
+    let evidence = context.compute_evidence();
+    assert_eq!(evidence.edits.len(), 1);
+    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    assert_eq!(evidence.edits[0].skip_reason, Some("missing"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn capture_degrades_oversized_files_too_large() {
+    let dir = temp_dir("toobig");
+    let name = "huge.bin";
+    let handle = fs::File::create(dir.join(name)).unwrap();
+    handle.set_len(64 * 1024 * 1024 + 1).unwrap();
+    drop(handle);
+    let context = EditContext::capture(&dir, &[name.to_string()]);
+    let evidence = context.compute_evidence();
+    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    assert_eq!(evidence.edits[0].skip_reason, Some("too_large"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn capture_probe_skips_binary_files_before_copy() {
+    let dir = temp_dir("probebin");
+    let name = "asset.bin";
+    let mut bytes = vec![b'x'; 4096];
+    bytes.push(0);
+    fs::write(dir.join(name), &bytes).unwrap();
+    let context = EditContext::capture(&dir, &[name.to_string()]);
+    let staged = context
+        .snapshot_dir
+        .as_ref()
+        .expect("staging dir")
+        .as_ref()
+        .to_path_buf();
+    assert_eq!(fs::read_dir(&*staged).unwrap().count(), 0);
+    let evidence = context.compute_evidence();
+    assert_eq!(evidence.edits[0].op, FileEditOp::Skipped);
+    assert_eq!(evidence.edits[0].skip_reason, Some("binary"));
+    drop(context);
+    assert!(!staged.exists());
+    let _ = fs::remove_dir_all(&dir);
 }

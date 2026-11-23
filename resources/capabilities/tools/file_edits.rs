@@ -9,15 +9,25 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 /// Maximum number of declared paths captured and reported per tool call.
 pub(crate) const MAX_EDIT_FILES: usize = 16;
-/// Per-file snapshot read cap. Larger files degrade to `too_large`.
-const MAX_SNAPSHOT_FILE_BYTES: usize = 512 * 1024;
-/// Total snapshot budget retained per tool call.
-const MAX_SNAPSHOT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+/// Per-file disk-snapshot cap. Larger files degrade to `too_large`.
+const MAX_SNAPSHOT_FILE_BYTES: usize = 64 * 1024 * 1024;
+/// Total disk budget retained per tool call.
+const MAX_SNAPSHOT_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+/// Prefix bytes probed for NUL detection before a disk copy is attempted.
+const SNAPSHOT_BINARY_PROBE_BYTES: usize = 8 * 1024;
+/// Stream chunk size for the staged disk copies.
+const SNAPSHOT_COPY_CHUNK_BYTES: usize = 64 * 1024;
+/// Sequential counter disambiguating concurrent snapshot directories.
+static SNAPSHOT_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Serialized diff text cap per file.
 const MAX_DIFF_FILE_BYTES: usize = 32 * 1024;
 /// Serialized total payload budget across all entries.
@@ -84,6 +94,8 @@ pub struct FileEditsEvidence {
 }
 
 /// Snapshot of a file's content, or the reason it could not be diffed.
+/// `OnDisk` points at a staged disk copy that is loaded at diff time, so the
+/// capture side never holds file content in memory.
 /// `Lines` holds the raw text (NUL-free, valid UTF-8, within the byte cap).
 /// The line view is derived at diff time by splitting on `\n` and trimming a
 /// trailing `\r` per line. Equality is decided on the raw bytes so invisible
@@ -92,6 +104,7 @@ pub struct FileEditsEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FileContentSnapshot {
     Lines(String),
+    OnDisk { path: PathBuf },
     Binary,
     TooLarge,
     Unreadable,
@@ -116,23 +129,65 @@ impl FileContentSnapshot {
 struct DeclaredEditSnapshot {
     declared: String,
     path: PathBuf,
-    /// `None` when the path was not captured (declared file-count overflow).
+    /// `None` when the path was not captured (file-count overflow, or disk
+    /// staging unavailable for an existing file).
     before: Option<FileContentSnapshot>,
 }
 
 /// Before-state of the declared edit paths for one shell tool call. Kept in
 /// the job for background execution so the exit path can compute evidence.
+/// Shared ownership of the private staging directory: dropping the last
+/// handle removes the directory, so clones handed to background jobs stay
+/// valid for as long as any holder needs them.
+#[derive(Debug)]
+struct SnapshotDirHandle(PathBuf);
+
+impl Drop for SnapshotDirHandle {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for SnapshotDirHandle {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for SnapshotDirHandle {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EditContext {
     files: Vec<DeclaredEditSnapshot>,
+    /// Private staging directory holding the before-copies; removed when the
+    /// last clone of the context is dropped.
+    snapshot_dir: Option<Arc<SnapshotDirHandle>>,
+}
+
+impl Drop for EditContext {
+    fn drop(&mut self) {
+        // Releasing this handle may remove the staging dir: the actual
+        // removal happens when the last Arc clone (background job copy) is
+        // dropped, see `SnapshotDirHandle`.
+        drop(self.snapshot_dir.take());
+    }
 }
 
 impl EditContext {
     /// Snapshot every declared path against `cwd` under the hard caps.
+    /// Before-states are staged on disk in a private temp directory so the
+    /// memory budget stays flat no matter how large the edited files are.
     pub(crate) fn capture(cwd: &Path, declared_paths: &[String]) -> Self {
         let mut files: Vec<DeclaredEditSnapshot> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
-        let mut budget = MAX_SNAPSHOT_TOTAL_BYTES;
+        let mut budget = MAX_SNAPSHOT_TOTAL_BYTES as u64;
+        let mut snapshot_dir: Option<Arc<SnapshotDirHandle>> = None;
         for declared in declared_paths {
             let declared = declared.trim();
             if declared.is_empty() || declared.chars().count() > MAX_DECLARED_PATH_CHARS {
@@ -144,10 +199,19 @@ impl EditContext {
             }
             let before = if files.len() >= MAX_EDIT_FILES {
                 None
+            } else if path_missing(&path) {
+                // Created-file detection needs no staging at all.
+                Some(FileContentSnapshot::Missing)
             } else {
-                let (snapshot, bytes) = read_snapshot(&path, Some(budget));
-                budget = budget.saturating_sub(bytes);
-                Some(snapshot)
+                if snapshot_dir.is_none() {
+                    snapshot_dir =
+                        create_snapshot_dir().map(|dir| Arc::new(SnapshotDirHandle(dir)));
+                }
+                // Staging unavailable (`None`): degrade to an explicit skip
+                // instead of buffering file content in memory.
+                snapshot_dir
+                    .as_deref()
+                    .map(|dir| capture_snapshot(&path, dir, files.len(), &mut budget))
             };
             files.push(DeclaredEditSnapshot {
                 declared: declared.to_string(),
@@ -155,7 +219,10 @@ impl EditContext {
                 before,
             });
         }
-        Self { files }
+        Self {
+            files,
+            snapshot_dir,
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -179,8 +246,12 @@ impl EditContext {
                 });
                 continue;
             };
-            let (after, _) = read_snapshot(&file.path, None);
-            entries.push(build_entry(&file.declared, before, &after));
+            let before = match before {
+                FileContentSnapshot::OnDisk { path } => read_snapshot(path).0,
+                other => other.clone(),
+            };
+            let (after, _) = read_snapshot(&file.path);
+            entries.push(build_entry(&file.declared, &before, &after));
         }
         FileEditsEvidence {
             edits: apply_payload_budget(entries),
@@ -197,9 +268,109 @@ fn resolve_declared_path(cwd: &Path, declared: &str) -> PathBuf {
     }
 }
 
-/// Read one file into a snapshot. `budget` bounds the bytes retained for the
-/// before-capture; `None` means only the per-file cap applies (after-reads).
-fn read_snapshot(path: &Path, budget: Option<usize>) -> (FileContentSnapshot, usize) {
+/// Create the private per-capture staging directory under the system temp
+/// dir. `None` disables disk staging; existing-file captures then degrade to
+/// an explicit skip instead of buffering unbounded content in memory.
+fn create_snapshot_dir() -> Option<PathBuf> {
+    let seq = SNAPSHOT_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "timem_edit_snapshots_{}_{}",
+        std::process::id(),
+        seq
+    ));
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&dir)
+    };
+    #[cfg(not(unix))]
+    let created = fs::create_dir(&dir);
+    created.ok().map(|()| dir)
+}
+
+/// Stage one file into the snapshot directory under the per-file/total disk
+/// budget. Binary content is detected with a small prefix probe before any
+/// copy; partial copies are removed on every failure path.
+fn capture_snapshot(path: &Path, dir: &Path, slot: usize, budget: &mut u64) -> FileContentSnapshot {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return FileContentSnapshot::Unreadable,
+    };
+    if !metadata.is_file() {
+        return FileContentSnapshot::Unreadable;
+    }
+    if metadata.len() > MAX_SNAPSHOT_FILE_BYTES as u64 || metadata.len() > *budget {
+        return FileContentSnapshot::TooLarge;
+    }
+    let Ok(mut source) = fs::File::open(path) else {
+        return FileContentSnapshot::Unreadable;
+    };
+    let mut probe = [0u8; SNAPSHOT_BINARY_PROBE_BYTES];
+    let probed = match source.read(&mut probe) {
+        Ok(probed) => probed,
+        Err(_) => return FileContentSnapshot::Unreadable,
+    };
+    if probe[..probed].contains(&0) {
+        return FileContentSnapshot::Binary;
+    }
+    let dest_path = dir.join(format!("before_{slot:02}"));
+    let mut dest = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dest_path)
+    {
+        Ok(dest) => dest,
+        Err(_) => return FileContentSnapshot::Unreadable,
+    };
+    if dest.write_all(&probe[..probed]).is_err() {
+        let _ = fs::remove_file(&dest_path);
+        return FileContentSnapshot::Unreadable;
+    }
+    let copied = match copy_stream(&mut source, &mut dest, MAX_SNAPSHOT_FILE_BYTES as u64 + 1) {
+        Ok(copied) => copied,
+        Err(_) => {
+            let _ = fs::remove_file(&dest_path);
+            return FileContentSnapshot::Unreadable;
+        }
+    };
+    let staged = copied + probed as u64;
+    if staged > MAX_SNAPSHOT_FILE_BYTES as u64 || staged > *budget {
+        let _ = fs::remove_file(&dest_path);
+        return FileContentSnapshot::TooLarge;
+    }
+    *budget -= staged;
+    FileContentSnapshot::OnDisk { path: dest_path }
+}
+
+fn path_missing(path: &Path) -> bool {
+    matches!(
+        fs::metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Stream `source` into `dest` with a fixed chunk, failing once `limit`
+/// bytes are exceeded so a racing append cannot balloon the staged copy.
+fn copy_stream(source: &mut impl Read, dest: &mut impl Write, limit: u64) -> std::io::Result<u64> {
+    let mut chunk = vec![0u8; SNAPSHOT_COPY_CHUNK_BYTES];
+    let mut copied: u64 = 0;
+    loop {
+        let read = source.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(copied);
+        }
+        if copied + read as u64 > limit {
+            return Err(std::io::Error::other("snapshot exceeds byte cap"));
+        }
+        dest.write_all(&chunk[..read])?;
+        copied += read as u64;
+    }
+}
+
+/// Load one file into memory for diffing: used for after-states and for
+/// loading staged `OnDisk` before-copies at evidence time. Oversized files
+/// degrade to `TooLarge` instead of unbounded reads.
+fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -209,6 +380,9 @@ fn read_snapshot(path: &Path, budget: Option<usize>) -> (FileContentSnapshot, us
     };
     if !metadata.is_file() {
         return (FileContentSnapshot::Unreadable, 0);
+    }
+    if metadata.len() > MAX_SNAPSHOT_FILE_BYTES as u64 {
+        return (FileContentSnapshot::TooLarge, 0);
     }
     let file = match fs::File::open(path) {
         Ok(file) => file,
@@ -221,11 +395,6 @@ fn read_snapshot(path: &Path, budget: Option<usize>) -> (FileContentSnapshot, us
     }
     if bytes.len() as u64 > MAX_SNAPSHOT_FILE_BYTES as u64 {
         return (FileContentSnapshot::TooLarge, 0);
-    }
-    if let Some(budget) = budget {
-        if bytes.len() > budget {
-            return (FileContentSnapshot::TooLarge, 0);
-        }
     }
     let size = bytes.len();
     if bytes.contains(&0) {
