@@ -7267,8 +7267,12 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   padding-left: 0;
   padding-right: 0;
 }
-.stream-tool-row .file-edit-head {
-  padding-right: 2px;
+/* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
+   给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
+.stream-tool-row .file-edit-head,
+.turn-edits-summary .file-edit-head {
+  padding-left: 10px;
+  padding-right: 10px;
 }
 .turn-edits-summary {
   margin: 10px 0 0;

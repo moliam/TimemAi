@@ -151,6 +151,9 @@ describe("file edits surfaces", () => {
     // 用户反馈：一行文件摘要外面不要边框，只留底色。
     expect(panel).toContain("border: 0;");
     expect(panel).toContain("background:");
+    // 用户反馈：文件名行的「修改」贴到卡片最左边了。面板左右内边距归零换取与正文
+    // 同宽后，头部行自己内缩（diff 行仍铺满），两个容器都要遵守。
+    expect(styles).toMatch(/\.stream-tool-row \.file-edit-head,\s*\.turn-edits-summary \.file-edit-head \{\s*padding-left: 10px;\s*padding-right: 10px;/);
     const lightPanelStart = styles.indexOf(':root[data-theme="light"] .file-edits-panel {');
     const lightPanel = styles.slice(lightPanelStart, styles.indexOf("}", lightPanelStart) + 1);
     expect(lightPanel).not.toContain("border");
