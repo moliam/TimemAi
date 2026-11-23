@@ -260,6 +260,21 @@ describe("file edits components render server-side", () => {
     expect(multi).toMatch(/file-edit-index">2</);
   });
 
+  it("renders the diff copy control as an icon with an accessible label", () => {
+    // 用户反馈：把文字「复制差异」换成小图标，diff 行头保持单行紧凑。
+    const html = renderToString(createElement(FileEditsPanel, {
+      edits: [{ ...validEntry, path: "f.txt" }],
+    }));
+    const start = html.indexOf('class="file-edit-copy');
+    expect(start).toBeGreaterThan(-1);
+    const control = html.slice(start, html.indexOf("</span>", start));
+    expect(control).toContain('aria-label="复制差异"');
+    expect(control).toContain("<svg");
+    expect(control).not.toContain("复制差异<");
+    expect(styles).toMatch(/\.file-edit-copy \{[^}]*width: 18px;[^}]*height: 18px;/s);
+    expect(styles).not.toMatch(/\.file-edit-copy \{[^}]*font-size:/s);
+  });
+
   it("shows unchanged row line numbers once instead of one per side", () => {
     const diff = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n mid\n+new\n";
     const html = renderToString(createElement(FileEditsPanel, {

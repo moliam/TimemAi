@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, PenLine } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, PenLine, X } from "lucide-react";
 import { useTimedClipboardCopy } from "./clipboard_copy";
 import { useBetaPreference } from "./beta_preferences";
 import { t } from "./i18n";
@@ -217,7 +217,7 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
   const autoCollapse = useBetaPreference("autoCollapse");
   const [expanded, setExpanded] = useState(() => !!edit.diff && !autoCollapse);
   const sectionRef = useRef<HTMLDivElement | null>(null);
-  const { copy, copyLabel, copyClass } = useTimedClipboardCopy(edit.diff ?? "", {
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(edit.diff ?? "", {
     idle: t("tools.copyDiff"),
     copied: t("tools.diffCopied"),
     failed: t("tools.copyFailed"),
@@ -287,7 +287,13 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
               void copy();
             }}
           >
-            {copyLabel}
+            {/* Icon-only control: the label stays in aria-label/title so the
+                diff header keeps its one-line row height. */}
+            {copyState === "copied"
+              ? <Check size={12} aria-hidden="true" />
+              : copyState === "failed"
+                ? <X size={12} aria-hidden="true" />
+                : <Copy size={12} aria-hidden="true" />}
           </span>
         )}
         {expandable && (

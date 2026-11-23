@@ -7323,14 +7323,18 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-additions { color: #7fd6a4; }
 .file-edit-deletions { color: #e59a94; }
+/* 用户反馈：复制差异用图标表示，不再占用文字宽度，diff 行保持单行紧凑。 */
 .file-edit-copy {
   flex: none;
-  padding: 1px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
   color: #98afbc;
-  font-size: 11px;
-  line-height: 15px;
   cursor: pointer;
   user-select: none;
 }
