@@ -2072,6 +2072,9 @@ body {
 .model-retry-status.response-timeout summary { border-color: #765d3b; background: #32291d; color: #e2ba70; }
 .model-retry-status.rate-limited summary { border-color: #725848; background: #32251f; color: #e5aa87; }
 .model-retry-status.service-error summary { border-color: #704b50; background: #302124; color: #e4a0a8; }
+/* 用户反馈：胶囊贴在输入框上方时，向下展开会被输入框挡住且页面滚不上来；
+   空间不足时向上展开（.is-above），高度按上方余量收缩。 */
+.model-retry-status.is-above .model-retry-detail { top: auto; bottom: calc(100% + 7px); }
 .model-retry-detail { position: absolute; z-index: 8; top: calc(100% + 7px); right: 0; width: min(420px, calc(100vw - 48px)); max-height: 240px; overflow: auto; border: 1px solid #4a4a4a; border-radius: 8px; padding: 10px 12px; background: #242424; box-shadow: 0 12px 30px #0008; color: #d0d0d0; font-size: 11px; line-height: 1.5; }
 .model-retry-detail p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .model-retry-detail p:last-child { margin-bottom: 0; }

@@ -13388,8 +13388,51 @@ function StreamProcess({ closing, onArchived, hostId, children }: {
 
 function ModelRetryStatusPill({ status }: { status: ActiveModelRetryStatus }) {
   useT();
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  // 用户反馈：贴底的错误胶囊向下展开会被输入框和阅读区一起裁掉——面板是绝对定位，
+  // 不进入滚动高度，所以页面也滚不上来看不全。展开时量一下上下余量，下面不够就
+  // 反向向上展开，并把高度收进剩余空间。
+  const placeDetail = useCallback(() => {
+    const node = detailsRef.current;
+    if (!node) return;
+    const detail = node.querySelector<HTMLElement>(".model-retry-detail");
+    node.classList.remove("is-above");
+    if (detail) detail.style.maxHeight = "";
+    if (!node.open || !detail) return;
+    const chat = node.closest<HTMLElement>(".chat-scroll");
+    const view = (chat ?? document.documentElement).getBoundingClientRect();
+    const box = node.getBoundingClientRect();
+    const gap = 12;
+    const above = Math.max(0, box.top - view.top - gap);
+    const below = Math.max(0, view.bottom - box.bottom - gap);
+    const needed = Math.min(detail.scrollHeight || 240, 240);
+    if (below >= needed || below >= above) return;
+    node.classList.add("is-above");
+    detail.style.maxHeight = `${Math.round(Math.max(96, Math.min(240, above)))}px`;
+  }, []);
+  useEffect(() => {
+    const node = detailsRef.current;
+    const chat = node?.closest<HTMLElement>(".chat-scroll");
+    if (!chat) return;
+    let frame = 0;
+    const onViewportChange = () => {
+      if (!node?.open || frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; placeDetail(); });
+    };
+    chat.addEventListener("scroll", onViewportChange, { passive: true });
+    window.addEventListener("resize", onViewportChange);
+    return () => {
+      cancelAnimationFrame(frame);
+      chat.removeEventListener("scroll", onViewportChange);
+      window.removeEventListener("resize", onViewportChange);
+    };
+  }, [placeDetail]);
   return (
-    <details className={`model-retry-status ${status.kind}`}>
+    <details
+      ref={detailsRef}
+      className={`model-retry-status ${status.kind}`}
+      onToggle={placeDetail}
+    >
       <summary
         title={t("retry.detailExpand", { name: status.label })}
         aria-label={t("retry.detailExpand", { name: status.label })}

@@ -1237,3 +1237,11 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 根因：`.thread-memo-text` 写死了 `font-size: 11.5px` 与 `color: #c9d5d8`，而 `:root[data-theme="light"]` 只覆盖了气泡底色与标题色——浅色主题下白底 + 浅灰正文，对比度只有约 1.5:1，几乎读不出来。
 - 修法：正文改用 agent 聊天区同一套排版变量——`font-family: var(--agent-other-font), var(--agent-chinese-font)`、`font-weight: var(--agent-font-weight)`、`font-size: var(--content-size)`、`line-height: 1.68`（与 `.turn-final-delivery > .message-content` 一致）；深色文字改 `#dce6ea`，并补 `:root[data-theme="light"] .thread-memo-text { color: #2f3d38; }`。对比度：深色 12:1、浅色 11:1。
 - 测试看护：`thread_working_indicator.test.ts` 新增用例断言正文的四项排版变量、深色文字与浅色主题覆盖。验证：该文件 5 过。
+
+## 2026-11-23 模型重试错误胶囊：下方空间不足时向上展开
+
+- 用户反馈：模型响应出错后出现的错误胶囊贴在输入框上方，向下展开的详情被输入框和阅读区挡住，页面也滚不上去，看不全内容。
+- 根因：`.model-retry-detail` 是 `position: absolute; top: calc(100% + 7px)`，固定向下展开；它不进入滚动高度，又被 `.chat-scroll`（`overflow-y: auto`）裁切，所以既看不全也滚不动。
+- 修法：`ModelRetryStatusPill` 在 `toggle` 时量剩余空间——`above` = 胶囊顶到阅读区顶，`below` = 胶囊底到阅读区底；`below < 面板需要高度` 且 `below < above` 时加 `.is-above`，CSS 改为 `top: auto; bottom: calc(100% + 7px)` 向上展开，并把面板 `max-height` 收进上方余量（至少 96px、至多 240px，超出仍可内部滚动）。打开状态下监听阅读区滚动与窗口缩放，用 rAF 重新判定，避免胶囊滚到底部后仍向下展开。
+- 语义边界：只在空间不足时翻转；向下放得下时保持原行为，胶囊在回合标题处仍向下展开。
+- 测试看护：新增 `model_retry_status.test.ts` 两例（空间测量与 `.is-above` 契约、剩余空间高度与滚动重判）。验证：web `pnpm test` 1069（84 文件）、tsc 过。
