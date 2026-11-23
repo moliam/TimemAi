@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "kind": "timem.provider_model_catalog",
-  "revision": 2,
+  "revision": 3,
   "activation": "runtime_supported",
   "coverage": "specified_model_pages_only",
   "models": [
@@ -435,6 +435,163 @@
         "source_refs": [
           "glm-5.3-flash",
           "thinking",
+          "chat-api"
+        ]
+      }
+    },
+    {
+      "id": "z-glm5.4",
+      "revision": 1,
+      "provider_id": "zhipu",
+      "model_id": "glm-5.4",
+      "label": "z-glm5.4",
+      "connection": {
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            },
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-compatible",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "glm-5.4",
+            "chat-api",
+            "responses-api"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "glm-5.4"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "max",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "high",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "glm-5.4",
+            "chat-api"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "zhipu_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "glm-5.4",
+            "responses-api"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "default_base_url": "https://open.bigmodel.cn/api/v1",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "glm-5.4",
+          "glm-5.4-thinking"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "glm-5.4"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1000000,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "glm-5.4",
           "chat-api"
         ]
       }

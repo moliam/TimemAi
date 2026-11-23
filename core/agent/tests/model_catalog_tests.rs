@@ -2,7 +2,7 @@ use agent_core::model_catalog::{models, parse, validate, ReasoningAdapter};
 
 #[test]
 fn catalog_defaults_and_protocol_constraints_are_admissible() {
-    assert_eq!(models().len(), 24);
+    assert_eq!(models().len(), 25);
     for m in models() {
         for p in &m.protocols {
             let effort = p.fixed_effort.as_deref().unwrap_or(&m.default_effort);
@@ -90,7 +90,7 @@ fn external_catalog_rejects_unknown_fields_handlers_and_duplicate_identity() {
     assert!(parse(&bad.to_string()).is_err());
     let dir = FixtureDir::new();
     std::fs::write(dir.path().join("future.json"), fixture.to_string()).unwrap();
-    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 25);
+    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 26);
     let mut duplicate = fixture;
     duplicate["models"][0]["id"] = serde_json::json!("fixture/different-id");
     std::fs::write(dir.path().join("duplicate.json"), duplicate.to_string()).unwrap();
@@ -106,7 +106,7 @@ fn external_catalog_json_only_extension_reaches_payload_in_fresh_process() {
         use agent_core::model_api::{build_model_request_with_reasoning, StructuredOutputHint};
         use agent_core::{ApiProtocol, ModelServiceConfig};
         agent_core::model_catalog::ensure_loaded().unwrap();
-        assert_eq!(models().len(), 26);
+        assert_eq!(models().len(), 27);
         for provider in ["openai", "zhipu"] {
             let model = models()
                 .iter()
@@ -323,6 +323,16 @@ fn catalog_exposes_documented_input_modalities() {
         .find(|m| m.id == "z-glm5.3-flash")
         .expect("zhipu glm-5.3-flash catalog entry");
     assert!(multimodal.input_modalities.contains(&"image".to_string()));
+    // glm-5.4 ships no official model page yet; the Coding Plan guide documents
+    // image support, so it must not be projected as text-only.
+    let glm54 = models()
+        .iter()
+        .find(|m| m.id == "z-glm5.4")
+        .expect("zhipu glm-5.4 catalog entry");
+    assert_eq!(
+        glm54.input_modalities,
+        vec!["text".to_string(), "image".to_string()]
+    );
     assert!(models()
         .iter()
         .find(|m| m.id == "openai/gpt-5.5")

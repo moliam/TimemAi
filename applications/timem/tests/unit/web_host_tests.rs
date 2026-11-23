@@ -19753,7 +19753,7 @@ fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
     let root = std::env::temp_dir().join(unique_web_id("zhipu_catalog"));
     std::fs::create_dir_all(&root).unwrap();
     let mut endpoints = Vec::new();
-    for suffix in ["5.2", "5.3", "5.3-flash"] {
+    for suffix in ["5.2", "5.3", "5.3-flash", "5.4"] {
         let value = json!({"name":format!("z-glm{suffix}"),"catalog_id":format!("z-glm{suffix}"),
             "model":format!("glm-{suffix}"),"api_protocol":"openai-compatible","response_protocol":"xml",
             "base_url":"https://open.bigmodel.cn/api/paas/v4","max_llm_input_tokens":200000,
@@ -19773,7 +19773,7 @@ fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
         );
         let mut switched = input.clone();
         switched.api_protocol = "openai-responses".into();
-        if suffix == "5.3" {
+        if suffix.ends_with("5.3") || suffix == "5.4" {
             switched.base_url = "https://open.bigmodel.cn/api/v1".into();
             let admitted = normalize_model_endpoint_input(None, switched.clone()).unwrap();
             assert_eq!(admitted.api_protocol, "openai-responses");
@@ -22332,6 +22332,14 @@ fn web_snapshot_serializes_documented_input_modalities_for_every_catalog_model()
     assert_eq!(
         flash["input_modalities"],
         serde_json::json!(["text", "image", "video", "file"])
+    );
+    let latest = catalog
+        .iter()
+        .find(|m| m["id"] == "z-glm5.4")
+        .expect("z-glm5.4 entry");
+    assert_eq!(
+        latest["input_modalities"],
+        serde_json::json!(["text", "image"])
     );
 }
 

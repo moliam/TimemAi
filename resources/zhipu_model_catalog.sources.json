@@ -51,6 +51,16 @@
       "sha256": "086f41abd81487d8323ce13dbd8ed7a28102c00da18364159645f02dfb190f77",
       "excerpt": "Response API 的基址是 `https://open.bigmodel.cn/api/v1`，不是对话补全使用的 `https://open.bigmodel.cn/api/paas/v4`。请求超时为 7200 秒。\n\ncurl https://open.bigmodel.cn/api/v1/responses \\\n\"model\": \"glm-5.3\",\n\n`effort` 默认 `max`。传入 `none` / `minimal` 会放弃思考；`low` / `medium` 映射为 `high`；`xhigh` 映射为 `max`。\n\n| model | string | 必填 | 模型编码，例如 `glm-5.3` |\n| max\\_output\\_tokens | integer | 65536 | 最大输出 tokens（含思维链），上限 131072 |\n| reasoning.effort | string | max | 思考工作量 |",
       "retrieved_at": "2026-10-03T15:25:13.772402+00:00"
+    },
+    "glm-5.4": {
+      "url": "https://docs.bigmodel.cn/cn/coding-plan/latest-model.md",
+      "sha256": "8b3ed22810cecfdd1b007e02d8bd78c3faeeb5aeab6e8824fc956e6e13bf0554",
+      "excerpt": "当前，GLM Coding Plan 已面向全量用户（Max & Pro & Lite）支持最新的 GLM-5.4 模型，可以在您常用的 Coding Agent 中切换使用。\n\n注意开启 GLM 1M 上下文需要模型后缀加上 `[1m]` ，即 `glm-5.4[1m]`, 同时配置压缩窗口大小参数 `\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"1000000\"`\n\n在 Claude Code 会话中，输入 `/effort` 命令即可切换思考强度，默认 max 档。\n\n| reasoning\\_effort 为 minimal、light、low | low | 自动转换 |\n| reasoning\\_effort 为 medium、high | high | 自动转换 |\n| reasoning\\_effort 为 xhigh、max、ultra | max | 自动转换 |\n\n* **模型**：选择\"使用自定义\"，并输入模型名称（如：`glm-5.4` 或 `glm-5.3-flash` ）\n* GLM-5.4 与 GLM-5.3-FLASH 均为多模态模型，支持勾选 **Support Images**\n* 调整 **Context Window Size** 为 `1000000`"
+    },
+    "glm-5.4-thinking": {
+      "url": "https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode.md",
+      "sha256": "3050ffdbf83b2c21b662dbb881d4e0dc81a1d3a9af02c7e4d32a685476f4e1c0",
+      "excerpt": "该能力在 Coding Plan 端点默认开启；标准 API 端点自 `GLM-5.4` 起默认开启，旧模型默认关闭。对于默认关闭的模型，如果您想在您的产品中开启保留式思考（该能力主要推荐 Coding / Agent 场景使用），您可以通过「\"clear_thinking\": False」在 API 端点中开启，并需要将完整、未修改的 reasoning content 传回 API。所有连续的 reasoning content 必须与模型在原始请求期间生成的序列完全一致，不要重新排序或修改这些 content，否则会降低效果并影响缓存命中。"
     }
   }
 }

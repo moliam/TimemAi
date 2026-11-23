@@ -15,13 +15,30 @@ z-glm5.3 另提供官方 Responses 协议入口：独立基址 `https://open.big
 | z-glm5.2 | glm-5.2 | Chat | none / high / max | max |
 | z-glm5.3 | glm-5.3 | Chat + Responses | low / high / max | max |
 | z-glm5.3-flash | glm-5.3-flash | Chat | low / high / max | max |
+| z-glm5.4 | glm-5.4 | Chat + Responses | low / high / max | max |
 
-模板只列原生强度档位，不列 5.2 的兼容别名。5.3 系列不允许关闭思考。
+模板只列原生强度档位，不列 5.2 的兼容别名。5.3/5.4 系列不允许关闭思考。
+
+z-glm5.4 的官方**标准 API 模型页尚未发布**（2026-11-23 抓取时
+`/cn/guide/models/text/glm-5.4.md` 仍为 404，模型总览表与发布记录也未收录），
+因此它的目录事实来自两处较弱但可追溯的证据，并由本地实测补齐行为面：
+
+- 文档：`/cn/coding-plan/latest-model.md` 与 `/cn/coding-plan/faq` 说明 GLM-5.4 已对全部套餐开放、
+  1M 上下文开关为 `glm-5.4[1m]` 后缀、Context Window Size 填 `1000000`、思考强度默认 `max`、
+  工具传入值 `low/high/max` 分别映射到三档，且 GLM-5.4 与 GLM-5.3-FLASH 均为多模态模型（可勾选图片）。
+- 实测（普通 API，`/models` 已列出 `glm-5.4`）：普通聊天、流式、`tool_choice: required`、
+  图片输入、`/api/v1/responses` 均返回 200；`max_tokens` 越界报错明确给出 `[1, 131072]`；
+  `glm-5.4[1m]` 在标准 API 返回 1211（模型不存在），后缀只属于 Coding Plan 网关，不属于本模板。
+
+结论落到目录：窗口 1,000,000、输出上限 131,072、`input_modalities=[text, image]`、
+档位 `low/high/max` 默认 `max`、`required_tool_choice=true`。两个 profile 的 `binding_status`
+保持 `pending_api_reference_review`——官方模型页/API 参考发布后必须复核，不能沿用 5.3 的已审核状态。
+
 上下文窗口按文档为 1,000,000；输出上限按 API schema 为 131,072。
 独立最大输入上限未明确公布，因此资源中为 null；配置检查仍要求输入预算与输出预算之和不超过窗口。
 这不是最终请求的精确 tokenizer 校验，也不代表百万 token 输入已实测。
 
-本实现不声明 Anthropic 接口兼容；Responses 协议仅对目录声明的 z-glm5.3 开放，5.2 与 Flash 未提供该入口。
+本实现不声明 Anthropic 接口兼容；Responses 协议仅对目录声明的 z-glm5.3 / z-glm5.4 开放，5.2 与 Flash 未提供该入口。
 不声明 Timem 获得 Coding Plan 使用资格。
 Coding Plan 的工具白名单、账户与计费限制独立于普通 API 协议适配。
 Flash 的文档能力包含图片、视频与文件，但目录中的文档事实不等于 Timem 已实现全部输入格式。
@@ -34,6 +51,8 @@ Flash 的文档能力包含图片、视频与文件，但目录中的文档事�
 - Chat 请求发送 `thinking.type`、`reasoning_effort`；移除通用兼容层的 `enable_thinking` 和 `stream_options`。
 - Responses（z-glm5.3）使用标准 `reasoning.effort` 体字段绑定，请求不携带 `thinking`、`reasoning_effort` 或 `enable_thinking`；`reasoning_content` 的原样保存与回传是 Chat 协议行为，Responses 不适用。
 - 使用 `thinking.clear_thinking: true`。不启用跨 turn Preserved Thinking，因为上下文压缩可能删除历史。
+  官方 `thinking-mode` 文档说明标准 API 自 GLM-5.4 起默认开启保留式思考，因此 5.4 必须显式
+  `clear_thinking: true` 才能维持 Timem 的语义（不把不透明推理内容跨 turn 保留）。
 - 当前工具往返中的 `reasoning_content` 原样保存，挂在首个 NativeToolCall 的可选 assistant continuation 元数据中，重建 assistant message 时回传一次。它不属于工具参数、可见正文或流式正文预览。
 - 元数据记录能力描述 ID 与模型 ID，切换模型身份后不回传；仅修改模板建议来源不改变模型身份。旧记录缺少该字段时按 None 读取，不改写原记录。
 - 推理续接内容上限为 4 MiB，超限明确报错，不静默截断；上下文估算包含续接内容。压缩后的 scratch 摘录保留公共工具语义，不把推理内容变成公共正文。
@@ -48,9 +67,12 @@ Flash 的文档能力包含图片、视频与文件，但目录中的文档事�
 
 `resources/zhipu_model_catalog.sources.json` 保存官方页面 URL、抓取时间、页面 SHA-256 与相关摘录。
 SHA-256 标识当次完整页面；仓库只保留摘录，离线校验不冒充重新验证远端全文。
-运行时集成状态为 `runtime_supported`；官方文档审核状态独立保留。外部新模型可按 `docs/provider-model-descriptor.md` 部署，但仅能引用已实现适配器。
+运行时集成状态为 `runtime_supported`；官方文档审核状态独立保留。
+`glm-5.4` 与 `glm-5.4-thinking` 两个来源条目为 2026-11-23 抓取（前者是 Coding Plan 切换指南，
+后者是思考模式页的保留式思考段落）；更早条目沿用 2026-10-01 快照，本次未重抓。
+官方发布 glm-5.4 模型页后，应按新页面重抓该批来源、复核 `binding_status`，再同步本文件。外部新模型可按 `docs/provider-model-descriptor.md` 部署，但仅能引用已实现适配器。
 
-- `python3 scripts/validate_zhipu_model_catalog.py`：schema、三个模板、Chat/Responses profile 及来源引用检查。
+- `python3 scripts/validate_zhipu_model_catalog.py`：schema、四个模板、Chat/Responses profile、5.4 模态/上限/pending 状态及来源引用检查。
 - `cargo test -p agent_core --lib zhipu`：请求约束、JSON/SSE 解析、旧字段兼容、跨模型隔离、容量拒绝、真实本地 HTTP 双请求工具往返。
 - `cargo test -p timem zhipu_catalog`：宿主准入与磁盘保存/重读。
 - `TIMEM_CATALOG_TEST_URL=<独立临时宿主> node interfaces/web/tests/browser/catalog-endpoint-e2e.mjs`：真实浏览器模板列表、地址、预算直接输入、无微调、保存重读、窄屏。

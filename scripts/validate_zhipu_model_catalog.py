@@ -1,4 +1,4 @@
-"""Offline contract checks for the three implemented Zhipu Chat templates."""
+"""Offline contract checks for the four implemented Zhipu Chat templates."""
 import copy
 import json
 from pathlib import Path
@@ -10,13 +10,18 @@ EXPECTED = {
     "z-glm5.2": ("glm-5.2", ["none", "high", "max"], ["openai-compatible"]),
     "z-glm5.3": ("glm-5.3", ["low", "high", "max"], ["openai-compatible", "openai-responses"]),
     "z-glm5.3-flash": ("glm-5.3-flash", ["low", "high", "max"], ["openai-compatible"]),
+    "z-glm5.4": (
+        "glm-5.4",
+        ["low", "high", "max"],
+        ["openai-compatible", "openai-responses"],
+    ),
 }
 
 
 def validate(catalog, sources):
     schema = json.loads((ROOT / "resources/provider_model_catalog.schema.json").read_text())
     Draft202012Validator(schema).validate(catalog)
-    assert len(catalog["models"]) == 3
+    assert len(catalog["models"]) == 4
     assert {m["id"] for m in catalog["models"]} == set(EXPECTED)
     for m in catalog["models"]:
         model, efforts, protocols = EXPECTED[m["id"]]
@@ -38,7 +43,10 @@ def validate(catalog, sources):
             assert r["default_base_url"] == "https://open.bigmodel.cn/api/v1"
             assert r["bindings"] == [{"dimension": "reasoning.effort", "handler": "enum_body_field", "path": "/reasoning/effort"}]
             assert r["function_calling"] == "supported"
-            assert r["binding_status"] == "api_reference_reviewed"
+            assert r["binding_status"] in {
+                "api_reference_reviewed",
+                "pending_api_reference_review",
+            }
             assert "responses-api" in r["source_refs"]
         assert m["limits"]["context_window_tokens"] == 1000000
         assert m["limits"]["max_input_tokens"] is None
@@ -54,6 +62,18 @@ def validate(catalog, sources):
         elif isinstance(value, list):
             for child in value:
                 check_refs(child)
+    by_id = {m["id"]: m for m in catalog["models"]}
+    # glm-5.4 has no official model page yet: only the Coding Plan guide documents
+    # its window, thinking levels and image support, and nothing documents the
+    # required-tool-choice wire behaviour as "reviewed". Keep it reviewed=false
+    # (pending) until the model page ships instead of borrowing 5.3's status.
+    glm54 = by_id["z-glm5.4"]
+    assert [p["binding_status"] for p in glm54["profiles"]] == ["pending_api_reference_review"] * 2
+    assert glm54["documented_facts"]["input_modalities"] == ["text", "image"]
+    assert by_id["z-glm5.3"]["documented_facts"]["input_modalities"] == ["text"]
+    assert glm54["limits"]["context_window_tokens"] == 1000000
+    assert glm54["limits"]["max_output_tokens"] == 131072
+
     check_refs(catalog)
     for source in sources["sources"].values():
         assert urlparse(source["url"]).hostname == "docs.bigmodel.cn"
@@ -80,4 +100,4 @@ if __name__ == "__main__":
             pass
         else:
             raise AssertionError("invalid identity was accepted")
-    print("PASS: Zhipu schema, three template contracts, Chat+Responses profiles, evidence references, negative identity checks")
+    print("PASS: Zhipu schema, four template contracts, Chat+Responses profiles, evidence references, negative identity checks")

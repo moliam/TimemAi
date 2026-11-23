@@ -1143,3 +1143,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 验收稳定性加固：stop-ui 在首个 evaluate 前等待应用外壳与初始 WS 连接（about:blank 无 localStorage 会抛 SecurityError）；classic 模式 pin 的 reload 使连接基线确定为 2，后续断线守护断言以该基线比较；Page.reload 后等待 composer 再输入。resource-caps 导航改为「管控 / Governance」。
 - 悬浮徽章验收改为真实几何契约：量按钮整体（非内部 + 号芯片），断言按钮右缘贴组右、视觉底缘=锚线上移一个自身高度（translateY(-100%)）、折叠组零占位、完全位于运行行上方。旧「与运行行同行左对齐」断言对应已废弃的行内布局。
 - 测试看护：web 单测 1029 过（新增/更新：命令 5 行截断与收纳单行契约、head `…` hint、diff 序号标注与样式、diff 无框无虚线契约、预览自动展开 `previewVisible`/无标签/行内图标徽章、i18n「结果」同步）；真 Chrome `test:browser` 11 个脚本全绿（acceptance 跑两次：默认与 CPU bench/perf guard）；tsc 过；dist 已重建提交。
+
+## 2026-11-23 GLM-5.4 模板（官方模型页未发布期）纳入内置目录
+
+- 触发背景：智谱普通 API 的 `/models` 已列出 `glm-5.4` 且可正常调用，但官方**标准 API 模型页尚未发布**（`/cn/guide/models/text/glm-5.4.md` 404，`llms.txt`、模型总览表、发布记录均未收录），产品侧无法从模板里选到该模型。
+- 证据分层：文档证据取 `/cn/coding-plan/latest-model.md`（全部套餐支持 5.4、1M 上下文以 `glm-5.4[1m]` 为开关、Context Window Size `1000000`、思考强度默认 `max` 与 `low/high/max` 映射、多模态可勾选图片）与思考模式页（标准 API 自 5.4 起默认开启保留式思考）；行为证据取实测（普通/流式/`tool_choice: required`/图片输入/`/api/v1/responses` 均 200，`max_tokens` 越界报错给出 `[1, 131072]`，`glm-5.4[1m]` 在标准 API 返回 1211）。
+- 目录落点：新增 `z-glm5.4`（Chat + Responses，档位 `low/high/max` 默认 `max`，窗口 1,000,000、输出 131,072、`input_modalities=[text, image]`、`required_tool_choice=true`），目录 revision 2→3；两个 profile 的 `binding_status` 保持 `pending_api_reference_review`，不借用 5.3 的已审核状态。
+- 未猜的字段：`max_input_tokens` 仍为 null（官方未公布独立输入上限）；未新增关闭思考档；未提供 `glm-5.4-flash`（`/models` 无此 ID）。
+- 测试看护：`validate_zhipu_model_catalog.py` 断言四个模板 + 5.4 的模态/上限/pending 状态；`model_catalog_tests.rs` 目录计数 24→25 并断言 5.4 模态；`web_host_tests.rs` 断言宿主快照投影 `["text","image"]`；接入点验收矩阵 `cargo test -p agent_core --lib endpoint_acceptance` 数据驱动自动覆盖 5.4 两个 profile 的全部场景。验证：validator PASS、model_catalog_tests 15 过、endpoint_acceptance 过、`cargo test -p timem --lib -- server::tests` 457 过、embedded_assets 过、module_boundary/test_contract/fmt/`git diff --check` 过。
+- 后续：官方 5.4 模型页发布后重抓 `glm-5.4` 来源、复核 `binding_status` 与上限数字。
