@@ -154,35 +154,36 @@ describe("file edits surfaces", () => {
     const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
     expect(section).not.toContain("border:");
     expect(section).not.toContain("background:");
-    // 用户反馈：新建 / 修改 / 删除改成不同颜色的无框底色胶囊、白色文字；
-    // 新建取蓝色、修改取 diff 里 + 行的绿（同色相压深），删除保持深红。
+    // 用户反馈：新建 / 修改 / 删除用不同颜色的无框胶囊；底色要浅，别压得那么重。
+    // 淡底 + 同色系浅字（对比度 7:1 上下）：新建蓝、修改取 diff 里 + 行的绿、删除红。
     const opStart = styles.indexOf(".file-edit-op {");
     const op = styles.slice(opStart, styles.indexOf("}", opStart) + 1);
     expect(op).toContain("border: 0;");
     expect(op).toContain("border-radius: 999px;");
     expect(op).toContain("padding: 0 7px;");
-    expect(op).toContain("color: #fff;");
+    // 不再是白字实底：底色浅了以后白字会读不清，文字色改由各 op 自己声明。
+    expect(op).not.toContain("color: #fff");
     expect(op).not.toContain("border: 1px");
-    for (const [name, tint] of [
-      ["created", "#1d64a0"],
-      ["modified", "#2b7d52"],
-      ["deleted", "#93261f"],
+    for (const [name, tint, ink] of [
+      ["created", "rgba(56, 132, 208, 0.20)", "#8ec4ef"],
+      ["modified", "rgba(64, 180, 120, 0.18)", "#8fdcac"],
+      ["deleted", "rgba(214, 92, 84, 0.20)", "#f0a49d"],
     ] as const) {
       const start = styles.indexOf(`.file-edit-op-${name} {`);
       const block = styles.slice(start, styles.indexOf("}", start) + 1);
       expect(block).toContain(`background: ${tint};`);
-      // 白字由基础规则统一提供，单个 op 不再覆盖文字色。
-      expect(block).not.toContain("color:");
+      expect(block).toContain(`color: ${ink};`);
     }
-    // 明色主题：同一套实底稍作提深，仍是白字、仍无边框。
-    for (const [name, tint] of [
-      ["created", "#17568c"],
-      ["modified", "#1a6b45"],
-      ["deleted", "#8f231d"],
+    // 明色主题：同一套淡底再浅一档，文字用同色系深色（对比度 6.2~6.9:1）。
+    for (const [name, tint, ink] of [
+      ["created", "#e6f0fb", "#1b5a92"],
+      ["modified", "#e6f4ec", "#14603f"],
+      ["deleted", "#fce9e7", "#96271f"],
     ] as const) {
       const start = styles.indexOf(`:root[data-theme="light"] .file-edit-op-${name} {`);
       const block = styles.slice(start, styles.indexOf("}", start) + 1);
       expect(block).toContain(`background: ${tint};`);
+      expect(block).toContain(`color: ${ink};`);
       expect(block).not.toContain("border");
     }
     const diffStart = styles.indexOf(".file-edit-diff {");

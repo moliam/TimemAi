@@ -7336,27 +7336,26 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-toggle { cursor: pointer; }
 .file-edit-index { flex: none; min-width: 1.2em; text-align: right; font-size: 11px; color: #7f929e; font-variant-numeric: tabular-nums; }
-/* 用户反馈：新建/修改/删除用不同颜色的无框底色胶囊、白色文字。三色改用实底
-   而不是浅底：青绿 / 琥珀 / 深红既换色相也换明度，色弱模拟下仍能互相区分。 */
+/* 用户反馈：新建/修改/删除用不同颜色的无框底色胶囊；底色要浅，不要压得那么重。
+   三色统一为「同色相淡底 + 同色系浅字」，靠色相区分，明度也不再压到底。 */
 .file-edit-op {
   flex: none;
   padding: 0 7px;
   border: 0;
   border-radius: 999px;
-  background: #3f4f58;
-  color: #fff;
+  background: rgba(148, 163, 173, 0.16);
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
   letter-spacing: 0.2px;
 }
-/* 用户反馈：新建用蓝色，修改用 diff 框里 + 行的绿。两者都取同色相压深的
-   实底，保证白字对比度（新建 6.2:1、修改 5.1:1）与色弱可分。 */
-.file-edit-op-created { background: #1d64a0; }
-.file-edit-op-modified { background: #2b7d52; }
-.file-edit-op-deleted { background: #93261f; }
+/* 用户反馈：新建用蓝色，修改沿用 diff 框里 + 行的绿；底色再浅一档。
+   淡底 + 同色系文字，对比度 7:1 上下（浅色主题 6.2~6.9:1）。 */
+.file-edit-op-created { background: rgba(56, 132, 208, 0.20); color: #8ec4ef; }
+.file-edit-op-modified { background: rgba(64, 180, 120, 0.18); color: #8fdcac; }
+.file-edit-op-deleted { background: rgba(214, 92, 84, 0.20); color: #f0a49d; }
 .file-edit-op-unchanged,
-.file-edit-op-skipped { background: #47585f; }
+.file-edit-op-skipped { background: rgba(148, 163, 173, 0.16); }
 .file-edit-path {
   display: inline-flex;
   align-items: baseline;
@@ -7475,11 +7474,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edits-panel {
   background: rgba(20, 40, 50, 0.02);
 }
-:root[data-theme="light"] .file-edit-op-created { background: #17568c; }
-:root[data-theme="light"] .file-edit-op-modified { background: #1a6b45; }
-:root[data-theme="light"] .file-edit-op-deleted { background: #8f231d; }
+:root[data-theme="light"] .file-edit-op-created { background: #e6f0fb; color: #1b5a92; }
+:root[data-theme="light"] .file-edit-op-modified { background: #e6f4ec; color: #14603f; }
+:root[data-theme="light"] .file-edit-op-deleted { background: #fce9e7; color: #96271f; }
 :root[data-theme="light"] .file-edit-op-unchanged,
-:root[data-theme="light"] .file-edit-op-skipped { background: #5a6b75; }
+:root[data-theme="light"] .file-edit-op-skipped { background: rgba(20, 40, 50, 0.07); }
 :root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-index { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-name { color: #24333a; }
