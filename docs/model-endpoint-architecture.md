@@ -57,14 +57,23 @@ input_too_large / content_policy / unknown。类语义固化在 `ModelErrorClass
 permission, billing, subscription, invalid_request, model_not_found, input_too_large,
 content_policy}，不重试也不换端点。
 
-供应商身份只来自接入点显式 `requirements.provider`，缺失时用 `catalog_id` 反查内置目录，
-不按 URL 或模型名猜测。智谱按业务码表（用户区 1000-1321），OpenAI 按符号码表
-（`invalid_api_key`、`insufficient_quota` 归 quota 而非 billing、`rate_limit_exceeded`、
-`context_length_exceeded` 等），DeepSeek 与 Kimi 只发布 HTTP 状态，走状态表（400/422 请求非法、
-401 认证、402 欠费、403 权限、404 模型不存在、408/425/504 超时、413 输入超限、429 限流、
-500/502 服务错误、503 过载）。未声明供应商或未收录码只按状态分类，业务码仍保留在头里供诊断。
-Responses 流失败沿用 `model_responses_stream_failed: class=<class> event_type=... code=...
-message=...`，并从中还原同一套分类。
+错误码表跟着接入点的**模型厂商选择**切换，而不是跟着 URL 或同名模型：解析顺序为
+「厂商业务码 → 厂商状态覆盖 → 公共状态表」。厂商身份取接入点显式
+`requirements.provider`；选「通用 / 未声明」（或 requirements version ≥ 1 且未选厂商）时
+没有任何厂商表，只走公共状态表；只有旧版接入点（requirements version 0）才按 `catalog_id`
+反查内置目录。绝不按 URL 或模型名猜测厂商。
+
+厂商表的语义各自按厂商发布的错误参考定义：智谱按业务码表（1000-1321，含 1113 欠费、
+1220 权限、1261 输入超限、1301 内容策略、1302/1313 限流、1305 过载、1308/1310/1316-1321 额度、
+1309/1311/1314 套餐）；OpenAI 按符号码表（`invalid_api_key`、`insufficient_quota` 归 quota
+而非 billing、`rate_limit_exceeded`、`context_length_exceeded` 等）；Kimi / Kimi Code 把 403
+归为套餐失败（其错误参考里模型调用的 403 全部是「当前订阅不包含该模型 / 当前套餐仅支持到
+256K / 无法确认会员权益」），因此可以换端点重试；Kimi 429 保持限流（同一码还覆盖纯流量与
+引擎过载）；DeepSeek 只发布状态，直接使用公共状态表（400/422 请求非法、401 认证、402 欠费、
+403 权限、404 模型不存在、408/425/504 超时、413 输入超限、429 限流、409/500/502 服务错误、
+503 过载）。未声明厂商或未收录码只按状态分类，业务码仍保留在头里供诊断。Responses 流失败
+沿用 `model_responses_stream_failed: class=<class> event_type=... code=... message=...`，
+并从中还原同一套分类。
 
 消费点：Core 的 `retry_policy` 读取分类决定重试、换端点与限流窗口；Web 的
 `model_service_ui`/`view_model` 按分类给出「欠费 / 套餐 / 额度 / 权限 / 内容策略 / 模型不存在 /

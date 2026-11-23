@@ -2811,3 +2811,44 @@ fn deepseek_chat_sends_thinking_switch_and_effort() {
         crate::model_catalog::validate_request(&off, &body).unwrap();
     }
 }
+
+#[test]
+fn error_table_follows_the_endpoint_vendor_selection() {
+    // The endpoint's model-vendor selection decides which error table answers:
+    // an explicit vendor drives the business-code table, an explicit
+    // "generic / undeclared" vendor keeps only the public status table even when
+    // a catalog template is still bound, and legacy (version 0) endpoints keep
+    // resolving the vendor through the admitted catalog.
+    let _ = crate::model_catalog::ensure_loaded();
+    let body = r#"{"error":{"code":"1113","message":"your balance is insufficient"}}"#;
+
+    let mut selected = zhipu_config("5.3");
+    selected.openai_compatible.requirements.version = 1;
+    selected.openai_compatible.requirements.provider = Some("zhipu".to_string());
+    let error = interpret_model_http_response(&selected, 429, body, "")
+        .result
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "model_http_429[billing,zhipu/1113]: your balance is insufficient"
+    );
+
+    let mut generic = zhipu_config("5.3");
+    generic.openai_compatible.requirements.version = 1;
+    let error = interpret_model_http_response(&generic, 429, body, "")
+        .result
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "model_http_429[rate_limited,1113]: your balance is insufficient"
+    );
+
+    let legacy = zhipu_config("5.3");
+    let error = interpret_model_http_response(&legacy, 429, body, "")
+        .result
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "model_http_429[billing,zhipu/1113]: your balance is insufficient"
+    );
+}

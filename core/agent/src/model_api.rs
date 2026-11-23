@@ -2004,22 +2004,13 @@ pub fn model_http_error_message_for(status: u16, provider: Option<&str>, body: &
     )
 }
 
-/// Provider identity for error-code interpretation. Explicit endpoint
-/// requirements win; otherwise the catalog id resolves through the admitted
-/// catalog. Unknown providers keep the provider-neutral status classes.
+/// Provider identity for error-code interpretation. This is exactly the
+/// endpoint's model-vendor selection: the error table switches with the vendor
+/// the user picked on the endpoint, never with a URL or a same-named model.
+/// Legacy endpoints (requirements version 0) still resolve through the admitted
+/// catalog, matching every other vendor-dependent decision.
 fn model_error_provider(config: &ModelServiceConfig) -> Option<String> {
-    if let Some(provider) = config.openai_compatible.requirements.provider.as_deref() {
-        let provider = provider.trim();
-        if !provider.is_empty() {
-            return Some(provider.to_ascii_lowercase());
-        }
-    }
-    let catalog_id = config.openai_compatible.catalog_id.as_deref()?;
-    crate::model_catalog::ensure_loaded().ok()?;
-    crate::model_catalog::models()
-        .iter()
-        .find(|model| model.id == catalog_id)
-        .map(|model| model.provider.clone())
+    crate::model_requirements::provider(config).map(|provider| provider.to_ascii_lowercase())
 }
 
 /// Business error code carried by the provider body (`{"error":{"code":...}}`).

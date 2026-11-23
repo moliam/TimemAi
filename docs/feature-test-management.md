@@ -1170,3 +1170,11 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 修复：折叠状态新增 `opening`（首次可比捕获）。当轮次边界上该路径原本不存在（净变化为 `created`）时，行数、diff、truncated、size 一律取创建捕获（整文件证据），`capture_count` 仍记录后续被改动次数；路径先存在再重建等其它情形保持原有「保留末态 diff」规则不变。
 - 语义边界：摘要行表达的是「轮次开始到结束」的净变化，因此新建行按创建时的整文件计；轮内后续改动仍逐条出现在各自的动作卡片里，不丢失。
 - 测试看护：`web_host_tests::turn_file_change_summary_folds_net_begin_to_end_change` 新增用例——创建 `added_lines=428` 后再来一次 `+9 −2` 的修改捕获，断言摘要仍为 `created`、`added_lines=428`、`removed_lines=0`、`capture_count=2`、`size_bytes` 取创建时的值、diff 以 `--- /dev/null` 开头；原有「同文件多次修改保留末态、新建后删除不出现、删除后重建算修改、非文本只留大小」断言不变。验证：`cargo test -p timem --lib` 535 过、fmt、`git diff --check` 过。
+
+## 2026-11-23 错误码表跟随接入点的模型厂商选择
+
+- 触发背景（用户口径）：API 响应体里带错误码；若当前接入点的模型厂商有自定义语义表，先按该表解释怎么处理，查不到再回落到公共表。错误码表必须随「模型厂商」下拉的选择切换。
+- 解析顺序：接入点显式 `requirements.provider`（即厂商下拉的选择）→ 厂商业务码表 → 厂商状态覆盖表 → 公共 HTTP 状态表。选「通用 / 未声明」时没有任何厂商表（即使仍绑着目录模板），只走公共表；只有旧版接入点（requirements version 0）按 `catalog_id` 反查目录。绝不按 URL 或模型名猜厂商。
+- 实现落点：`model_api::model_error_provider` 改为复用 `model_requirements::provider`，让「厂商选择决定一切」在鉴权、能力与错误分类三处同源；`model_error` 新增 `VENDOR_STATUS` 厂商状态覆盖表与 `classify_vendor_status`，`classify_http` 按「业务码 → 厂商状态 → 公共状态」求值。
+- 厂商语义：智谱业务码 1000-1321、OpenAI 符号码照旧；Kimi / Kimi Code 把 403 归为套餐失败（其错误参考中模型调用的 403 全部是订阅/套餐不含该模型或上下文档位、无法确认会员权益），因此可换端点；Kimi 429 保持限流（同码还覆盖纯流量与引擎过载，不做过度推断）；DeepSeek 只发布状态，直接使用公共表。
+- 测试看护：`model_error_tests` 新增「厂商表只在该厂商文档覆盖处生效」用例（Kimi 403 套餐、404/429 不变、其它厂商 403 仍为权限、厂商名大小写归一、业务码优先于厂商状态行）；`retry_policy_tests` 新增 Kimi 403 端到端用例（订阅类触发换端点、不可重试；zhipu/openai/deepseek/未声明仍为权限且不换端点）；`model_api_tests` 新增「错误表跟随厂商选择」用例（显式 zhipu 得 `[billing,zhipu/1113]`、显式通用得 `[rate_limited,1113]`、旧版目录回退得 `[billing,zhipu/1113]`）。验证：`cargo test -p agent_core --lib` 1042 过、fmt 过。

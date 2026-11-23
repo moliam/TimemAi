@@ -299,10 +299,43 @@ pub fn classify_stream_code(code: Option<&str>) -> Option<ModelErrorClass> {
         .map(|(_, class)| *class)
 }
 
-/// Class for an HTTP failure: the provider business code wins when it is
-/// documented, otherwise the provider-neutral status class applies.
+/// Vendor status overrides. The table follows the endpoint's declared vendor,
+/// so a status can mean something narrower for one vendor than the generic HTTP
+/// meaning. Only statuses where the vendor's own error reference deviates live
+/// here; everything else keeps the provider-neutral table.
+///
+/// Kimi's model-call 403 entries are all plan/subscription statements
+/// ("Your current subscription does not have access to ...", "Your current plan
+/// supports only ... up to 256K context", "unable to verify your membership
+/// benefits"), so the vendor table classifies 403 as a subscription failure:
+/// switching endpoints can still succeed, while a credential/permission mistake
+/// stays visible in the message. Kimi 429 stays rate_limited: that one code also
+/// covers raw volume and engine overload, so the generic class is the honest
+/// one. DeepSeek publishes statuses only and needs no override.
+const VENDOR_STATUS: &[(&str, &[(u16, ModelErrorClass)])] = &[
+    ("kimi", &[(403, ModelErrorClass::Subscription)]),
+    ("kimi_code", &[(403, ModelErrorClass::Subscription)]),
+];
+
+pub fn classify_vendor_status(provider: Option<&str>, status: u16) -> Option<ModelErrorClass> {
+    let provider = provider?.trim().to_ascii_lowercase();
+    VENDOR_STATUS
+        .iter()
+        .find(|(id, _)| *id == provider)
+        .and_then(|(_, table)| {
+            table
+                .iter()
+                .find(|(code, _)| *code == status)
+                .map(|(_, class)| *class)
+        })
+}
+
+/// Class for an HTTP failure, resolved in the order the endpoint declares:
+/// the vendor business code first, then the vendor status table, then the
+/// provider-neutral status table.
 pub fn classify_http(status: u16, provider: Option<&str>, code: Option<&str>) -> ModelErrorClass {
     code.and_then(|code| classify_provider_code(provider, code))
+        .or_else(|| classify_vendor_status(provider, status))
         .unwrap_or_else(|| classify_status(status))
 }
 

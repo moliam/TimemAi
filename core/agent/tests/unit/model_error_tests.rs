@@ -93,8 +93,8 @@ fn openai_symbolic_codes_and_stream_codes_map_to_classes() {
 
 #[test]
 fn status_only_providers_use_the_provider_neutral_table() {
-    // DeepSeek documents statuses only (400/401/402/408/413/422/429/500/503/504);
-    // Kimi documents the same families (401/403/404/429/5xx).
+    // DeepSeek documents statuses only (400/401/402/408/413/422/429/500/503/504).
+    // Vendors without a status override keep the provider-neutral meaning.
     for (status, class) in [
         (400, ModelErrorClass::InvalidRequest),
         (401, ModelErrorClass::Authentication),
@@ -114,10 +114,53 @@ fn status_only_providers_use_the_provider_neutral_table() {
         (0, ModelErrorClass::Unknown),
         (4290, ModelErrorClass::Unknown),
     ] {
-        for provider in [Some("deepseek"), Some("kimi"), Some("kimi_code"), None] {
+        for provider in [Some("deepseek"), Some("zhipu"), Some("openai"), None] {
             assert_eq!(classify_http(status, provider, None), class, "{status}");
         }
     }
+}
+
+#[test]
+fn vendor_status_table_follows_the_endpoint_vendor_selection() {
+    // Kimi's model-call 403 entries are all plan/subscription statements, so the
+    // Kimi rows carry a vendor-specific class; every other vendor keeps the
+    // generic meaning of 403 (a scoped key or a model permission mistake).
+    for provider in ["kimi", "kimi_code"] {
+        assert_eq!(
+            classify_http(403, Some(provider), None),
+            ModelErrorClass::Subscription,
+            "{provider}"
+        );
+        // Only the documented row is overridden; neighbouring statuses stay generic.
+        assert_eq!(
+            classify_http(404, Some(provider), None),
+            ModelErrorClass::ModelNotFound
+        );
+        assert_eq!(
+            classify_http(429, Some(provider), None),
+            ModelErrorClass::RateLimited
+        );
+        assert_eq!(classify_vendor_status(Some(provider), 500), None);
+    }
+    for provider in ["zhipu", "openai", "deepseek", "acme", ""] {
+        assert_eq!(
+            classify_http(403, Some(provider), None),
+            ModelErrorClass::Permission,
+            "{provider}"
+        );
+    }
+    assert_eq!(classify_http(403, None, None), ModelErrorClass::Permission);
+    assert_eq!(classify_vendor_status(None, 403), None);
+    assert_eq!(
+        classify_vendor_status(Some("KIMI"), 403),
+        Some(ModelErrorClass::Subscription)
+    );
+
+    // A documented business code still wins over the vendor status row.
+    assert_eq!(
+        classify_http(429, Some("zhipu"), Some("1113")),
+        ModelErrorClass::Billing
+    );
 }
 
 #[test]

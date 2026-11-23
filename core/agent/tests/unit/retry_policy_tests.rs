@@ -416,3 +416,35 @@ fn zhipu_body_code_is_classified_end_to_end() {
     );
     assert!(is_retryable_model_system_error(&unconfigured));
 }
+
+#[test]
+fn kimi_plan_rejection_uses_the_vendor_table() {
+    // Kimi documents 403 for plan/subscription denial ("Your current subscription
+    // does not have access to ..."). With the vendor declared, that endpoint can
+    // be skipped for another one; the same status without a vendor stays a
+    // configuration error and is neither retried nor failed over.
+    let body = serde_json::json!({
+        "error": {"message": "Your current subscription does not have access to k3"}
+    });
+    // No business code in the body, so the header carries the class only.
+    let kimi = crate::model_api::model_http_error_message_for(403, Some("kimi"), &body);
+    assert_eq!(
+        kimi,
+        "model_http_403[subscription]: Your current subscription does not have access to k3"
+    );
+    assert!(is_endpoint_unavailable_error(&kimi));
+    assert!(!is_retryable_model_system_error(&kimi));
+
+    let coding_plan = crate::model_api::model_http_error_message_for(403, Some("kimi_code"), &body);
+    assert!(coding_plan.starts_with("model_http_403[subscription]"));
+    assert!(is_endpoint_unavailable_error(&coding_plan));
+
+    for provider in [Some("zhipu"), Some("openai"), Some("deepseek"), None] {
+        let generic = crate::model_api::model_http_error_message_for(403, provider, &body);
+        assert!(
+            generic.starts_with("model_http_403[permission"),
+            "{generic}"
+        );
+        assert!(!is_endpoint_unavailable_error(&generic));
+    }
+}
