@@ -674,7 +674,7 @@ export const zh = {
     thinkingDisplayDesc: "在回合帧中显示模型的思考过程。",
     thinkingDisplayAria: "显示思维链",
     aboutIntroTitle: "Timem",
-    aboutDesc: "本机优先的智能体工作台：会话、记忆、模型接入点与工具能力统一在一个界面中。",
+    aboutDesc: "一个简单、高效的 AI Agent。",
     projectLabel: "项目地址",
     projectUrl: "https://github.com/moliam/TimemAi",
     theme: "主题",

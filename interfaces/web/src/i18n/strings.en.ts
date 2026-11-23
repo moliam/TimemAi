@@ -677,7 +677,7 @@ export const en: Strings = {
     thinkingDisplayDesc: "Show the model's thinking process inside the turn frame.",
     thinkingDisplayAria: "Show thinking",
     aboutIntroTitle: "Timem",
-    aboutDesc: "A local-first agent workbench: sessions, memory, model endpoints and tool capabilities in one interface.",
+    aboutDesc: "A simple, efficient AI agent.",
     projectLabel: "Project",
     projectUrl: "https://github.com/moliam/TimemAi",
     theme: "Theme",
