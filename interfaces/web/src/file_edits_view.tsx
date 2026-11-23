@@ -63,49 +63,83 @@ export type TurnEditsSummary = {
 // touched a huge number of files; the overflow note reports the remainder.
 const TURN_EDITS_SUMMARY_LIMIT = 64;
 
-function mergeTurnEditCapture(entry: TurnEditEntry, next: FileEditPresentation): TurnEditEntry {
-  const sawCreated = entry.op === "created" || next.op === "created";
-  const captureCount = (entry.capture_count ?? 1) + 1;
+// Per-path capture state across the whole turn. The first non-skipped op
+// defines whether the path existed at the turn start ("created" means it did
+// not); the last non-skipped capture defines the end state.
+type TurnEditPathState = {
+  captures: number;
+  startOp: FileEditOp | null;
+  sawCaptured: boolean;
+  display: FileEditPresentation | null;
+};
+
+function trackTurnEditCapture(state: TurnEditPathState, next: FileEditPresentation): void {
+  state.captures += 1;
   if (next.op === "skipped") {
-    // A skipped final capture carries no fresh evidence: keep the earlier
-    // display (and its diff) so the summary never loses the captured change.
-    // When every capture so far is skipped, the latest skip reason wins.
-    return entry.op === "skipped" ? { ...next, capture_count: captureCount } : { ...entry, capture_count: captureCount };
+    // A skipped capture carries no fresh evidence about existence; while no
+    // real capture has landed yet, the latest skip reason is the only
+    // reportable fact for this path.
+    if (!state.sawCaptured) state.display = next;
+    return;
   }
-  // Net op from the turn's starting state: a path created during the turn did
-  // not exist before it, so "created" wins over later modifications. A final
-  // deletion still reports "deleted" because that is the end-state change.
-  const op = sawCreated && next.op !== "deleted" ? "created" : next.op;
-  return { ...next, op, capture_count: captureCount };
+  if (state.startOp === null) state.startOp = next.op;
+  state.sawCaptured = true;
+  state.display = next;
 }
 
-// Aggregate every tool call's file edits of one turn into a per-path summary:
-// first-touch order, last non-skipped evidence per path, bounded size.
+// Net change of one path across the whole turn (start state vs end state).
+// A file that was created mid-turn and deleted before the turn ended never
+// existed at either boundary, so it is dropped entirely instead of leaving a
+// misleading "deleted" row behind.
+function netTurnEditEntry(state: TurnEditPathState): TurnEditEntry | null {
+  const display = state.display;
+  if (!display) return null;
+  if (!state.sawCaptured) {
+    // Nothing was ever captured: report the latest skip verbatim.
+    return { ...display, capture_count: state.captures };
+  }
+  const startExisted = state.startOp !== "created";
+  const endExisted = display.op !== "deleted";
+  if (!startExisted && !endExisted) return null;
+  let op: FileEditOp = display.op;
+  if (!startExisted) op = "created";
+  else if (display.op === "created") op = "modified";
+  return { ...display, op, capture_count: state.captures };
+}
+
+// Aggregate every tool call's file edits of one turn into a per-path summary
+// of the net begin-to-end change: first-touch order, bounded size. The full
+// per-call evidence stays on the individual tool cards; only files that
+// actually differ between the turn's start and end appear here.
 export function summarizeTurnEdits(
   groups: ReadonlyArray<FileEditsPresentation | undefined | null> | undefined | null,
 ): TurnEditsSummary {
-  const merged: TurnEditEntry[] = [];
-  const indexByPath = new Map<string, number>();
-  let overflowCount = 0;
+  const states = new Map<string, TurnEditPathState>();
   const list = Array.isArray(groups) ? groups : [];
   for (const group of list) {
     if (!Array.isArray(group)) continue;
     for (const edit of group) {
       if (!edit || typeof edit.path !== "string" || !edit.path) continue;
-      const existingIndex = indexByPath.get(edit.path);
-      if (existingIndex === undefined) {
-        if (merged.length >= TURN_EDITS_SUMMARY_LIMIT) {
-          overflowCount += 1;
-          continue;
-        }
-        indexByPath.set(edit.path, merged.length);
-        merged.push({ ...edit, capture_count: 1 });
-        continue;
+      let state = states.get(edit.path);
+      if (!state) {
+        state = { captures: 0, startOp: null, sawCaptured: false, display: null };
+        states.set(edit.path, state);
       }
-      merged[existingIndex] = mergeTurnEditCapture(merged[existingIndex], edit);
+      trackTurnEditCapture(state, edit);
     }
   }
-  return { edits: merged, overflowCount };
+  const edits: TurnEditEntry[] = [];
+  let overflowCount = 0;
+  for (const state of states.values()) {
+    const entry = netTurnEditEntry(state);
+    if (!entry) continue;
+    if (edits.length >= TURN_EDITS_SUMMARY_LIMIT) {
+      overflowCount += 1;
+      continue;
+    }
+    edits.push(entry);
+  }
+  return { edits, overflowCount };
 }
 
 // Folded-turn change summary: rendered beside the archived Thought/Action

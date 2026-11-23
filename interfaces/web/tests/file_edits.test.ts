@@ -280,12 +280,57 @@ describe("summarizeTurnEdits", () => {
     expect(result.edits[0]).toMatchObject({ op: "created", capture_count: 2 });
   });
 
-  it("keeps a final deletion honest over an earlier creation", () => {
+  it("drops a path created mid-turn and deleted before the end", () => {
     const result = summarizeTurnEdits([
       [entry({ path: "gone.txt", op: "created" })],
       [entry({ path: "gone.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 4 })],
     ]);
-    expect(result.edits[0]).toMatchObject({ op: "deleted", removed_lines: 4 });
+    expect(result.edits).toEqual([]);
+    expect(result.overflowCount).toBe(0);
+  });
+
+  it("reports a real deletion of a pre-existing file", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "kept.txt" })],
+      [entry({ path: "kept.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 3 })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "deleted", removed_lines: 3, capture_count: 2 });
+  });
+
+  it("folds a deletion followed by a recreation into a modification", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "b.txt" })],
+      [entry({ path: "b.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 2 })],
+      [entry({ path: "b.txt", op: "created" })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "modified", capture_count: 3 });
+  });
+
+  it("keeps a creation when the file is deleted and created again mid-turn", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "c.txt", op: "created" })],
+      [entry({ path: "c.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 1 })],
+      [entry({ path: "c.txt", op: "created" })],
+    ]);
+    expect(result.edits[0]).toMatchObject({ op: "created", capture_count: 3 });
+  });
+
+  it("still drops a vanished mid-turn creation when a later capture skips", () => {
+    const result = summarizeTurnEdits([
+      [entry({ path: "d.txt", op: "created" })],
+      [entry({ path: "d.txt", op: "deleted", diff: null, added_lines: 0, removed_lines: 1 })],
+      [
+        entry({
+          path: "d.txt",
+          op: "skipped",
+          skip_reason: "too_large",
+          diff: null,
+          added_lines: 0,
+          removed_lines: 0,
+        }),
+      ],
+    ]);
+    expect(result.edits).toEqual([]);
   });
 
   it("keeps the last captured diff when a later capture is skipped", () => {
