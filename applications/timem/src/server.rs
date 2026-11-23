@@ -8653,7 +8653,7 @@ fn truncate_restored_event_value(value: Value, depth: usize) -> Value {
 /// and result text stays on disk and loads via turn_history_page when the user
 /// expands details, so drop everything else from restored core.action
 /// events before they enter the initial snapshot.
-fn slim_restored_action_event(payload: Value) -> Value {
+fn slim_restored_action_event(payload: Value, raw_payload: &Value) -> Value {
     let topic = match payload.get("topic") {
         Some(topic) => topic.clone(),
         None => return payload,
@@ -8711,11 +8711,68 @@ fn slim_restored_action_event(payload: Value) -> Value {
     if let Some(command) = slim_attributes.get("command") {
         inner.insert("command".to_string(), command.clone());
     }
+    // 用户反馈：重启（或刷新）后「本轮文件修改」总结卡整块消失，只剩折叠的
+    // Thought/Action——恢复时 core.action 被精简成白名单字段，edits（文件修改证据的
+    // 唯一来源）被丢掉了。这里按恢复预算重建一份：文件、op、行数、skip 全留，
+    // diff 单独裁剪（通用截断的 256 字节会把 diff 切成碎片）。
+    if let Some(edits) = restored_file_edits_payload(raw_payload) {
+        inner.insert("edits".to_string(), edits);
+    }
     json!({
         "context_id": payload.get("context_id").cloned().unwrap_or(Value::Null),
         "payload": Value::Object(inner),
         "topic": json!({ "name": "core.action", "attributes": Value::Object(slim_attributes) }),
     })
+}
+
+const RESTORED_EDITS_LIMIT: usize = 8;
+const RESTORED_EDIT_DIFF_BYTES: usize = 8 * 1024;
+const RESTORED_EDITS_BYTES: usize = 32 * 1024;
+
+/// Rebuild the bounded file-edit evidence carried by a restored action event.
+/// The array is read from the untouched payload because the generic restore
+/// truncation collapses every string to 256 bytes, which would shred diffs.
+fn restored_file_edits_payload(raw_payload: &Value) -> Option<Value> {
+    let entries = raw_payload.get("payload")?.get("edits")?.as_array()?;
+    let mut kept = Vec::new();
+    let mut used = 2usize; // "[]"
+    for entry in entries.iter().take(RESTORED_EDITS_LIMIT) {
+        let Some(object) = entry.as_object() else {
+            continue;
+        };
+        let mut copy = object.clone();
+        copy.remove("diff");
+        if let Some(diff) = object.get("diff").and_then(Value::as_str) {
+            let (text, cut) = clamp_restored_diff(diff, RESTORED_EDIT_DIFF_BYTES);
+            if cut {
+                copy.insert("truncated".to_string(), json!(true));
+            }
+            copy.insert("diff".to_string(), Value::String(text));
+        }
+        let len = Value::Object(copy.clone()).to_string().len() + 1;
+        if used + len > RESTORED_EDITS_BYTES {
+            break;
+        }
+        used += len;
+        kept.push(Value::Object(copy));
+    }
+    (!kept.is_empty()).then(|| Value::Array(kept))
+}
+
+fn clamp_restored_diff(text: &str, limit: usize) -> (String, bool) {
+    if text.len() <= limit {
+        return (text.to_string(), false);
+    }
+    // Cut on a char boundary at or before the byte limit.
+    let cut = text
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|idx| *idx <= limit)
+        .last()
+        .unwrap_or(0);
+    let mut prefix = String::from(&text[..cut]);
+    prefix.push_str("…[truncated]");
+    (prefix, true)
 }
 
 fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebTurn> {
@@ -8847,10 +8904,10 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 let raw_payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
-                let payload = slim_restored_action_event(truncate_restored_event_value(
-                    raw_payload.clone(),
-                    0,
-                ));
+                let payload = slim_restored_action_event(
+                    truncate_restored_event_value(raw_payload.clone(), 0),
+                    &raw_payload,
+                );
                 let events_slimmed = payload != raw_payload;
                 let source = extra
                     .remove("source")
@@ -19311,8 +19368,10 @@ fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
         .events
         .iter()
         .map(|event| {
-            let payload =
-                slim_restored_action_event(truncate_restored_event_value(event.payload.clone(), 0));
+            let payload = slim_restored_action_event(
+                truncate_restored_event_value(event.payload.clone(), 0),
+                &event.payload,
+            );
             events_slimmed = events_slimmed || payload != event.payload;
             WebTurnEvent {
                 event_id: event.event_id.clone(),
@@ -19325,8 +19384,42 @@ fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
         .collect();
     const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
     if slim.events.len() > SNAPSHOT_TURN_EVENT_LIMIT {
-        let excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
-        slim.events.drain(0..excess);
+        // 截断不能把文件修改证据整段丢掉：「本轮文件修改」总结卡只从事件的 edits
+        // 聚合，先丢最早的不带修改的事件，再丢其余最早的事件。
+        let mut excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
+        let mut drop = vec![false; slim.events.len()];
+        let carries_edits = |event: &WebTurnEvent| {
+            event
+                .payload
+                .get("payload")
+                .and_then(|inner| inner.get("edits"))
+                .is_some()
+        };
+        for (index, event) in slim.events.iter().enumerate() {
+            if excess == 0 {
+                break;
+            }
+            if !carries_edits(event) {
+                drop[index] = true;
+                excess -= 1;
+            }
+        }
+        for (index, _) in slim.events.iter().enumerate() {
+            if excess == 0 {
+                break;
+            }
+            if !drop[index] {
+                drop[index] = true;
+                excess -= 1;
+            }
+        }
+        let mut kept = Vec::with_capacity(SNAPSHOT_TURN_EVENT_LIMIT);
+        for (index, event) in slim.events.drain(..).enumerate() {
+            if !drop[index] {
+                kept.push(event);
+            }
+        }
+        slim.events = kept;
         events_slimmed = true;
     }
     slim.events_slimmed = events_slimmed;

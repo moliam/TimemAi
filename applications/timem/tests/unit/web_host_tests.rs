@@ -352,6 +352,159 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
 }
 
 #[test]
+fn snapshot_trimming_keeps_the_file_edit_events() {
+    // 终态 turn 的快照只保留 40 个事件；「本轮文件修改」总结卡只从事件里的 edits
+    // 聚合，所以截断必须先丢不带修改证据的事件，不能把修改证据整段丢掉。
+    let action_event = |index: usize, edits: bool| WebTurnEvent {
+        event_id: format!("event_{index}"),
+        source: "core_topic".to_string(),
+        payload: json!({
+            "payload": if edits {
+                json!({
+                    "action": "run_bash",
+                    "edits": [{
+                        "path": format!("src/{index}.rs"),
+                        "op": "modified",
+                        "diff": "--- a/src/file.rs\n+++ b/src/file.rs\n",
+                        "added_lines": 1,
+                        "removed_lines": 0,
+                        "truncated": false,
+                        "skip_reason": null,
+                    }],
+                })
+            } else {
+                json!({"action": "run_bash"})
+            },
+            "topic": {"name": "core.action", "attributes": {}},
+        }),
+        created_at_ms: index as u128,
+        timeline_seq: None,
+    };
+    let mut events: Vec<WebTurnEvent> = (0..5).map(|index| action_event(index, true)).collect();
+    events.extend((5..60).map(|index| action_event(index, false)));
+    let turn = WebTurn {
+        preview: None,
+        turn_id: "turn_long".to_string(),
+        state: "completed".to_string(),
+        created_at_ms: 1,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events,
+        final_answer: None,
+        completion: None,
+        events_slimmed: false,
+    };
+
+    let slim = slim_restored_turn_for_snapshot(&turn);
+
+    assert_eq!(slim.events.len(), 40);
+    let kept_edits = slim
+        .events
+        .iter()
+        .filter(|event| {
+            event
+                .payload
+                .get("payload")
+                .and_then(|inner| inner.get("edits"))
+                .is_some()
+        })
+        .count();
+    assert_eq!(
+        kept_edits, 5,
+        "every file-edit event must survive snapshot trimming"
+    );
+}
+
+#[test]
+fn restored_action_events_keep_the_file_edit_evidence() {
+    // 用户反馈：重启（或刷新）后「本轮文件修改」总结卡整块消失，只剩折叠的
+    // Thought/Action。恢复路径把 core.action 精简成白名单字段，edits（文件修改证据
+    // 的唯一来源）被丢掉了。文件名、op、行数、diff 都必须跟着恢复，超长 diff 按
+    // 恢复预算裁剪并标记 truncated。
+    let long_diff = format!(
+        "--- a/src/main.rs\n+++ b/src/main.rs\n{}",
+        "+added line\n".repeat(2000)
+    );
+    let payload = json!({
+        "context_id": "context_1",
+        "payload": {
+            "action": "run_bash",
+            "action_id": "call_1",
+            "event": "finish",
+            "status": "completed",
+            "edits": [
+                {
+                    "path": "src/main.rs",
+                    "op": "modified",
+                    "diff": long_diff,
+                    "added_lines": 2000,
+                    "removed_lines": 0,
+                    "truncated": false,
+                    "skip_reason": null,
+                },
+                {
+                    "path": "src/other.rs",
+                    "op": "created",
+                    "diff": "--- /dev/null\n+++ b/src/other.rs\n",
+                    "added_lines": 2,
+                    "removed_lines": 0,
+                    "truncated": false,
+                    "skip_reason": null,
+                }
+            ],
+        },
+        "topic": { "name": "core.action", "attributes": {} },
+    });
+    let mut extra = BTreeMap::new();
+    extra.insert("payload".to_string(), payload);
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_edits".to_string(),
+            created_at_ms: 10,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "edit files".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_edits".to_string(),
+            created_at_ms: 11,
+            kind: ChatHistoryEventKind::Action,
+            content: "core.action".to_string(),
+            extra,
+        },
+    ];
+
+    let turns = restored_turns_from_history_records(&records);
+    let entries = turns[0]
+        .events
+        .iter()
+        .find_map(|event| {
+            event
+                .payload
+                .get("payload")
+                .and_then(|inner| inner.get("edits"))
+        })
+        .and_then(Value::as_array)
+        .expect("restored action event must keep the file edit evidence");
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1]["path"], "src/other.rs");
+    assert_eq!(entries[1]["op"], "created");
+    assert_eq!(entries[1]["added_lines"], 2);
+    let diff = entries[0]["diff"].as_str().unwrap();
+    assert!(
+        diff.len() <= 8 * 1024 + 64,
+        "restored diff must stay bounded, got {} bytes",
+        diff.len()
+    );
+    assert!(diff.ends_with("[truncated]"));
+    assert_eq!(entries[0]["truncated"], true);
+}
+
+#[test]
 fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
     let state = routing_test_state();
     let roles = vec![
