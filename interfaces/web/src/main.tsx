@@ -337,6 +337,8 @@ import {
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
 import {
+  estimateTokensFromBytes,
+  formatKilobytes,
   formatOutputWithThink,
   formatTokens,
   formatTokensCoarse,
@@ -14799,6 +14801,23 @@ function ContextDonut({
   );
 }
 
+/// One resident instruction file's size and rough token estimate. Renders
+/// nothing when the Host predates the size projection.
+function ResidentFileMeta({ sizeBytes }: { sizeBytes: number | undefined }) {
+  if (sizeBytes === undefined) return null;
+  const size = formatKilobytes(sizeBytes);
+  if (!size) return null;
+  const tokens = estimateTokensFromBytes(sizeBytes);
+  return (
+    <span className="header-model-popover-file-meta">
+      {t("headerModel.workInstructionMeta", {
+        size,
+        tokens: formatTokens(tokens) ?? "0",
+      })}
+    </span>
+  );
+}
+
 function HeaderModelControl({
   session,
   endpoint,
@@ -15169,7 +15188,10 @@ function HeaderModelControl({
                 title={workInstruction?.session_work_file || session?.current_dir}
               >
                 <input type="checkbox" checked disabled aria-hidden="true" tabIndex={-1} />
-                <span className="header-model-popover-file-name">Timem.md</span>
+                <span className="header-model-popover-file-body">
+                  <span className="header-model-popover-file-name">Timem.md</span>
+                  <ResidentFileMeta sizeBytes={workInstruction?.session_work_file_size_bytes} />
+                </span>
                 <span className="header-model-popover-file-tag header-model-popover-file-tag-always">
                   {t("headerModel.workInstructionsAlways")}
                 </span>
@@ -15187,7 +15209,10 @@ function HeaderModelControl({
                     aria-label={file.path}
                     onChange={() => toggleWorkInstructionFile(file.path, !file.selected)}
                   />
-                  <span className="header-model-popover-file-name">{file.filename}</span>
+                  <span className="header-model-popover-file-body">
+                    <span className="header-model-popover-file-name">{file.filename}</span>
+                    <ResidentFileMeta sizeBytes={file.size_bytes} />
+                  </span>
                   <span className="header-model-popover-file-tag">
                     {file.source === "global"
                       ? t("headerModel.workInstructionsGlobal")

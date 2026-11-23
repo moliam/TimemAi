@@ -700,6 +700,8 @@ struct WebWorkInstructionFileView {
     directory: String,
     source: String,
     selected: bool,
+    /// Bytes of the file on disk at projection time; 0 when it cannot be read.
+    size_bytes: u64,
 }
 
 /// Host projection of the resident-context file list for one session:
@@ -710,6 +712,8 @@ struct WebWorkInstructionView {
     mode: String,
     files: Vec<WebWorkInstructionFileView>,
     session_work_file: String,
+    /// Bytes of the always-resident session work file; 0 before it is created.
+    session_work_file_size_bytes: u64,
 }
 
 impl Default for WebWorkInstructionView {
@@ -719,6 +723,7 @@ impl Default for WebWorkInstructionView {
                 .to_string(),
             files: Vec::new(),
             session_work_file: String::new(),
+            session_work_file_size_bytes: 0,
         }
     }
 }
@@ -17312,6 +17317,12 @@ fn work_instruction_home() -> Option<PathBuf> {
     agent_core::work_instruction_home_from_env()
 }
 
+/// Best-effort file size for display; a missing or unreadable file counts as 0
+/// so the resident-context projection never fails on stat errors.
+fn file_size_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
 /// Rebuilds the resident-instruction candidate projection for one session.
 /// Discovery runs against the current filesystem so the picker always offers
 /// files that exist right now; the selection filters which entries load.
@@ -17340,15 +17351,16 @@ fn build_work_instruction_view(
                     .unwrap_or_default(),
                 source: candidate.source.label().to_string(),
                 selected,
+                size_bytes: file_size_bytes(&candidate.path),
             }
         })
         .collect();
+    let session_work_file = session_work_file_path(state, session_id)?;
     Ok(WebWorkInstructionView {
         mode: agent_core::work_instruction_mode_label(mode).to_string(),
         files,
-        session_work_file: session_work_file_path(state, session_id)?
-            .display()
-            .to_string(),
+        session_work_file_size_bytes: file_size_bytes(&session_work_file),
+        session_work_file: session_work_file.display().to_string(),
     })
 }
 

@@ -196,8 +196,12 @@ export type Session = {
       directory: string;
       source: "project" | "global";
       selected: boolean;
+      /** Bytes on disk at projection time; absent on older Hosts. */
+      size_bytes?: number;
     }[];
     session_work_file: string;
+    /** Bytes of the always-resident work file; absent on older Hosts. */
+    session_work_file_size_bytes?: number;
   };
   contexts: SessionContext[];
   workers: SessionWorker[];

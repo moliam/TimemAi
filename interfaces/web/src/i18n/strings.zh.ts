@@ -932,6 +932,7 @@ export const zh = {
     workInstructionsGlobal: "全局",
     workInstructionsEmpty: "未发现 Claude/Codex 兼容指令文件",
     workInstructionsLoading: "正在发现指令文件…",
+    workInstructionMeta: "{size} · 约 {tokens} tokens",
   },
   insights: {
     title: "Session Insights",

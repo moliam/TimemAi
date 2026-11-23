@@ -86,6 +86,15 @@ const makeSession = () => ({
     user_entries: [{ kind: "task", text: "Insights acceptance turn", created_at_ms: 900 }],
     events: modelEvents(), final_answer: null, completion: null,
   }],
+  work_instruction: {
+    mode: "silent",
+    files: [{
+      path: "/work/AGENTS.md", filename: "AGENTS.md", directory: "/work",
+      source: "project", selected: true, size_bytes: 2048,
+    }],
+    session_work_file: "/work/Timem.md",
+    session_work_file_size_bytes: 1024,
+  },
   history_before_cursor: null, history_has_more: false,
   active_turn_id: "turn-1", cancelling_turn_id: null, pending_turn_id: null,
   message_queue: { revision: 0, items: [], auto_send_enabled: true,
@@ -869,6 +878,19 @@ async function main() {
     })()`);
     assert(headerPopoverLayout.labels.length === 5 && headerPopoverLayout.labels.every((label) => label.h <= 16 && label.ws === 'nowrap'), `popover labels stay on one line: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.labels.map((label) => label.text).includes('Resident instruction files'), `popover carries the resident instruction files row: ${JSON.stringify(headerPopoverLayout)}`);
+    // Resident rows carry the file size and the 4-bytes-per-token estimate,
+    // for both the always-resident work file and the discovered candidates.
+    const residentFileMeta = await browser.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#header-model-popover .header-model-popover-file')];
+      return rows.map((row) => ({
+        name: row.querySelector('.header-model-popover-file-name')?.textContent ?? '',
+        meta: row.querySelector('.header-model-popover-file-meta')?.textContent ?? '',
+      }));
+    })()`);
+    assert(residentFileMeta.length === 2 &&
+      residentFileMeta[0].name === 'Timem.md' && residentFileMeta[0].meta === '1.0 KB · ≈256 tokens' &&
+      residentFileMeta[1].name === 'AGENTS.md' && residentFileMeta[1].meta === '2.0 KB · ≈512 tokens',
+      `resident rows show size and token estimates: ${JSON.stringify(residentFileMeta)}`);
     assert(headerPopoverLayout.controlHeight === 30 && headerPopoverLayout.controlBorder === '1px' && headerPopoverLayout.controlBackground.includes('linear-gradient'), `header control surface: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.pillSize === '8.5px', `reasoning pill size: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.reasoningSelectWidth <= 120, `reasoning select hugs its content: ${JSON.stringify(headerPopoverLayout)}`);

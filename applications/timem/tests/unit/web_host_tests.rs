@@ -8897,6 +8897,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         mode: agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
         files: Vec::new(),
         session_work_file: String::new(),
+        session_work_file_size_bytes: 0,
     };
     WebSession {
         session_id: session_id.to_string(),
@@ -26324,7 +26325,39 @@ fn work_instruction_selection_updates_are_authoritative_and_persisted() {
         assert!(view.files.iter().all(|file| file.selected));
         assert_eq!(view.files[0].source, "project");
         assert_eq!(view.files[2].source, "global");
+        assert_eq!(
+            view.files[0].size_bytes,
+            "project agents rules".len() as u64
+        );
+        assert_eq!(view.files[1].size_bytes, "nested claude rules".len() as u64);
+        assert_eq!(view.files[2].size_bytes, "global codex rules".len() as u64);
         assert!(view.session_work_file.ends_with("Timem.md"));
+    }
+
+    // The always-resident session work file reports its live byte size, so the
+    // picker can show size and token estimates without a separate read path.
+    let work_file_path = {
+        let sessions = state.sessions.lock().unwrap();
+        PathBuf::from(&sessions[session_id].work_instruction.session_work_file)
+    };
+    std::fs::create_dir_all(work_file_path.parent().unwrap()).unwrap();
+    std::fs::write(&work_file_path, "work state").unwrap();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionWorkInstructionRefresh {
+            session_id: session_id.to_string(),
+        },
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert_eq!(
+            sessions[session_id]
+                .work_instruction
+                .session_work_file_size_bytes,
+            "work state".len() as u64
+        );
     }
 
     handle_command(

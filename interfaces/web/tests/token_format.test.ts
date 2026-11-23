@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatOutputWithThink, formatTokens, formatTokensCoarse } from "../src/token_format";
+import {
+  estimateTokensFromBytes,
+  formatKilobytes,
+  formatOutputWithThink,
+  formatTokens,
+  formatTokensCoarse,
+} from "../src/token_format";
 
 describe("token count formatting", () => {
   it("preserves empty and sub-thousand values", () => {
@@ -19,6 +25,24 @@ describe("token count formatting", () => {
     expect(formatTokens(1_000_000)).toBe("1.0M");
     expect(formatTokens(1_200_000)).toBe("1.2M");
     expect(formatTokens(12_345_678)).toBe("12.3M");
+  });
+});
+
+describe("resident instruction file sizing", () => {
+  it("formats byte size in KB, keeping one decimal below 100 KB", () => {
+    expect(formatKilobytes(undefined)).toBeUndefined();
+    expect(formatKilobytes(0)).toBe("0.0 KB");
+    expect(formatKilobytes(512)).toBe("0.5 KB");
+    expect(formatKilobytes(2048)).toBe("2.0 KB");
+    expect(formatKilobytes(131_072)).toBe("128 KB");
+  });
+
+  it("estimates tokens at four bytes per token", () => {
+    expect(estimateTokensFromBytes(undefined)).toBe(0);
+    expect(estimateTokensFromBytes(0)).toBe(0);
+    expect(estimateTokensFromBytes(4)).toBe(1);
+    expect(estimateTokensFromBytes(2048)).toBe(512);
+    expect(estimateTokensFromBytes(2050)).toBe(513);
   });
 });
 

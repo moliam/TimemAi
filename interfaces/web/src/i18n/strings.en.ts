@@ -935,6 +935,7 @@ export const en: Strings = {
     workInstructionsGlobal: "global",
     workInstructionsEmpty: "No Claude/Codex-compatible instruction files found",
     workInstructionsLoading: "Discovering instruction files…",
+    workInstructionMeta: "{size} · ≈{tokens} tokens",
   },
   insights: {
     title: "Session Insights",

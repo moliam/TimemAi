@@ -344,6 +344,13 @@ it("keeps resident instruction files host-authoritative with full-path tooltips"
   );
   expect(source).toContain("header-model-popover-file-name");
   expect(styles).toContain(".header-model-popover-file-name");
+  // Resident rows expose the file size and the 4-bytes-per-token estimate.
+  expect(source).toContain("header-model-popover-file-body");
+  expect(source).toContain("ResidentFileMeta");
+  expect(source).toContain("session_work_file_size_bytes");
+  expect(source).toContain("sizeBytes={file.size_bytes}");
+  expect(source).toContain("estimateTokensFromBytes");
+  expect(styles).toContain(".header-model-popover-file-meta");
   expect(styles).toContain("text-overflow: ellipsis; white-space: nowrap; color: #c3d6d1");
   expect(styles).toContain(".header-model-popover-files { min-width: 0; display: grid; gap: 3px; max-height: 132px; overflow-y: auto; }");
   // Timem.md is always resident and never user-toggleable.
@@ -367,6 +374,8 @@ it("ships resident instruction i18n keys and source tags for both locales", () =
     expect(catalog.headerModel.workInstructionsGlobal).toBeTruthy();
     expect(catalog.headerModel.workInstructionsEmpty).toBeTruthy();
     expect(catalog.headerModel.workInstructionsLoading).toBeTruthy();
+    expect(catalog.headerModel.workInstructionMeta).toContain("{size}");
+    expect(catalog.headerModel.workInstructionMeta).toContain("{tokens}");
   }
   expect(zhCatalog.headerModel.workInstructions).toContain("常驻");
   expect(enCatalog.headerModel.workInstructions).toContain("Resident");

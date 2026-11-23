@@ -8,6 +8,20 @@ export function formatTokens(value: number | undefined) {
 
 // Three-tier precision for aggregate cache detail labels:
 // <1M -> 0.1K steps, 1M..1G -> 0.1M (100K) steps, >=1G -> 0.001G (1M) steps.
+// Resident instruction files: byte size for display, plus a rough token
+// estimate. 4 bytes per token is the usual English-text ratio; it is a display
+// heuristic only and never feeds request budgeting.
+export function formatKilobytes(bytes: number | undefined) {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return undefined;
+  const kb = bytes / 1024;
+  return kb >= 100 ? `${Math.round(kb)} KB` : `${kb.toFixed(1)} KB`;
+}
+
+export function estimateTokensFromBytes(bytes: number | undefined) {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes <= 0) return 0;
+  return Math.round(bytes / 4);
+}
+
 export function formatTokensCoarse(value: number | undefined) {
   if (!value) return value === 0 ? "0" : undefined;
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(3)}G`;
