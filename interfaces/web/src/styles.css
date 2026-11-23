@@ -7234,10 +7234,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .stream-tool-edits-chip-action:hover { background: rgba(64, 180, 120, 0.2); }
 .stream-tool-edits-chip-action:focus-visible { outline: 2px solid #7fd6a4; outline-offset: 2px; }
 :root[data-theme="light"] .stream-tool-edits-chip-action:hover { background: #d2efdf; }
+/* 用户反馈：diff 卡片只用底色，不要边框——单行文件摘要外面套一圈线很像输入框。 */
 .file-edits-panel {
   margin: 8px 0 0;
   padding: 7px 10px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 0;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.02);
   display: grid;
@@ -7323,7 +7324,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-additions { color: #7fd6a4; }
 .file-edit-deletions { color: #e59a94; }
-/* 用户反馈：复制差异用图标表示，不再占用文字宽度，diff 行保持单行紧凑。 */
+/* 用户反馈：复制差异用图标表示，不要框——只留字形 + 悬停底色。 */
 .file-edit-copy {
   flex: none;
   display: inline-flex;
@@ -7332,15 +7333,16 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   width: 18px;
   height: 18px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 0;
   border-radius: 4px;
+  background: transparent;
   color: #98afbc;
   cursor: pointer;
   user-select: none;
 }
-.file-edit-copy:hover { color: #c9d6de; border-color: rgba(255, 255, 255, 0.22); }
-.file-edit-copy.copy-success { color: #7fd6a4; border-color: rgba(64, 180, 120, 0.4); }
-.file-edit-copy.copy-failed { color: #e59a94; border-color: rgba(214, 92, 84, 0.4); }
+.file-edit-copy:hover { color: #c9d6de; background: rgba(255, 255, 255, 0.08); }
+.file-edit-copy.copy-success { color: #7fd6a4; }
+.file-edit-copy.copy-failed { color: #e59a94; }
 .file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
 /* 用户反馈：diff 框要与文本一样宽——内层独立框取消，diff 行直接铺满
    外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。 */
@@ -7412,7 +7414,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .turn-edits-summary-head b { color: #24333a; }
 :root[data-theme="light"] .file-edit-captures { background: #d9f2e4; color: #1c7a4e; }
 :root[data-theme="light"] .file-edits-panel {
-  border-color: rgba(20, 40, 50, 0.1);
   background: rgba(20, 40, 50, 0.02);
 }
 :root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; }
@@ -7425,10 +7426,10 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-name { color: #24333a; }
 :root[data-theme="light"] .file-edit-additions { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-deletions { color: #b23a31; }
-:root[data-theme="light"] .file-edit-copy { border-color: rgba(0, 0, 0, 0.14); color: #5c6f7c; }
-:root[data-theme="light"] .file-edit-copy:hover { color: #24333a; border-color: rgba(0, 0, 0, 0.28); }
-:root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; border-color: #8fceae; }
-:root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; border-color: #e0a39e; }
+:root[data-theme="light"] .file-edit-copy { color: #5c6f7c; }
+:root[data-theme="light"] .file-edit-copy:hover { color: #24333a; background: rgba(20, 40, 50, 0.07); }
+:root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-gutter { color: #9aa7b0; }
 :root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }

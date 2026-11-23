@@ -132,7 +132,7 @@ describe("result preview surfaces and contracts", () => {
     expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !absorbed)));");
     expect(main).toContain("{previewVisible && (");
     // 用户反馈：收起带来的位移不能让阅读位置跑掉——由流内局部滚动锚定补偿。
-    expect(main).toContain("useStreamFoldAnchor(runRef, folded);");
+    expect(main).toContain("useStreamShrinkAnchor(runRef);");
     expect(main).toContain("!running && resultPreview && !previewVisible && (");
     expect(main).toContain('aria-label={t("tools.resultPreview")}');
     expect(main).not.toContain("stream-tool-result-preview-badge");

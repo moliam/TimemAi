@@ -137,7 +137,7 @@ describe("file edits surfaces", () => {
     expect(gutter).toContain("white-space: nowrap;");
   });
 
-  it("keeps the panel as the single framed box and counts nowhere but the header chip", () => {
+  it("keeps the panel frameless with a fill only and counts nowhere but the header chip", () => {
     // 用户反馈：文件名列表不渲染为框，仅展开的 diff 正文保留内层框。
     // 面板内也不再渲染第二份「N 个文件 +x −y」：卡片头部 chip 已是唯一计数处，
     // 面板再报一遍会让同一组数字在一张卡里出现三次。
@@ -146,6 +146,14 @@ describe("file edits surfaces", () => {
     expect(component).not.toContain('t("tools.fileEditsPanelCount"');
     expect(en).not.toContain("fileEditsPanelCount:");
     expect(zh).not.toContain("fileEditsPanelCount:");
+    const panelStart = styles.indexOf(".file-edits-panel {");
+    const panel = styles.slice(panelStart, styles.indexOf("}", panelStart) + 1);
+    // 用户反馈：一行文件摘要外面不要边框，只留底色。
+    expect(panel).toContain("border: 0;");
+    expect(panel).toContain("background:");
+    const lightPanelStart = styles.indexOf(':root[data-theme="light"] .file-edits-panel {');
+    const lightPanel = styles.slice(lightPanelStart, styles.indexOf("}", lightPanelStart) + 1);
+    expect(lightPanel).not.toContain("border");
     const sectionStart = styles.indexOf(".file-edit-section {");
     const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
     expect(section).not.toContain("border:");
@@ -273,6 +281,10 @@ describe("file edits components render server-side", () => {
     expect(control).not.toContain("复制差异<");
     expect(styles).toMatch(/\.file-edit-copy \{[^}]*width: 18px;[^}]*height: 18px;/s);
     expect(styles).not.toMatch(/\.file-edit-copy \{[^}]*font-size:/s);
+    // 用户反馈：小图标不要边框，只留字形 + 悬停底色。
+    expect(styles).toMatch(/\.file-edit-copy \{[^}]*border: 0;/s);
+    expect(styles).not.toContain(':root[data-theme="light"] .file-edit-copy { border-color');
+    expect(styles).not.toMatch(/\.file-edit-copy \{[^}]*border: 1px solid/s);
   });
 
   it("shows unchanged row line numbers once instead of one per side", () => {

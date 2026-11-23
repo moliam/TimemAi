@@ -139,10 +139,12 @@ it("absorbs tools instantly and compensates the scroll instead of animating the 
   const rule = styles.match(/\.stream-tool-merged-item \{([^}]*)\}/)?.[1];
   expect(rule).toBeDefined();
   expect(rule).not.toContain("transition:");
-  expect(source).toContain("function useStreamFoldAnchor(");
-  expect(source).toContain("useStreamFoldAnchor(runRef, folded);");
-  // 只补偿自动收起；用户自己点开/收起不抢滚动。
-  expect(source).toContain("folded && !wasFolded.current");
+  expect(source).toContain("function useStreamShrinkAnchor(");
+  expect(source).toContain("useStreamShrinkAnchor(runRef);");
+  // 什么时候补偿交给 foldAnchorScrollTop 判定：整块已滚出视口上方才补，
+  // 块自身还在视口里时从头收起（含结果预览收起），补偿反而会把可见部分往下拖。
+  expect(source).toContain("Math.abs(bottom - last.bottom) > 1");
+  expect(source).toContain("viewportTop: viewport.getBoundingClientRect().top,");
   expect(source).toContain("if (anchored !== null) viewport.scrollTop = anchored;");
   expect(source).toContain("foldAnchorScrollTop({");
   expect(styles).toContain(".stream-tool-count.incremented { animation:");

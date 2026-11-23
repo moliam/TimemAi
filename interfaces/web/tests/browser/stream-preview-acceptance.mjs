@@ -1461,7 +1461,63 @@ async function main() {
       host.setSession(singleDone); host.send({type: "hello", snapshot: makeSnapshot(singleDone)});
       await waitFor(() => browser.evaluate(`document.querySelectorAll('.file-edit-section').length === 1`), "single-file panel missing");
       assert(await browser.evaluate(`document.querySelectorAll('.file-edit-index').length === 0`), "single-file panel must not print a file ordinal");
-      console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files");
+      // 复现与量化：工具结果预览收起（A 完成后被 B 的 execution_start 收纳）时页面怎么动。
+      {
+        await browser.call("Emulation.setDeviceMetricsOverride", {width: 900, height: 520, deviceScaleFactor: 1, mobile: false});
+        const preview = Array.from({length: 16}, (_, i) => `line-${i}`).join("\n");
+        const phase = (id, event, status, time) => {
+          const body = {action: "run_bash", action_id: id, event, status, input: {cmd: `echo ${id}`}};
+          if (event === "finish") body.tool_output_preview = preview;
+          return {event_id: `${id}-${event}`, source: "core_topic", created_at_ms: time,
+            payload: {session_id: "session-1", state: {name: "running"}, topic: {name: "core.action", attributes: {}}, payload: body}};
+        };
+        const thought = thoughtEvent("swing-thought", "Swing thought", 1);
+        const runningA = [thought, phase("swing-a", "start", "running", 2), phase("swing-a", "execution_start", "running", 3)];
+        const finishedA = [...runningA, phase("swing-a", "finish", "completed", 4)];
+        const startB = phase("swing-b", "execution_start", "running", 6);
+        const measure = `(() => {
+          const viewport = document.querySelector('.chat-scroll');
+          const run = document.querySelector('.stream-tool-run');
+          const row = document.querySelector('.stream-tool-row');
+          const round = (value) => Math.round(value * 10) / 10;
+          return {scrollTop: Math.round(viewport.scrollTop),
+            maxScroll: Math.round(viewport.scrollHeight - viewport.clientHeight),
+            rowTop: round(row.getBoundingClientRect().top),
+            runBottom: round(run.getBoundingClientRect().bottom),
+            runHeight: round(run.getBoundingClientRect().height),
+            previewHeight: round(document.querySelector('.stream-tool-result-preview')?.getBoundingClientRect().height ?? 0)};
+        })()`;
+        const counts = `({previews: document.querySelectorAll('.stream-tool-result-preview').length,
+          rows: document.querySelectorAll('.stream-tool-row').length,
+          heads: document.querySelectorAll('.stream-tool-head').length,
+          runHeight: Math.round(document.querySelector('.stream-tool-run').getBoundingClientRect().height)})`;
+        const probes = {};
+        for (const mode of ["following", "reading"]) {
+          await setRound(finishedA, "");
+          await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-result-preview-body')`), `${mode}: finished preview missing`);
+          await browser.evaluate(`(() => { const v = document.querySelector('.chat-scroll');
+            v.scrollTop = ${mode === "following" ? "v.scrollHeight" : "Math.max(0, v.scrollHeight - v.clientHeight - 220)"};
+            v.dispatchEvent(new Event('scroll')); })()`);
+          await sleep(120);
+          probes[`${mode}Before`] = await browser.evaluate(measure);
+          const base = host.getSession();
+          const turns = base.turns.map(t => ({...t, events: [...runningA, phase("swing-a", "finish", "completed", 4), startB]}));
+          const next = {...base, turns};
+          host.setSession(next); host.send({type: "hello", snapshot: makeSnapshot(next)});
+          await sleep(400);
+          probes[`${mode}After`] = await browser.evaluate(measure);
+          probes[`${mode}Counts`] = await browser.evaluate(counts);
+          // handoff 的真正效果：上一行连同结果预览一起收成单行，运行中的行保留。
+          assert(probes[`${mode}Counts`].previews === 0 && probes[`${mode}Counts`].rows === 2,
+            `${mode}: handoff did not absorb the finished preview ${JSON.stringify(probes)}`);
+          assert(probes[`${mode}Counts`].runHeight < 40,
+            `${mode}: absorbed run must stay one line tall ${JSON.stringify(probes)}`);
+          assert(probes[`${mode}Before`].previewHeight > 200,
+            `${mode}: fixture must start with an expanded preview ${JSON.stringify(probes)}`);
+        }
+        await browser.call("Emulation.clearDeviceMetricsOverride");
+      }
+      console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files, frameless diff card, handoff absorbs one row");
     }
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");

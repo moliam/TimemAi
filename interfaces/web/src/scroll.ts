@@ -13,9 +13,13 @@ export function preservePrependScrollTop(previous: ScrollMetrics, nextScrollHeig
 }
 
 /**
- * 自动工具收纳时的局部滚动锚定。收纳会把「折叠了多少像素」整段移走；只要用户
- * 没在跟底部、自己也没滚动，就把这段高度差反向补进 scrollTop，让组下方正在
- * 阅读的内容原地不动，而不是整屏上下跳。返回 null 表示本次不应补偿。
+ * 自动工具收纳时的局部滚动锚定。收纳会把「折叠了多少像素」整段移走；当被折叠的
+ * 块整体位于视口上方时，视口里的一切都会跟着位移——此时把这段高度差反向补进
+ * scrollTop，正在阅读的内容就原地不动。
+ *
+ * 只有「整块都在视口上方」才补偿：块本身还在视口里时，它像折叠面板一样从头部
+ * 收起，头部保持不动才是自然行为；此时再补偿反而会把可见的头部往下拖，制造新跳动。
+ * 用户正在跟底部时也不补偿（浏览器钳制已经让尾部稳定）。返回 null 表示不补偿。
  */
 export function foldAnchorScrollTop(input: {
   previousBottom: number;
@@ -24,10 +28,12 @@ export function foldAnchorScrollTop(input: {
   previousScrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  viewportTop: number;
   threshold?: number;
 }): number | null {
   const delta = input.bottom - input.previousBottom;
   if (Math.abs(delta) <= 1) return null;
+  if (input.previousBottom > input.viewportTop + 1) return null;
   if (isNearScrollBottom(input, input.threshold)) return null;
   if (Math.abs(input.scrollTop - input.previousScrollTop) > 1) return null;
   return Math.max(0, input.scrollTop + delta);

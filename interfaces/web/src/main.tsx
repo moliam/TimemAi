@@ -13296,32 +13296,32 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   </section>;
 }
 
-// 用户反馈：工具收起（往往还连带结果预览一起收起，变化很大）时界面上下跳得
+// 用户反馈：工具收起（往往连带结果预览一起收起，变化很大）时界面上下跳得
 // 厉害，加缓动也没用——问题不是快慢，而是这几百像素的位移把正在阅读的内容推走。
-// 这里做局部滚动锚定：自动收纳发生的那一刻，把本组底缘的高度差反向补进
-// scrollTop（用户没滚动、也没在跟底部时），使组下方的内容原地不动。
-// 只补偿「自动收起」；用户自己点开/收起是要看新内容的，不抢滚动。
-function useStreamFoldAnchor(ref: { current: HTMLDivElement | null }, folded: boolean) {
+// 这里做局部滚动锚定：本组只要「变矮」（行被收纳、结果预览被收起，含组里还有
+// 运行中行的部分收纳），就把高度差反向补进 scrollTop（用户没滚动、也没在跟底部
+// 时），组下方的内容原地不动。变高不补偿：那是新内容往下长，跟随时照常贴底。
+function useStreamShrinkAnchor(ref: { current: HTMLDivElement | null }) {
   const previous = useRef<{ bottom: number; scrollTop: number } | null>(null);
-  const wasFolded = useRef(folded);
   useLayoutEffect(() => {
     const node = ref.current;
     const viewport = node?.closest<HTMLElement>(".chat-scroll");
+    if (!node || !viewport) return;
+    const bottom = node.getBoundingClientRect().bottom;
     const last = previous.current;
-    if (node && viewport && last && folded && !wasFolded.current) {
+    if (last && Math.abs(bottom - last.bottom) > 1) {
       const anchored = foldAnchorScrollTop({
         previousBottom: last.bottom,
-        bottom: node.getBoundingClientRect().bottom,
+        bottom,
         scrollTop: viewport.scrollTop,
         previousScrollTop: last.scrollTop,
         scrollHeight: viewport.scrollHeight,
         clientHeight: viewport.clientHeight,
+        viewportTop: viewport.getBoundingClientRect().top,
       });
       if (anchored !== null) viewport.scrollTop = anchored;
     }
-    wasFolded.current = folded;
-    if (node && viewport)
-      previous.current = { bottom: node.getBoundingClientRect().bottom, scrollTop: viewport.scrollTop };
+    previous.current = { bottom: node.getBoundingClientRect().bottom, scrollTop: viewport.scrollTop };
   });
 }
 
@@ -13365,7 +13365,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 组内第一行（流内、靠右），展开只让下面的行向下长高，徽章位置不变；
   // 容器也不再归零高度——折叠行本身 0fr 已无高度，容器就恰好只有徽章这一行。
   const folded = merged && completedIds.size === activities.length;
-  useStreamFoldAnchor(runRef, folded);
+  useStreamShrinkAnchor(runRef);
   // Visual contract: pulse when NEW results actually enter collapsed Tools,
   // including deferred handoff after completion. Completion alone must not pulse.
   // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
