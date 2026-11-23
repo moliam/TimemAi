@@ -96,20 +96,15 @@ describe("stream tool status continuity", () => {
     expect(row).not.toContain("summarized");
     expect(styles).toContain(".stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }");
     expect(styles).not.toContain(".stream-tool-run { position: relative; }");
-    // 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行尾，
-    // 且胶囊行盒要与文本末行等高对齐（高度取正文行高，上移自身高度 + 块间距）。
-    expect(styles).toContain(".stream-tool-run.merged { position: relative; margin: 0; }");
-    expect(styles).toContain(".stream-tool-run.merged.floating { height: 0; }");
-    expect(styles).toMatch(
-      /\.stream-tool-run\.merged\.floating \.stream-tool-run-toggle \{[^}]*position: absolute;[^}]*height: calc\(var\(--content-size\) \* 1\.68\);[^}]*transform: translateY\(calc\(var\(--stream-content-gap\) \* -1\)\);/s,
-    );
+    // 用户反馈：徽章不许盖住任何内容（含正文末行/卡片/尾行统计），且展开时不许跑位。
+    // 因此徽章是组内第一行、流内靠右对齐；容器绝不归零高度，展开只向下长高。
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*display: flex;[^}]*width: fit-content;[^}]*margin-left: auto;/s);
+    expect(styles).not.toMatch(/\.stream-tool-run\.merged[^{]*\{[^}]*height: 0/);
+    expect(styles).not.toMatch(/\.stream-tool-run-toggle \{[^}]*position: absolute/);
     // 零高度悬浮只允许出现在「每一行都确实收起」的组里；混合组仍有可见行
     // （文件修改卡、运行中行）时必须保持正常流高度，否则可见行会溢出叠印正文。
     expect(source).toContain("const folded = merged && completedIds.size === activities.length;");
-    expect(source).toContain("const floating = folded && afterText;");
-    // 组前不是正文段落（文件修改卡、无前文）时不悬浮，徽章回到流内靠右。
-    expect(source).toContain('const afterText = index > 0 && groups[index - 1][0].activity?.tone !== "action";');
-    expect(source).toContain('className={`stream-tool-run${folded ? " merged" : ""}${floating ? " floating" : ""}`}');
+    expect(source).toContain('className={`stream-tool-run${folded ? " merged" : ""}`}');
     expect(styles).not.toContain("stream-tool-row::before");
     expect(styles).toContain(".stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }");
   });
@@ -128,18 +123,45 @@ describe("collapsed tool summary", () => {
       summary?.indexOf("stream-tool-run-glyph") ?? -1,
     );
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
-    // 用户反馈：徽章要有底色色块，不再以透明字形浮在正文上。
-    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*background: rgba\(255, 255, 255, 0\.07\);/);
+    // 用户反馈：徽章用无框色块（不要描边），只用底色把徽章和正文分开。
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*border: 0;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*background: rgba\(255, 255, 255, 0\.08\);/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*border-radius: 999px;/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 9px 2px 5px;/);
+    expect(styles).not.toMatch(/\.stream-tool-run-toggle \{[^}]*border: 1px solid/);
   });
 });
 
-it("keeps automatic tool absorption free of page-wide height animation", () => {
+it("absorbs tools instantly and compensates the scroll instead of animating the page", () => {
+  // 用户反馈：收起时界面上下跳（常连带结果预览一起收起，变化很大）。缓动只把
+  // 位移拉长，救不了阅读位置；因此收纳保持瞬时，位移由 useStreamLayoutAnchor
+  // 反向补进 scrollTop，且不得出现整页高度/滚动动画。
   const rule = styles.match(/\.stream-tool-merged-item \{([^}]*)\}/)?.[1];
   expect(rule).toBeDefined();
   expect(rule).not.toContain("transition:");
+  expect(source).toContain("function useStreamFoldAnchor(");
+  expect(source).toContain("useStreamFoldAnchor(runRef, folded);");
+  // 只补偿自动收起；用户自己点开/收起不抢滚动。
+  expect(source).toContain("folded && !wasFolded.current");
+  expect(source).toContain("if (anchored !== null) viewport.scrollTop = anchored;");
+  expect(source).toContain("foldAnchorScrollTop({");
   expect(styles).toContain(".stream-tool-count.incremented { animation:");
+});
+
+it("badge keeps one flat capsule: smaller font, sign merged into the pill background", () => {
+  // 用户反馈：徽章字体再小一点；左侧 +/− 不要单独底色，并进胶囊底色。
+  const toggle = styles.match(/\.stream-tool-run-toggle \{([^}]*)\}/)?.[1];
+  expect(toggle).toBeDefined();
+  expect(toggle).toContain("font-size: calc(var(--content-size) * .85);");
+  const sign = styles.match(/\.stream-tool-run-sign \{([^}]*)\}/)?.[1];
+  expect(sign).toBeDefined();
+  expect(sign).not.toContain("background");
+  expect(sign).not.toContain("border-radius");
+  expect(styles).not.toContain(':root[data-theme="light"] .stream-tool-run-sign');
+  // 计数跟随徽章字号，不再用独立的 content-size 比例。
+  const count = styles.match(/\.stream-tool-count \{([^}]*)\}/)?.[1];
+  expect(count).toBeDefined();
+  expect(count).toContain("font-size: 1em;");
 });
 
 it("keeps the running dot static without pulsing animations", () => {
@@ -177,8 +199,11 @@ it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
   expect(styles).toContain('src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2")');
   expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-family: "IBM Plex Mono"/);
   expect(styles).toMatch(/\.stream-tool-run,[\s\S]*\.tool-activity \{[\s\S]*font-family: "IBM Plex Mono"/);
-  expect(styles).toContain('.stream-tool-head,\n.stream-tool-run-toggle,\n.tool-activity,\n.tool-activity b { font-size: 12.5px; }');
-  expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-size: calc\(var\(--content-size\) \* \.888889\); font-weight: 300;/);
+  expect(styles).toContain('.stream-tool-head,\n.tool-activity,\n.tool-activity b { font-size: 12.5px; }');
+  // 折叠徽章有自己更小的字号，不再继承工具行的 12.5px。
+  expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-size: calc\(var\(--content-size\) \* \.85\);/);
+  // 计数按徽章字号缩放（1em），不再单独用 content-size 比例，避免比徽章还大。
+  expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-size: 1em; font-weight: 300;/);
   const font = readFileSync(new URL("../public/fonts/IBMPlexMono-Latin-300.woff2", import.meta.url));
   expect(font.readUInt32BE(0)).toBe(0x774f4632);
   expect(readFileSync(new URL("../public/fonts/IBMPlexMono-OFL.txt", import.meta.url), "utf8")).toContain("SIL OPEN FONT LICENSE");
@@ -256,9 +281,12 @@ it("gives expanded edit cards a dedicated command collapse back to the diff-only
   expect(stream).toContain("if (editsAutoOpen) {");
   expect(ordinary).toContain("if (editsAutoOpen) {");
   // The expanded command block carries its own collapse button in both cards.
-  expect(stream).toContain("const collapseCommand = () => {");
+  // 流式卡片同时把这个入口交给 diff 缩略框：点缩略框回到 diff 视图，
+  // 归档卡片（ordinary）仍只有命令区的收起按钮。
+  expect(stream).toContain("const revealDiffOnly = () => {");
   expect(ordinary).toContain("const collapseCommand = () => {");
-  expect(stream).toContain('className="stream-tool-code-collapse" onClick={collapseCommand}');
+  expect(stream).toContain('className="stream-tool-code-collapse" onClick={revealDiffOnly}');
+  expect(stream).toContain("onActivate={revealDiffOnly}");
   expect(ordinary).toContain('className="tool-activity-code-collapse" onClick={collapseCommand}');
   // The dedicated collapse keeps the fold open and restores the auto state.
   expect(stream).toContain("setManuallyToggled(false);");

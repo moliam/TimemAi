@@ -192,6 +192,7 @@ import {
   adjacentUserMessageIndex,
   anchorScrollDelta,
   canScrollInDirection,
+  foldAnchorScrollTop,
   isNearScrollBottom,
   pickViewportTurnAnchor,
   preservePrependScrollTop,
@@ -13281,10 +13282,7 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
         // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
-        // 只有紧贴正文段落的折叠组才把徽章悬浮到末行行尾；组前若是实体块
-        // （文件修改卡、定时器等），悬浮徽章会压住它的内容，改为流内靠右。
-        const afterText = index > 0 && groups[index - 1][0].activity?.tone !== "action";
-        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} afterText={afterText} />;
+        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
       }
       const previewText = group[0].thoughtText;
       if (previewText)
@@ -13298,7 +13296,36 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   </section>;
 }
 
-function StreamToolRun({ activities, superseded, handoffIds, afterText }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string>; afterText: boolean }) {
+// 用户反馈：工具收起（往往还连带结果预览一起收起，变化很大）时界面上下跳得
+// 厉害，加缓动也没用——问题不是快慢，而是这几百像素的位移把正在阅读的内容推走。
+// 这里做局部滚动锚定：自动收纳发生的那一刻，把本组底缘的高度差反向补进
+// scrollTop（用户没滚动、也没在跟底部时），使组下方的内容原地不动。
+// 只补偿「自动收起」；用户自己点开/收起是要看新内容的，不抢滚动。
+function useStreamFoldAnchor(ref: { current: HTMLDivElement | null }, folded: boolean) {
+  const previous = useRef<{ bottom: number; scrollTop: number } | null>(null);
+  const wasFolded = useRef(folded);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    const viewport = node?.closest<HTMLElement>(".chat-scroll");
+    const last = previous.current;
+    if (node && viewport && last && folded && !wasFolded.current) {
+      const anchored = foldAnchorScrollTop({
+        previousBottom: last.bottom,
+        bottom: node.getBoundingClientRect().bottom,
+        scrollTop: viewport.scrollTop,
+        previousScrollTop: last.scrollTop,
+        scrollHeight: viewport.scrollHeight,
+        clientHeight: viewport.clientHeight,
+      });
+      if (anchored !== null) viewport.scrollTop = anchored;
+    }
+    wasFolded.current = folded;
+    if (node && viewport)
+      previous.current = { bottom: node.getBoundingClientRect().bottom, scrollTop: viewport.scrollTop };
+  });
+}
+
+function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
   const showResults = useToolResultStatus();
   const [expanded, setExpanded] = useState(false);
   // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
@@ -13334,9 +13361,11 @@ function StreamToolRun({ activities, superseded, handoffIds, afterText }: { acti
   // 用户反馈：组里还有可见行（文件修改卡、运行中行）时界面很乱——容器一旦
   // 收成零高度，可见行就从锚点向下溢出、叠印后续正文。零高度悬浮只允许出现
   // 在「每一行都确实被收起」的组里；混合组保持正常流高度，徽章也回到流内。
+  // 用户反馈：徽章绝不能盖住任何内容，点击展开时也不许移位。因此徽章始终是
+  // 组内第一行（流内、靠右），展开只让下面的行向下长高，徽章位置不变；
+  // 容器也不再归零高度——折叠行本身 0fr 已无高度，容器就恰好只有徽章这一行。
   const folded = merged && completedIds.size === activities.length;
-  // 悬浮徽章只对齐正文末行；组前是实体块时落在流内（靠右单行），不压别人。
-  const floating = folded && afterText;
+  useStreamFoldAnchor(runRef, folded);
   // Visual contract: pulse when NEW results actually enter collapsed Tools,
   // including deferred handoff after completion. Completion alone must not pulse.
   // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
@@ -13360,9 +13389,9 @@ function StreamToolRun({ activities, superseded, handoffIds, afterText }: { acti
   // 控件契约：视觉收起（含双击选中展开等交互保持）显示 + tools xN，
   // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
-  return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}${floating ? " floating" : ""}`}>
+  return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}`}>
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={10} strokeWidth={1.65} /> : <Minus size={10} strokeWidth={1.65} />}</span><Wrench size={12} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
@@ -13446,7 +13475,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
   const resultPreview = activity.result_preview;
   const [previewReopened, setPreviewReopened] = useState(false);
   const [previewDismissed, setPreviewDismissed] = useState(false);
-  const previewVisible = !!resultPreview && !previewDismissed && (running || !absorbed || previewReopened);
+  // 用户反馈：带文件修改证据的命令优先显示 diff 框，不再默认展开结果预览；
+  // 预览只在用户主动点行尾眼睛徽章后出现。
+  const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !absorbed)));
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -13479,9 +13510,10 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
     setManuallyToggled(true);
     setExpanded(current => !current);
   };
-  const collapseCommand = () => {
-    // Dedicated collapse for the expanded command block: back to the
-    // diff-only auto state while the fold stays open.
+  const revealDiffOnly = () => {
+    // Back to the diff-only auto state while the fold stays open: used by the
+    // command block's own collapse control and by the diff chip, so clicking
+    // the diff summary shows the diff instead of the command view.
     setManuallyToggled(false);
     setExpanded(true);
   };
@@ -13504,7 +13536,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span>}
-        {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
+        {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} onActivate={revealDiffOnly} /> : null}
         {((running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined ||
@@ -13557,7 +13589,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
           {!editsAutoOpen && code && (
             <div className="stream-tool-command-shell">
               {hasEdits && (
-                <button type="button" className="stream-tool-code-collapse" onClick={collapseCommand}>
+                <button type="button" className="stream-tool-code-collapse" onClick={revealDiffOnly}>
                   {t("tools.collapseCommand")}
                 </button>
               )}

@@ -26,15 +26,46 @@ const SKIP_LABEL_KEYS: Record<string, StringKey> = {
 
 
 // Compact always-visible summary for the tool card header line.
-export function FileEditsChip({ edits }: { edits: FileEditsPresentation }) {
+export function FileEditsChip({
+  edits,
+  onActivate,
+}: {
+  edits: FileEditsPresentation;
+  // Clicking the diff summary must reveal the diff itself; the surrounding
+  // tool row header would otherwise swallow the click and expand the command
+  // view. The chip therefore owns activation and stops event bubbling.
+  onActivate?: () => void;
+}) {
   const added = edits.reduce((sum, edit) => sum + edit.added_lines, 0);
   const removed = edits.reduce((sum, edit) => sum + edit.removed_lines, 0);
-  return (
-    <span className="stream-tool-edits-chip" title={t("tools.fileEditsAria")}>
+  const content = (
+    <>
       <PenLine size={12} aria-hidden="true" />
       <span aria-label={t("tools.fileEditsAria")}>
         {t("tools.fileEditsChip", { count: edits.length, added, removed })}
       </span>
+    </>
+  );
+  if (!onActivate)
+    return <span className="stream-tool-edits-chip" title={t("tools.fileEditsAria")}>{content}</span>;
+  return (
+    <span
+      className="stream-tool-edits-chip stream-tool-edits-chip-action"
+      role="button"
+      tabIndex={0}
+      title={t("tools.fileEditsAria")}
+      onClick={event => {
+        event.stopPropagation();
+        onActivate();
+      }}
+      onKeyDown={event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onActivate();
+      }}
+    >
+      {content}
     </span>
   );
 }
@@ -46,10 +77,13 @@ export function FileEditsChip({ edits }: { edits: FileEditsPresentation }) {
 // repeating the same numbers there only tripled the same reading three times.
 export function FileEditsPanel({ edits }: { edits: ReadonlyArray<TurnEditEntry> }) {
   const wrap = useBetaPreference("fileEditsWrap");
+  // A single file needs no ordinal: "1." only repeats what the card already
+  // says. The index appears only when the panel lists several files.
+  const showIndex = edits.length > 1;
   return (
     <div className={`file-edits-panel${wrap ? " edits-wrap" : ""}`} aria-label={t("tools.fileEditsAria")}>
       {edits.map((edit, index) => (
-        <FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} />
+        <FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} showIndex={showIndex} />
       ))}
     </div>
   );
@@ -175,7 +209,7 @@ function splitEditPath(path: string): { directory: string; name: string } {
   };
 }
 
-function FileEditSection({ edit, index }: { edit: TurnEditEntry; index: number }) {
+function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; index: number; showIndex: boolean }) {
   // With turn auto-collapse on (the default), sections stay folded so the
   // reader expands only the files they care about; when auto-collapse is
   // off, sections carrying a diff stay expanded and notice-only sections
@@ -215,7 +249,7 @@ function FileEditSection({ edit, index }: { edit: TurnEditEntry; index: number }
           toggle();
         }}
       >
-        <span className="file-edit-index">{index + 1}.</span>
+        {showIndex && <span className="file-edit-index">{index + 1}.</span>}
         <span className={`file-edit-op file-edit-op-${edit.op}`}>{t(OP_LABEL_KEYS[edit.op])}</span>
         <span className="file-edit-path" title={edit.path}>
           {directory && <span className="file-edit-directory">{directory}</span>}

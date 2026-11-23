@@ -107,7 +107,10 @@ describe("parseDiffRows", () => {
 describe("file edits surfaces", () => {
   it("renders the panel and chip in both tool card variants", () => {
     expect(main.match(/<FileEditsPanel edits=\{activity\.edits\} \/>/g)).toHaveLength(2);
-    expect(main.match(/<FileEditsChip edits=\{activity\.edits\} \/>/g)).toHaveLength(2);
+    // 用户反馈：点 diff 缩略框要展开 diff——流式行里的缩略框自己是控件，
+    // 归档行保持纯静态摘要。
+    expect(main.match(/<FileEditsChip edits=\{activity\.edits\} onActivate=\{revealDiffOnly\} \/>/g)).toHaveLength(1);
+    expect(main.match(/<FileEditsChip edits=\{activity\.edits\} \/>/g)).toHaveLength(1);
     expect(main).toContain("!!code || !!detail || !!activity.edits?.length");
     expect(main).toContain("!!detail || !!code || !!activity.edits?.length");
     expect(main).toContain("JSON.stringify(a.edits) === JSON.stringify(b.edits)");
@@ -229,6 +232,32 @@ describe("file edits components render server-side", () => {
     expect(html).toContain("2");
     expect(html).toContain("+3");
     expect(html).toContain("\u22124");
+    // 静态摘要（归档视图）不是按钮，不会吞掉行头的展开行为。
+    expect(html).not.toContain('role="button"');
+  });
+
+  it("chip is its own activator when it can reveal the diff", () => {
+    const html = renderToString(createElement(FileEditsChip, {
+      edits: [{ ...validEntry }],
+      onActivate: () => {},
+    }));
+    expect(html).toContain("stream-tool-edits-chip-action");
+    expect(html).toContain('role="button"');
+    expect(html).toContain("tabindex=\"0\"");
+  });
+
+  it("hides the file ordinal when the panel lists a single file", () => {
+    // 用户反馈：只有一个文件时不要「1.」这种序号，多文件才需要序号定位。
+    const single = renderToString(createElement(FileEditsPanel, {
+      edits: [{ ...validEntry, path: "only.txt" }],
+    }));
+    expect(single).not.toContain("file-edit-index");
+    const multi = renderToString(createElement(FileEditsPanel, {
+      edits: [{ ...validEntry, path: "a.txt" }, { ...validEntry, path: "b.txt" }],
+    }));
+    expect(multi.match(/file-edit-index/g)).toHaveLength(2);
+    expect(multi).toMatch(/file-edit-index">1</);
+    expect(multi).toMatch(/file-edit-index">2</);
   });
 
   it("shows unchanged row line numbers once instead of one per side", () => {
@@ -451,10 +480,11 @@ describe("turn edits summary box renders server-side", () => {
 });
 
 describe("file edits panel numbering", () => {
-  it("labels each section head with its 1-based index before the op badge", () => {
-    expect(component).toContain('<FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} />');
-    expect(component).toContain("edit: TurnEditEntry; index: number");
-    const headIndex = component.indexOf('<span className="file-edit-index">{index + 1}.</span>');
+  it("labels each section head with its 1-based index before the op badge, only for multiple files", () => {
+    expect(component).toContain('<FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} showIndex={showIndex} />');
+    expect(component).toContain("const showIndex = edits.length > 1;");
+    expect(component).toContain("edit: TurnEditEntry; index: number; showIndex: boolean");
+    const headIndex = component.indexOf('{showIndex && <span className="file-edit-index">{index + 1}.</span>}');
     const opIndex = component.indexOf("file-edit-op file-edit-op-");
     expect(headIndex).toBeGreaterThan(-1);
     expect(headIndex).toBeLessThan(opIndex);

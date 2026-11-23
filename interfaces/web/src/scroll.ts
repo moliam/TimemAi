@@ -12,6 +12,27 @@ export function preservePrependScrollTop(previous: ScrollMetrics, nextScrollHeig
   return Math.max(0, previous.scrollTop + Math.max(0, nextScrollHeight - previous.scrollHeight));
 }
 
+/**
+ * 自动工具收纳时的局部滚动锚定。收纳会把「折叠了多少像素」整段移走；只要用户
+ * 没在跟底部、自己也没滚动，就把这段高度差反向补进 scrollTop，让组下方正在
+ * 阅读的内容原地不动，而不是整屏上下跳。返回 null 表示本次不应补偿。
+ */
+export function foldAnchorScrollTop(input: {
+  previousBottom: number;
+  bottom: number;
+  scrollTop: number;
+  previousScrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  threshold?: number;
+}): number | null {
+  const delta = input.bottom - input.previousBottom;
+  if (Math.abs(delta) <= 1) return null;
+  if (isNearScrollBottom(input, input.threshold)) return null;
+  if (Math.abs(input.scrollTop - input.previousScrollTop) > 1) return null;
+  return Math.max(0, input.scrollTop + delta);
+}
+
 export function isNearScrollBottom(metrics: ScrollMetrics & { clientHeight: number }, threshold = 72) {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
 }

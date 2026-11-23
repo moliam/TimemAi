@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjacentUserMessageIndex, anchorScrollDelta, canScrollInDirection, isNearScrollBottom, pickViewportTurnAnchor, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
+import { adjacentUserMessageIndex, anchorScrollDelta, canScrollInDirection, foldAnchorScrollTop, isNearScrollBottom, pickViewportTurnAnchor, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -137,5 +137,37 @@ describe("hydration scroll anchoring", () => {
     // Growth at or below the anchor leaves it in place: no correction.
     expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20)).toBe(0);
     expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20.5)).toBe(0);
+  });
+});
+
+describe("automatic tool fold scroll anchoring", () => {
+  const base = {
+    scrollTop: 1200,
+    previousScrollTop: 1200,
+    scrollHeight: 4000,
+    clientHeight: 800,
+  };
+
+  it("compensates the collapsed height so the content below stays put", () => {
+    // 组底缘上移 420px（收起），scrollTop 同步上移 420，读者看到的内容不动。
+    expect(foldAnchorScrollTop({ ...base, previousBottom: 900, bottom: 480 })).toBe(780);
+  });
+
+  it("compensates expansion as well", () => {
+    expect(foldAnchorScrollTop({ ...base, previousBottom: 480, bottom: 900 })).toBe(1620);
+  });
+
+  it("does nothing when the reader is following the bottom", () => {
+    // 跟随时由底部钳制接管，补偿会把视口顶出底部。
+    expect(foldAnchorScrollTop({ ...base, scrollTop: 3200, previousScrollTop: 3200, previousBottom: 900, bottom: 480 })).toBeNull();
+  });
+
+  it("does nothing when the user scrolled since the last commit", () => {
+    expect(foldAnchorScrollTop({ ...base, previousScrollTop: 900, previousBottom: 900, bottom: 480 })).toBeNull();
+  });
+
+  it("ignores sub-pixel layout noise and clamps at the top", () => {
+    expect(foldAnchorScrollTop({ ...base, previousBottom: 900, bottom: 900.6 })).toBeNull();
+    expect(foldAnchorScrollTop({ ...base, scrollTop: 100, previousScrollTop: 100, previousBottom: 900, bottom: 200 })).toBe(0);
   });
 });

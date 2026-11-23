@@ -128,8 +128,11 @@ describe("result preview surfaces and contracts", () => {
     expect(main).toContain('className="stream-tool-result-reopen"');
     // 流式行（用户反馈）：自动展开（运行中/未收纳常驻持续刷新 tail）；无标题标签；
     // 收纳或手动收起后仅在工具行头行尾保留图标徽章（不单独占行）再展开。
-    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (running || !absorbed || previewReopened);");
+    // 用户反馈：命令带 diff 框时优先显示 diff，结果预览不再默认展开（仅眼睛徽章可开）。
+    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !absorbed)));");
     expect(main).toContain("{previewVisible && (");
+    // 用户反馈：收起带来的位移不能让阅读位置跑掉——由流内局部滚动锚定补偿。
+    expect(main).toContain("useStreamFoldAnchor(runRef, folded);");
     expect(main).toContain("!running && resultPreview && !previewVisible && (");
     expect(main).toContain('aria-label={t("tools.resultPreview")}');
     expect(main).not.toContain("stream-tool-result-preview-badge");
@@ -149,6 +152,17 @@ describe("result preview surfaces and contracts", () => {
     expect(block).toContain("border: none;");
     expect(block).toContain("background:");
     expect(block).not.toContain("dashed");
+    // 用户反馈：不只在最外层去虚线——head 的虚线下分隔线也要去掉，
+    // 正文左侧的 2px 粗色条同样去掉，整个预览就只剩一块圆角色块。
+    const headStart = styles.indexOf(".stream-tool-result-preview-head {");
+    const head = styles.slice(headStart, styles.indexOf("}", headStart) + 1);
+    expect(head).not.toContain("dashed");
+    expect(head).toContain("border: 0;");
+    const bodyStart = styles.indexOf(".stream-tool-result-preview-body {");
+    const body = styles.slice(bodyStart, styles.indexOf("}", bodyStart) + 1);
+    expect(body).not.toContain("border-left");
+    expect(body).toContain("border: 0;");
+    expect(styles).not.toContain(".stream-tool-result-preview.running .stream-tool-result-preview-body");
     expect(styles).toContain("@keyframes stream-result-pulse");
     for (const selector of [
       ':root[data-theme="light"] .stream-tool-result-preview {',

@@ -636,7 +636,18 @@ async function main() {
     host.setSession(serial); host.send({ type: "hello", snapshot: makeSnapshot(serial) });
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 1 && document.querySelectorAll('.stream-tool-row.running').length === 1`), "serial B start must fold A and retain B");
     assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row')`), "serial handoff remounted A");
-    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-merged-item')).transitionDuration === '0s'`), "automatic tool handoff must not animate page layout");
+    // 用户反馈：收起时界面上下跳——收纳保持瞬时（不靠动画拉长位移），
+    // 位移改成由滚动锚定补偿，且绝不能出现整页/滚动条的过渡动画。
+    const handoffTiming = await browser.evaluate(`(() => {
+      const item = document.querySelector('.stream-tool-merged-item');
+      const style = getComputedStyle(item);
+      const viewport = getComputedStyle(document.querySelector('.chat-scroll'));
+      return {duration: style.transitionDuration, property: style.transitionProperty,
+        viewportDuration: viewport.transitionDuration, scrollBehavior: viewport.scrollBehavior};
+    })()`);
+    assert(handoffTiming.duration.split(',')[0].trim() === '0s', `automatic tool handoff must stay instant and compensate scroll instead: ${JSON.stringify(handoffTiming)}`);
+    assert(handoffTiming.viewportDuration === '0s' && handoffTiming.scrollBehavior === 'auto', `handoff must never animate the viewport: ${JSON.stringify(handoffTiming)}`);
+    // 跟随时收纳不移动视口内容：提交后逐帧采样必须保持稳定。
     const settledPositions = await browser.evaluate(`new Promise(resolve => {
       const positions = []; let remaining = 18;
       const sample = () => {
@@ -652,20 +663,19 @@ async function main() {
     }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
-      // 悬浮徽章契约（用户指定设计）：折叠组零占位、徽章右缘贴组右、完全位于
-      // 运行行上方且处于文本列右侧；胶囊行盒与上一段文本末行等高，底缘落在
-      // 文本块底缘（即末行行盒底缘）——只上移自身高度会压到下一行去。
+      // 徽章契约（用户指定设计）：徽章绝不覆盖前序内容，也不覆盖后续行。
+      // 它是折叠组自身的第一行（流内、右缘贴组右），收起时组高就等于徽章行高；
+      // 展开只让行向下长高，徽章的四边位置保持不变。
       const alignment = await browser.evaluate(`(() => {
         const run = document.querySelector('.stream-tool-run.merged');
         const badge = document.querySelector('.stream-tool-run-toggle');
         const live = document.querySelector('.stream-tool-row.running');
         const prev = run?.previousElementSibling;
         const g=badge?.getBoundingClientRect(),b=live?.getBoundingClientRect(),r=run?.getBoundingClientRect(),p=prev?.getBoundingClientRect();
-        const lineHeight = prev ? parseFloat(getComputedStyle(prev).lineHeight) : 0;
-        return {ok:!!g&&!!b&&!!r&&!!p&&r.height<2&&Math.abs(g.right-r.right)<2&&Math.abs(g.bottom-p.bottom)<1.5&&Math.abs(g.height-lineHeight)<1&&g.bottom<b.top&&g.left>b.left+4,
-          badge:g&&{left:g.left,right:g.right,bottom:g.bottom,h:g.height},lineHeight,live:b&&{left:b.left,top:b.top},run:r&&{height:r.height,right:r.right},prev:p&&{bottom:p.bottom}};
+        return {ok:!!g&&!!b&&!!r&&!!p&&r.height>=18&&r.height<=24&&Math.abs(g.right-r.right)<1&&Math.abs(g.top-r.top)<1&&Math.abs(g.bottom-r.bottom)<1&&g.top>=p.bottom-0.5&&g.bottom<b.top&&g.left>b.left+4,
+          badge:g&&{left:g.left,right:g.right,top:g.top,bottom:g.bottom,h:g.height},live:b&&{left:b.left,top:b.top},run:r&&{height:r.height,right:r.right,top:r.top},prev:p&&{bottom:p.bottom}};
       })()`);
-      assert(alignment.ok, `floating collapsed badge must be right-flush and line-aligned above the group anchor without layout height at ${width}px: ${JSON.stringify(alignment)}`);
+      assert(alignment.ok, `collapsed badge must be the group's own first row, right-flush and never covering neighbours at ${width}px: ${JSON.stringify(alignment)}`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
 
@@ -1289,7 +1299,7 @@ async function main() {
       const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
       return [...document.fonts].some(font => font.family.includes('IBM Plex Mono') && font.status === 'loaded')
         && style.fontFamily.includes('IBM Plex Mono') && style.fontWeight === '300'
-        && Math.abs(parseFloat(style.fontSize) - contentSize * .888889) < .1;
+        && Math.abs(parseFloat(style.fontSize) - contentSize * .85) < .1;
     })()`), "tool count must load local IBM Plex Mono 300 and scale with chat text");
     assert(await browser.evaluate(`(() => {
       const root = document.documentElement;
@@ -1343,6 +1353,13 @@ async function main() {
       const hasLabel = spans.some(span => span.textContent === '工具');
       return hasLabel && spans.every(span => getComputedStyle(span).fontWeight === (span.classList.contains('stream-tool-count') ? '300' : '400'));
     })()`), "tools label must retain normal weight while counts use light weight");
+    assert(await browser.evaluate(`(() => {
+      const toggle = document.querySelector('.stream-tool-run-toggle');
+      const sign = toggle.querySelector('.stream-tool-run-sign');
+      const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
+      const font = parseFloat(getComputedStyle(toggle).fontSize);
+      return getComputedStyle(sign).backgroundColor === 'rgba(0, 0, 0, 0)' && Math.abs(font - contentSize * .85) < .1;
+    })()`), "badge must use the smaller type size with the +/- merged into the pill background");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {
@@ -1397,6 +1414,54 @@ async function main() {
       // Restore the archive-on default for any later assertions and clean the round.
       await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
       console.log("PASS Chrome archive sub-setting: default expanded, nested settings switch, live toggle, reload consistency");
+    }
+    // --- 用户反馈：diff 优先于结果预览、点缩略框只展开 diff、多文件才编号 ---
+    {
+      const editEntry = (path, diff, op = "modified") => ({
+        path, op, diff, added_lines: 2, removed_lines: 1, truncated: false, skip_reason: null,
+      });
+      const editAction = (status) => ({
+        action: "run_bash", action_id: "edit-call", status,
+        input: { cmd: "sed -i s/a/b/ src/one.rs src/two.rs" },
+        code: "sed -i s/a/b/ src/one.rs src/two.rs",
+        tool_output_preview: "edited one.rs\nedited two.rs\n2 files changed",
+        edits: [
+          editEntry("src/one.rs", "--- a/src/one.rs\n+++ b/src/one.rs\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"),
+          editEntry("src/two.rs", "--- a/src/two.rs\n+++ b/src/two.rs\n@@ -0,0 +1,2 @@\n+alpha\n+beta\n", "created"),
+        ],
+      });
+      const editEvent = (status, time) => ({
+        event_id: "edit-call", source: "core_topic", created_at_ms: time,
+        payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: editAction(status) },
+      });
+      await setRound([thoughtEvent("edit-thought", "Edit thought", 1), editEvent("running", 2)], "Editing files");
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.file-edit-section')`), "edit panel missing while running");
+      const runningPreview = await browser.evaluate(`({
+        preview: !!document.querySelector('.stream-tool-result-preview'),
+        edits: !!document.querySelector('.file-edit-section'),
+      })`);
+      // 用户反馈：有 diff 框就不默认展开结果预览，diff 优先。
+      assert(runningPreview.edits && !runningPreview.preview, `edit rows must show the diff instead of the result preview: ${JSON.stringify(runningPreview)}`);
+      const editBase = host.getSession();
+      const editDone = {...editBase, turns: editBase.turns.map(t => ({...t, events: [thoughtEvent("edit-thought", "Edit thought", 1), editEvent("completed", 3)]}))};
+      host.setSession(editDone); host.send({type: "hello", snapshot: makeSnapshot(editDone)});
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-edits-chip[role="button"]')`), "diff chip is not its own control");
+      assert(await browser.evaluate(`document.querySelectorAll('.file-edit-section').length === 2 && document.querySelectorAll('.file-edit-index').length === 2`), "multi-file panel must number its sections");
+      assert(await browser.evaluate(`!document.querySelector('.stream-tool-result-preview') && !!document.querySelector('.stream-tool-result-reopen')`), "completed edit row re-opened the result preview instead of offering the eye badge");
+      await browser.evaluate(`document.querySelector('.stream-tool-head').click()`);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-command-shell')`), "row head must still expand the command view");
+      await browser.evaluate(`document.querySelector('.stream-tool-edits-chip').click()`);
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-command-shell')`), "diff chip click must return to the diff view");
+      assert(await browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded') && document.querySelectorAll('.file-edit-section').length === 2`), "diff chip click collapsed the fold or hid the diff");
+      const singleAction = {...editAction("completed"), action_id: "edit-single", edits: [editEntry("src/solo.rs", "--- a/src/solo.rs\n+++ b/src/solo.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n")]};
+      const singleEvent = { event_id: "edit-single", source: "core_topic", created_at_ms: 4,
+        payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: singleAction } };
+      const singleBase = host.getSession();
+      const singleDone = {...singleBase, turns: singleBase.turns.map(t => ({...t, events: [thoughtEvent("edit-thought", "Edit thought", 1), singleEvent]}))};
+      host.setSession(singleDone); host.send({type: "hello", snapshot: makeSnapshot(singleDone)});
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.file-edit-section').length === 1`), "single-file panel missing");
+      assert(await browser.evaluate(`document.querySelectorAll('.file-edit-index').length === 0`), "single-file panel must not print a file ordinal");
+      console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files");
     }
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");

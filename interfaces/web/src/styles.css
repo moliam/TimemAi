@@ -5797,65 +5797,49 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .live-interim-answer { font-size: var(--content-size); line-height: 1.68; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-fold { transition: none; } }
 
-/* Automatic handoff is atomic: height animation moves every following block and
-   competes with viewport follow. Only the absorbed count animates locally. */
+/* 用户反馈：工具收起时（常连带结果预览）界面上下跳得厉害。缓动救不了这件事，
+   因为要解决的是位移本身，所以收纳保持瞬时，由 main.tsx 的 useStreamLayoutAnchor
+   把高度差反向补进 scrollTop：正在阅读的内容原地不动。 */
 .stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
-/* 用户反馈：徽章需要底色色块——不再以纯悬浮字形压在正文上，改成一枚贴内容的
-   胶囊（描边 + 浅底 + 圆角），展开/收起两种形态共用同一块底。 */
+/* 用户反馈：徽章是无框色块（取消描边，只用底色把徽章和正文分开），而且必须
+   留在原位——它始终是组内第一行、靠右对齐；展开只让下面的行向下长高，
+   徽章的横纵位置都不变，收起/展开共用同一块底。 */
 .stream-tool-run-toggle {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
+  margin-left: auto;
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 0;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.08);
   color: inherit;
   padding: 2px 9px 2px 5px;
   cursor: pointer;
-  font-size: 12px;
+  /* 用户反馈：徽章这块的字体再小一点；仍跟随聊天字号设置缩放（默认 13.5→11.475）。 */
+  font-size: calc(var(--content-size) * .85);
   font-weight: 400;
-  transition: background .15s ease, border-color .15s ease;
+  transition: background .15s ease;
 }
 .stream-tool-run-toggle:hover,
-.stream-tool-run-toggle:focus-visible { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.18); }
-:root[data-theme="light"] .stream-tool-run-toggle { background: rgba(20, 40, 50, 0.05); border-color: rgba(20, 40, 50, 0.12); }
+.stream-tool-run-toggle:focus-visible { background: rgba(255, 255, 255, 0.13); }
+:root[data-theme="light"] .stream-tool-run-toggle { background: rgba(20, 40, 50, 0.07); }
 :root[data-theme="light"] .stream-tool-run-toggle:hover,
-:root[data-theme="light"] .stream-tool-run-toggle:focus-visible { background: rgba(20, 40, 50, 0.09); border-color: rgba(20, 40, 50, 0.2); }
-/* Compact glyph row: wrench stands for "tools", the sign chip flips between
-   a fine-lined plus (merged) and minus (expanded) with a soft tinted pill. */
+:root[data-theme="light"] .stream-tool-run-toggle:focus-visible { background: rgba(20, 40, 50, 0.12); }
+/* Compact glyph row: wrench stands for "tools", the leading sign flips between
+   a fine-lined plus (merged) and minus (expanded) inside the same capsule. */
 .stream-tool-run-glyph { flex: none; opacity: .85; }
-.stream-tool-run-sign { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; flex: none; border-radius: 4px; background: #ffffff14; color: inherit; }
-:root[data-theme="light"] .stream-tool-run-sign { background: #26364012; }
+/* 用户反馈：徽章左侧的 +/− 不要单独底色，直接并进胶囊底色里。 */
+.stream-tool-run-sign { display: inline-flex; align-items: center; justify-content: center; flex: none; color: inherit; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
-/* 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行的行尾。
-   容器在折叠态高度归零（折叠行本身 0fr 已无高度），按钮绝对定位上移覆盖。
-   行盒对齐：按钮高度取正文行高（.stream-thought-text 的 1.68），底缘再上移
-   一个块间距，使胶囊正好覆盖文本末行的行盒、内容垂直居中——只按自身高度
-   上移会落到行盒下沿并压到下一行去，多上移一个间距则会跳到上一行。
-   悬浮只在组前紧邻正文段落时启用（main.tsx 的 floating 判定）；组前是文件
-   修改卡或没有前文时，徽章留在流内靠右，绝不压住别人的内容。
-   零高度组只允许出现在「每一行都已收起」的组里（见 main.tsx floating），
-   组里仍有可见行时容器保持正常流高度，徽章不再悬浮。 */
-.stream-tool-run.merged { position: relative; margin: 0; }
-.stream-tool-run.merged.floating { height: 0; }
-/* 不悬浮时（组前是实体块、或组前没有正文）徽章回到流内单行，靠右对齐。 */
-.stream-tool-run.merged .stream-tool-run-toggle { display: flex; width: fit-content; margin-left: auto; }
-.stream-tool-run.merged.floating .stream-tool-run-toggle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  height: calc(var(--content-size) * 1.68);
-  margin: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  transform: translateY(calc(var(--stream-content-gap) * -1));
-  z-index: 1;
-}
+/* 折叠组：徽章这一行保留高度（约一行），折叠行自身 0fr 已无高度，
+   所以收起态就只有徽章这一行；容器不归零高度，故任何可见内容都不会溢出叠印。 */
+.stream-tool-run.merged { margin: 0; }
 
 /* Controls remain visible and usable with keyboard, touch, long labels and narrow screens. */
 .stream-tool-run-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
@@ -5878,7 +5862,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .turn-stream-tools .user-supplement-line .user-plain-text { color: inherit; }
 
 /* Count feedback stays local; it does not change the tool archive layout. */
-.stream-tool-count { display: inline-block; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: calc(var(--content-size) * .888889); font-weight: 300; font-variant-numeric: tabular-nums; }
+.stream-tool-count { display: inline-block; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: 1em; font-weight: 300; font-variant-numeric: tabular-nums; }
 /* Visual contract: absorbed tools signal arrival with a 360ms count-only pulse.
    Do not animate container height here or remount rows; respect reduced motion. */
 .stream-tool-count.incremented { animation: stream-tool-count-increment 360ms ease-out; }
@@ -6551,9 +6535,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
 }
 .stream-tool-head,
-.stream-tool-run-toggle,
 .tool-activity,
 .tool-activity b { font-size: 12.5px; }
+/* 折叠徽章不在这组里：它有自己的更小字号（见 .stream-tool-run-toggle）。 */
 .tool-activity-group,
 .tool-activity-group-status { font-size: 10.5px; }
 .stream-tool-status,
@@ -7245,6 +7229,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   flex: none;
   white-space: nowrap;
 }
+/* 用户反馈：点 diff 缩略框要展开 diff，所以它自己就是可点控件。 */
+.stream-tool-edits-chip-action { cursor: pointer; }
+.stream-tool-edits-chip-action:hover { background: rgba(64, 180, 120, 0.2); }
+.stream-tool-edits-chip-action:focus-visible { outline: 2px solid #7fd6a4; outline-offset: 2px; }
+:root[data-theme="light"] .stream-tool-edits-chip-action:hover { background: #d2efdf; }
 .file-edits-panel {
   margin: 8px 0 0;
   padding: 7px 10px 8px;
@@ -7449,10 +7438,9 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-row-meta { color: #9aa7b0; }
 :root[data-theme="light"] .file-edit-notice { color: #8a6d1f; }
 
-/* 结果预览：仅观察的瞬时窗口。虚线边框 + 眼睛徽章与文件编辑卡（实线框）
-   明确区分；运行中带呼吸点实时更新，结束自动收起，徽章按钮可再次展开。
-   文本允许复制。 */
-/* 用户反馈：不要虚线框——无框色块呈现，圆角色块直接承载 tail。 */
+/* 结果预览：仅观察的瞬时窗口。无框圆角色块承载 tail（无虚线、无左侧粗色条），
+   运行中带呼吸点实时刷新，结束自动收起，行尾图标徽章可再次展开，文本允许复制。
+   收起时的高度变化同样由 useStreamLayoutAnchor 补偿，阅读位置不移动。 */
 .stream-tool-result-preview {
   margin: 6px 0 0;
   border: none;
@@ -7466,7 +7454,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   align-items: center;
   gap: 8px;
   padding: 4px 10px;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+  border: 0;
   font-size: 11px;
   color: #7f929e;
 }
@@ -7508,7 +7496,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .stream-tool-result-preview-body {
   margin: 0;
   padding: 6px 10px 8px;
-  border-left: 2px solid rgba(111, 211, 192, 0.45);
+  border: 0;
   font: 11px/1.55 "SFMono-Regular", Consolas, monospace;
   color: #9fb3bd;
   white-space: pre-wrap;
@@ -7516,9 +7504,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   max-height: 240px;
   overflow: auto;
   user-select: text;
-}
-.stream-tool-result-preview.running .stream-tool-result-preview-body {
-  border-left-color: rgba(127, 214, 164, 0.6);
 }
 /* 用户反馈：Eye 徽章不单独占行——内联在工具行头部行尾（margin-left:auto 靠右）。 */
 .stream-tool-result-reopen {
@@ -7541,7 +7526,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   background: rgba(20, 40, 50, 0.05);
 }
 :root[data-theme="light"] .stream-tool-result-preview-head {
-  border-bottom-color: rgba(20, 40, 50, 0.12);
   color: #5c6f7a;
 }
 :root[data-theme="light"] .stream-tool-result-preview-head > .stream-tool-result-preview-pulse { color: #1c7a4e; }
@@ -7552,7 +7536,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .stream-tool-result-preview-copy.copy-success { color: #1c7a4e; }
 :root[data-theme="light"] .stream-tool-result-preview-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .stream-tool-result-preview-body {
-  border-left-color: rgba(28, 122, 78, 0.5);
   color: #43545e;
 }
 :root[data-theme="light"] .stream-tool-result-reopen {
