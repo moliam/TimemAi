@@ -170,18 +170,27 @@ function withEndpointMaxInput(session, endpointId, tokens) {
     runtime_profile: { ...profile, endpoint_max_input_tokens: overrides, max_llm_input_tokens: effective },
   };
 }
+function activeReasoningEndpoint(profile) {
+  return profile.active_model_endpoint_id ?? profile.model_endpoint_id ?? null;
+}
+// Mirrors the Host: a per-endpoint selection wins over the session-wide choice,
+// and the visible effort is the value the next model request would use.
 function withReasoningEffort(session, effort) {
   const profile = session.runtime_profile ?? {};
-  return {
-    ...session,
-    runtime_profile: { ...profile, reasoning_effort: effort, endpoint_reasoning_efforts: { ...(profile.endpoint_reasoning_efforts ?? {}), [profile.active_model_endpoint_id ?? profile.model_endpoint_id]: effort } },
-  };
+  const active = activeReasoningEndpoint(profile);
+  const effective = (active ? profile.endpoint_reasoning_efforts?.[active] : undefined) ?? effort;
+  return { ...session, runtime_profile: { ...profile, reasoning_effort: effective } };
 }
 function withEndpointReasoningEffort(session, endpointId, effort) {
   const profile = session.runtime_profile ?? {};
+  const overrides = { ...(profile.endpoint_reasoning_efforts ?? {}), [endpointId]: effort };
   return {
     ...session,
-    runtime_profile: { ...profile, endpoint_reasoning_efforts: { ...(profile.endpoint_reasoning_efforts ?? {}), [endpointId]: effort } },
+    runtime_profile: {
+      ...profile,
+      endpoint_reasoning_efforts: overrides,
+      reasoning_effort: activeReasoningEndpoint(profile) === endpointId ? effort : profile.reasoning_effort,
+    },
   };
 }
 function withSessionMaxInput(session, tokens) {
@@ -906,8 +915,19 @@ async function main() {
       setter.call(select, 'medium');
       select.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await waitFor(() => host.commands.some((command) => command.type === 'session_reasoning_effort_update' && command.reasoning_effort === 'medium'), "reasoning update command");
+    await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_reasoning_effort_update' && command.endpoint_id === 'ep-header' && command.reasoning_effort === 'medium'), "reasoning update targets the active endpoint");
     await waitFor(() => browser.evaluate(`document.querySelector('.header-model-control-reasoning').textContent === 'medium'`), "collapsed reasoning follows the host projection");
+    // Regression: an existing per-endpoint selection must not shadow the header.
+    host.setSession({ ...makeSession(), runtime_profile: { ...makeSession().runtime_profile, reasoning_effort: 'low', endpoint_reasoning_efforts: { 'ep-header': 'low' } } });
+    await waitFor(() => browser.evaluate(`document.querySelector('.header-model-popover-select').value === 'low'`), "header shows the endpoint override");
+    await browser.evaluate(`(() => {
+      const select = document.querySelector('.header-model-popover-select');
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'high');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_reasoning_effort_update' && command.endpoint_id === 'ep-header' && command.reasoning_effort === 'high'), "header overrides the endpoint selection");
+    await waitFor(() => browser.evaluate(`document.querySelector('.header-model-control-reasoning').textContent === 'high'`), "endpoint override follows the header");
     await browser.evaluate(`(() => {
       const input = document.querySelector('#header-model-popover .header-model-popover-length input');
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;

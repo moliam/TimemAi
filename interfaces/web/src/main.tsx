@@ -4014,7 +4014,20 @@ function TimemApp() {
     headerModelEndpoint,
     server?.model_catalog ?? [],
   );
-  const headerReasoningValue = activeSession?.runtime_profile?.reasoning_effort ?? "";
+  // The active endpoint's own selection wins over the session-wide effort, so
+  // the header must show and write the same value the next request will use.
+  const headerActiveEndpointId =
+    activeSession?.runtime_profile?.active_model_endpoint_id ??
+    activeSession?.runtime_profile?.model_endpoint_id ??
+    null;
+  const headerReasoningValue =
+    (headerActiveEndpointId
+      ? activeSession?.runtime_profile?.endpoint_reasoning_efforts?.[
+          headerActiveEndpointId
+        ]
+      : undefined) ??
+    activeSession?.runtime_profile?.reasoning_effort ??
+    "";
   const headerDefaultEffort =
     endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? [])
       ?.default_effort ?? "";
@@ -4029,8 +4042,10 @@ function TimemApp() {
       headerModelEndpoint.id,
     );
   const headerReasoningBound =
-    !!activeSession?.runtime_profile?.active_model_endpoint_id ||
-    !!activeSession?.runtime_profile?.model_endpoint_id;
+    !!headerActiveEndpointId &&
+    (activeSession?.runtime_profile?.model_endpoint_ids ?? []).includes(
+      headerActiveEndpointId,
+    );
   const headerContextOverride =
     !!headerModelEndpoint &&
     Object.hasOwn(
@@ -5341,12 +5356,14 @@ function TimemApp() {
                     buttonRef={runtimeButtonRef}
                     onReasoningChange={(effort) => {
                       if (!activeSession) return;
-                      const accepted = headerReasoningBound
-                        ? sendCommand({
-                            type: "session_reasoning_effort_update",
-                            session_id: activeSession.session_id,
-                            reasoning_effort: effort,
-                          })
+                      const accepted =
+                        headerReasoningBound && headerActiveEndpointId
+                          ? sendCommand({
+                              type: "session_endpoint_reasoning_effort_update",
+                              session_id: activeSession.session_id,
+                              endpoint_id: headerActiveEndpointId,
+                              reasoning_effort: effort,
+                            })
                         : sendCommand({
                             type: "session_runtime_update",
                             session_id: activeSession.session_id,

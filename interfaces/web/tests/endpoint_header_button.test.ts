@@ -37,7 +37,11 @@ describe("header endpoint selector", () => {
     expect(source).toContain('className="header-model-control-reasoning"');
     expect(source).toContain('className="header-model-popover"');
     expect(source).toContain('className="header-model-popover-context"');
-    expect(source).toContain('type: "session_reasoning_effort_update"');
+    // A bound Session writes the active endpoint's own selection: the
+    // session-wide choice is shadowed by that override on the Host.
+    expect(source).toContain('type: "session_endpoint_reasoning_effort_update"');
+    expect(source).toContain("endpoint_id: headerActiveEndpointId");
+    expect(source).toContain("activeSession?.runtime_profile?.endpoint_reasoning_efforts?.[");
     expect(source).toContain('key: "TIMEM_REASONING_EFFORT"');
     expect(source).toContain('type: "session_endpoint_max_input_tokens_update"');
     expect(source).toContain('key: "TIMEM_MAX_LLM_INPUT"');
