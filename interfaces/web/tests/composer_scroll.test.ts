@@ -53,8 +53,23 @@ describe("fixed composer scroll ownership", () => {
     expect(styles).toMatch(/\.composer-wrap \{[^}]*max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\)/);
     expect(styles).toMatch(/\.message \{[^}]*max-width: 900px;/);
     expect(styles).toMatch(/\.working-indicator \{[^}]*max-width: 900px;/);
-    expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: 900px;/);
+    // 用户反馈：阅读列不再收窄到 900/768 居中，而是铺满输入框的宽度，并与之左对齐
+    // （左浮动导航按钮列已挪进输入框左侧的 .composer-row）。
+    expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: none;/);
+    expect(styles).not.toMatch(/\.turn-interaction \{[^}]*max-width: (?:900|768)px;/);
     expect(styles).toMatch(/\.composer-cwd \{[^}]*max-width: 876px;/);
+  });
+
+  it("keeps the message navigation beside the composer instead of floating over the column", () => {
+    // 用户反馈：上下跳转/working 按钮挪到输入框左侧，阅读列因此可以左对齐输入框并更宽。
+    expect(source).toContain('<div className="composer-row">');
+    expect(source).toContain('<nav\n        ref={userMessageNavigationRef}');
+    expect(styles).toMatch(/\.composer-row \{[^}]*display: grid;[^}]*grid-template-columns: auto minmax\(0, 1fr\);/);
+    expect(styles).toMatch(/\.user-message-navigation \{[^}]*order: 1;[^}]*align-self: end;/);
+    expect(styles).not.toMatch(/\.user-message-navigation \{[^}]*position: absolute;/);
+    // 输入框左右内边距一致；正文左内边距让出按钮列（+22px）后与输入框左边缘对齐。
+    expect(styles).toMatch(/\.composer-wrap \{[^}]*padding: 16px max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\) 20px max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\);/);
+    expect(styles).toMatch(/\.chat-scroll \{[^}]*padding: 34px max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\) 24px max\(26px, calc\(\(100% - 980px\)\/2 \+ 22px\)\);/);
   });
 
   it("uses the formal interface font for the CWD and debug paths", () => {

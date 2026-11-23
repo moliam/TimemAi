@@ -11978,6 +11978,9 @@ function TimemThread({
                 )}
               </div>
             )}
+          {/* 用户反馈：把上下跳转与 working 按钮从左浮动轨道挪到输入框左侧；阅读列
+              因此可以对齐输入框左边缘，更宽、显示更多内容。 */}
+          <div className="composer-row">
           {activeSession && restartCwdDecision ? (
             <RestartCwdGate
               decision={restartCwdDecision}
@@ -12181,16 +12184,10 @@ function TimemThread({
               </div>
             </form>
           )}
-      </div>
 
       <nav
         ref={userMessageNavigationRef}
         className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`}
-        style={
-          userMessageNavigationLayout.left === undefined
-            ? undefined
-            : { left: `${userMessageNavigationLayout.left}px` }
-        }
         aria-label={t("messageNav.userMessages")}
         onPointerEnter={lockUserMessageNavigationLayout}
         onPointerLeave={unlockUserMessageNavigationLayout}
@@ -12320,6 +12317,8 @@ function TimemThread({
             />
           )}
       </nav>
+          </div>
+      </div>
     </ThreadPrimitive.Root>
   );
 }
