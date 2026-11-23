@@ -1542,12 +1542,15 @@ async function main() {
           const next = {...base, turns};
           host.setSession(next); host.send({type: "hello", snapshot: makeSnapshot(next)});
           // 收纳必须连续：逐帧采样组高，任何一帧都不许跳掉大半高度。
+          // 逐帧记录组高与 scrollTop：跟随状态只允许单向向上（scrollTop 不减）。
           probes[`${mode}Track`] = await browser.evaluate(`new Promise(resolve => {
             const run = document.querySelector('.stream-tool-run');
-            const heights = []; let remaining = 16;
+            const viewport = document.querySelector('.chat-scroll');
+            const frames = []; let remaining = 16;
             const sample = () => {
-              heights.push(Math.round(run.getBoundingClientRect().height * 10) / 10);
-              if (--remaining) requestAnimationFrame(sample); else resolve(heights);
+              frames.push({ height: Math.round(run.getBoundingClientRect().height * 10) / 10,
+                top: Math.round(viewport.scrollTop * 10) / 10 });
+              if (--remaining) requestAnimationFrame(sample); else resolve(frames);
             }; requestAnimationFrame(sample);
           })`);
           await sleep(400);
@@ -1562,11 +1565,17 @@ async function main() {
           const before = probes[`${mode}Before`];
           assert(before.previewHeight > 70 && before.previewHeight < 140,
             `${mode}: result preview must stay about four lines ${JSON.stringify(probes)}`);
-          const track = probes[`${mode}Track`];
+          const track = probes[`${mode}Track`].map(frame => frame.height);
           assert(track.every((height, index) => index === 0 || Math.abs(height - track[index - 1]) < 40),
             `${mode}: absorbed row must collapse continuously ${JSON.stringify(track)}`);
           assert(track[0] - track[track.length - 1] > 40,
             `${mode}: the transition must reclaim the absorbed height ${JSON.stringify(track)}`);
+          // 用户反馈：收拢时页面还在上下抖动，要尽量单向向上——跟随状态里 scrollTop
+          // 只许增大（内容只往上走），任何回退都会读成一次跳动。
+          const tops = probes[`${mode}Track`].map(frame => frame.top);
+          const backsteps = tops.slice(1).map((top, index) => +(tops[index] - top).toFixed(1)).filter(step => step > 0.5);
+          assert(mode !== "following" || backsteps.length === 0,
+            `following: scroll must never step backwards during absorption ${JSON.stringify({tops, backsteps, mode})}`);
         }
         // 量化的证据：预览限高后，交接只撤掉几行，而不是整块 240px。
         console.log("PASS Chrome tool handoff sizing", JSON.stringify(probes));

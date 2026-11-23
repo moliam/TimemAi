@@ -10197,6 +10197,10 @@ function TimemThread({
   useEffect(() => {
     resetStreamScrollGap();
   }, [activeSession?.session_id]);
+  // 任务结束就把工作期间攒下的空槽清干净，别让归档后的视图停在空白里。
+  useEffect(() => {
+    if (activeSession?.state !== "working") resetStreamScrollGap();
+  }, [activeSession?.state]);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachComposerTextarea = useCallback(
     (textarea: HTMLTextAreaElement | null) => {
@@ -10233,6 +10237,29 @@ function TimemThread({
   const preservedPrependFrameRef = useRef(false);
   const hydrationAnchorRef = useRef<{ sessionId: string; anchor: ViewportTurnAnchor } | null>(null);
   const followThreadLatest = useRef(true);
+  // 用户反馈：收拢时整页仍在上下抖动（幅度小了，但方向来回）。跟随状态下只允许
+  // 单向向上——任何一次提交若让浏览器把 scrollTop 夹小了（上方内容变矮），就用
+  // 底部空槽把这段高度补回来并还原位置；这样滚动位置单调不减，正在读的内容只会
+  // 往上走，不会先掉下去再弹回来。
+  const pinnedScrollTopRef = useRef(0);
+  const streamFollowing = activeSession?.state === "working";
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    // 只吸收「工作过程中」的变矮：任务结束时归档会一次性收起大段过程内容，
+    // 那时补偿会留下整屏空白（验收里就抓到过），结束态由归档布局自己接管。
+    if (!followThreadLatest.current || !streamFollowing) {
+      pinnedScrollTopRef.current = viewport.scrollTop;
+      return;
+    }
+    const previous = pinnedScrollTopRef.current;
+    const clamped = previous - viewport.scrollTop;
+    if (clamped > 1) {
+      applyStreamScrollGap(streamScrollGap + clamped);
+      viewport.scrollTop = previous;
+    }
+    pinnedScrollTopRef.current = viewport.scrollTop;
+  });
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
   const workingMemoHideTimerRef = useRef<number | null>(null);
