@@ -1052,8 +1052,7 @@ fn web_turn_file_change(edit: &Value) -> Option<WebTurnFileChange> {
     let diff = edit
         .get("diff")
         .and_then(Value::as_str)
-        .map(|text| clamp_restored_diff(text, TURN_FILE_CHANGE_DIFF_BYTES))
-        .map(|(text, cut)| (text, cut));
+        .map(|text| clamp_restored_diff(text, TURN_FILE_CHANGE_DIFF_BYTES));
     let truncated = edit
         .get("truncated")
         .and_then(Value::as_bool)
@@ -8947,7 +8946,7 @@ fn restored_file_edits_payload(raw_payload: &Value) -> Option<Value> {
         used += len;
         kept.push(Value::Object(copy));
     }
-    (!kept.is_empty()).then(|| Value::Array(kept))
+    (!kept.is_empty()).then_some(Value::Array(kept))
 }
 
 fn clamp_restored_diff(text: &str, limit: usize) -> (String, bool) {
@@ -20992,7 +20991,7 @@ pub(crate) fn print_version() {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n  --debug                      keep up to 512 MiB of audit data for debugging\n  -V, --version                print version and exit\n  -h, --help                   print this help and exit\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model inactivity base; grows with input, cap 300s\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n  --debug                      keep up to 512 MiB of audit data for debugging\n  -V, --version                print version and exit\n  -h, --help                   print this help and exit\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

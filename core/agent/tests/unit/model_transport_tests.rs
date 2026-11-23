@@ -348,6 +348,99 @@ fn stalled_response_hits_configured_inactivity_timeout() {
 }
 
 #[test]
+fn adaptive_timeout_grows_with_estimated_input_tokens() {
+    assert_eq!(effective_model_timeout_secs(120, 0), 120);
+    assert_eq!(effective_model_timeout_secs(120, 19_999), 120);
+    assert_eq!(effective_model_timeout_secs(120, 20_000), 130);
+    assert_eq!(effective_model_timeout_secs(120, 176_325), 200);
+    assert_eq!(effective_model_timeout_secs(120, 180_000), 210);
+    assert_eq!(effective_model_timeout_secs(120, 300_000), 270);
+    assert_eq!(effective_model_timeout_secs(120, 359_999), 290);
+    assert_eq!(effective_model_timeout_secs(120, 360_000), 300);
+    assert_eq!(effective_model_timeout_secs(120, u64::MAX), 300);
+}
+
+#[test]
+fn adaptive_timeout_never_shortens_an_explicit_larger_base() {
+    assert_eq!(effective_model_timeout_secs(600, 0), 600);
+    assert_eq!(effective_model_timeout_secs(600, 400_000), 600);
+    assert_eq!(effective_model_timeout_secs(300, 0), 300);
+    assert_eq!(effective_model_timeout_secs(290, 0), 290);
+    assert_eq!(effective_model_timeout_secs(290, 60_000), 300);
+}
+
+#[test]
+fn request_input_token_estimate_counts_text_content_not_json_syntax() {
+    assert_eq!(estimate_text_tokens(""), 0);
+    let ascii = "a".repeat(400);
+    assert_eq!(estimate_text_tokens(&ascii), 100);
+    let wide = "中".repeat(100);
+    assert_eq!(estimate_text_tokens(&wide), 100);
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "中".repeat(100)}],
+    });
+    let expected = estimate_text_tokens("model")
+        + estimate_text_tokens("m")
+        + estimate_text_tokens("messages")
+        + estimate_text_tokens("role")
+        + estimate_text_tokens("user")
+        + estimate_text_tokens("content")
+        + 100;
+    assert_eq!(estimate_request_input_tokens(&body), expected);
+}
+
+#[test]
+fn large_input_extends_the_inactivity_budget_for_response_headers() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let body = success_body("slow-first-byte");
+    let body_len = body.len();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        // Longer than the configured one-second base, shorter than the
+        // adaptive budget an input above 20K estimated tokens earns.
+        thread::sleep(Duration::from_millis(1500));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n{body}"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let config = local_config(addr, 1);
+    let audit_file = test_audit_file("adaptive-timeout");
+    let prompt = "x".repeat(80_000);
+    let response = call_model(&config, &prompt, &audit_file).unwrap();
+    assert_eq!(response.content, "slow-first-byte");
+    server.join().unwrap();
+
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
+    let request = audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "llm_request")
+        .unwrap();
+    let estimated = request["estimated_input_tokens"].as_u64().unwrap();
+    // The static prompt and tool schemas already contribute input tokens, so
+    // the assertion anchors on the recorded estimate rather than a fixed step.
+    assert!(estimated >= 20_000, "{request}");
+    assert_eq!(
+        request["timeout_secs"],
+        effective_model_timeout_secs(1, estimated)
+    );
+    assert!(request["timeout_secs"].as_u64().unwrap() >= 11, "{request}");
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
 fn declared_oversized_response_is_rejected_before_body_read() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,

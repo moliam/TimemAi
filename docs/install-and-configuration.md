@@ -374,6 +374,13 @@ once with the field omitted, keeps native tools enabled, schedules sibling calls
 sequentially, and reuses that endpoint-specific result. Explicit `true` never silently
 downgrades.
 
+`TIMEM_TIMEOUT` sets the base inactivity budget in seconds for one model
+request (default `120`). Prompt prefill and provider reasoning queues grow with
+the input, so the effective budget adds ten seconds for every 20K estimated
+input tokens and stops at `300` seconds. A base configured above `300` is kept
+unchanged. The budget measures provider inactivity, not total request duration,
+so a response that keeps streaming is never cut off by it.
+
 `TIMEM_RESPONSE_PROTOCOL` chooses the inline response format parsed by the local
 runtime. Supported values are `xml` and `json`; default is `xml`. Native mode
 uses provider tool-call structures, does not inject this inline protocol, and

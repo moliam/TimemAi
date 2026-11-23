@@ -21,6 +21,16 @@ const MAX_MODEL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MODEL_REDIRECTS: usize = 10;
 const MAX_PRIVATE_CA_PEM_BYTES: usize = 256 * 1024;
 
+/// A model request's inactivity budget grows with its input: prompt prefill
+/// and the provider's reasoning queue scale with the number of input tokens,
+/// so a fixed base timeout fails large requests that the provider would serve.
+/// Each step adds ten seconds once the input passes another 20K tokens.
+const ADAPTIVE_TIMEOUT_INPUT_STEP_TOKENS: u64 = 20_000;
+const ADAPTIVE_TIMEOUT_STEP_SECS: u64 = 10;
+/// Hard ceiling for the adaptive budget. An explicit larger base is user
+/// intent and is never shortened.
+const ADAPTIVE_TIMEOUT_MAX_SECS: u64 = 300;
+
 thread_local! {
     static THREAD_HTTP_MODEL_CLIENT: RefCell<HttpModelClient> =
         RefCell::new(HttpModelClient::default());
@@ -583,6 +593,48 @@ fn error_chain_text(error: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
+/// Estimates the request's input tokens closely enough to size a timeout
+/// budget. ASCII text averages about four characters per token; every
+/// non-ASCII scalar (CJK, emoji) counts as one token. JSON syntax is not
+/// tokenized by the provider, so only string content contributes.
+fn estimate_request_input_tokens(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::String(text) => estimate_text_tokens(text),
+        serde_json::Value::Array(items) => items.iter().map(estimate_request_input_tokens).sum(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| estimate_text_tokens(key) + estimate_request_input_tokens(value))
+            .sum(),
+        serde_json::Value::Null => 0,
+        _ => 1,
+    }
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    let mut ascii_chars = 0u64;
+    let mut wide_chars = 0u64;
+    for character in text.chars() {
+        if character.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            wide_chars += 1;
+        }
+    }
+    ascii_chars / 4 + wide_chars
+}
+
+/// Effective inactivity budget for one request: the configured base plus one
+/// step per whole 20K estimated input tokens, capped at five minutes.
+fn effective_model_timeout_secs(base_secs: u64, estimated_input_tokens: u64) -> u64 {
+    if base_secs >= ADAPTIVE_TIMEOUT_MAX_SECS {
+        return base_secs;
+    }
+    let steps = estimated_input_tokens / ADAPTIVE_TIMEOUT_INPUT_STEP_TOKENS;
+    base_secs
+        .saturating_add(steps.saturating_mul(ADAPTIVE_TIMEOUT_STEP_SECS))
+        .min(ADAPTIVE_TIMEOUT_MAX_SECS)
+}
+
 impl HttpModelClient {
     #[cfg(test)]
     fn without_environment_proxy() -> Self {
@@ -664,11 +716,17 @@ impl HttpModelClient {
         on_content: &mut Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<ModelHttpResponseInterpretation, String> {
         let audit_request_id = crate::unique_id("model_request");
+        let estimated_input_tokens =
+            estimate_request_input_tokens(&http_request.model_request.body);
+        let timeout_secs =
+            effective_model_timeout_secs(config.timeout_secs, estimated_input_tokens);
         let mut request_audit = model_request_audit_event(config, &http_request.model_request);
         request_audit["audit_request_id"] = serde_json::json!(audit_request_id);
+        request_audit["timeout_secs"] = serde_json::json!(timeout_secs);
+        request_audit["estimated_input_tokens"] = serde_json::json!(estimated_input_tokens);
         append_audit_event(audit_file, &request_audit)
             .map_err(|_| "model_audit_write_failed:request".to_string())?;
-        let timeout = Duration::from_secs(config.timeout_secs);
+        let timeout = Duration::from_secs(timeout_secs);
         let observer = on_content
             .as_mut()
             .map(|callback| &mut **callback as &mut dyn FnMut(&serde_json::Value));
