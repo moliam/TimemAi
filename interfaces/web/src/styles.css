@@ -7336,18 +7336,22 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-toggle { cursor: pointer; }
 .file-edit-index { flex: none; min-width: 1.2em; text-align: right; font-size: 11px; color: #7f929e; font-variant-numeric: tabular-nums; }
+/* 用户反馈：新建/修改/删除用不同颜色的无框底色胶囊，不再只是裸文字。 */
 .file-edit-op {
   flex: none;
-  padding: 0;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
+  line-height: 16px;
   letter-spacing: 0.2px;
 }
-.file-edit-op-created { color: #7fd6a4; }
-.file-edit-op-modified { color: #e8c268; }
-.file-edit-op-deleted { color: #e59a94; }
+.file-edit-op-created { color: #9ce8bc; background: rgba(64, 186, 124, 0.2); }
+.file-edit-op-modified { color: #f0d089; background: rgba(214, 168, 64, 0.2); }
+.file-edit-op-deleted { color: #f0a8a1; background: rgba(214, 96, 88, 0.2); }
 .file-edit-op-unchanged,
-.file-edit-op-skipped { color: #98afbc; }
+.file-edit-op-skipped { color: #b3c4ce; background: rgba(152, 175, 188, 0.14); }
 .file-edit-path {
   display: inline-flex;
   align-items: baseline;
@@ -7460,11 +7464,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edits-panel {
   background: rgba(20, 40, 50, 0.02);
 }
-:root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; }
-:root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; }
-:root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; }
+:root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; background: rgba(28, 122, 78, 0.13); }
+:root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; background: rgba(176, 138, 38, 0.16); }
+:root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; background: rgba(178, 58, 49, 0.13); }
 :root[data-theme="light"] .file-edit-op-unchanged,
-:root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; }
+:root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; background: rgba(92, 111, 124, 0.12); }
 :root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-index { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-name { color: #24333a; }

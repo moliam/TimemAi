@@ -161,9 +161,33 @@ describe("file edits surfaces", () => {
     const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
     expect(section).not.toContain("border:");
     expect(section).not.toContain("background:");
+    // 用户反馈：新建 / 修改 / 删除改成不同颜色的无框底色胶囊，不再只是裸文字。
     const opStart = styles.indexOf(".file-edit-op {");
     const op = styles.slice(opStart, styles.indexOf("}", opStart) + 1);
-    expect(op).not.toContain("background");
+    expect(op).toContain("border: 0;");
+    expect(op).toContain("border-radius: 999px;");
+    expect(op).toContain("padding: 0 7px;");
+    expect(op).not.toContain("border: 1px");
+    for (const [name, tint] of [
+      ["created", "rgba(64, 186, 124, 0.2)"],
+      ["modified", "rgba(214, 168, 64, 0.2)"],
+      ["deleted", "rgba(214, 96, 88, 0.2)"],
+    ] as const) {
+      const start = styles.indexOf(`.file-edit-op-${name} {`);
+      const block = styles.slice(start, styles.indexOf("}", start) + 1);
+      expect(block).toContain(`background: ${tint};`);
+    }
+    // 明色主题同一颗胶囊换成浅底，仍是各自颜色、仍无边框。
+    for (const [name, tint] of [
+      ["created", "rgba(28, 122, 78, 0.13)"],
+      ["modified", "rgba(176, 138, 38, 0.16)"],
+      ["deleted", "rgba(178, 58, 49, 0.13)"],
+    ] as const) {
+      const start = styles.indexOf(`:root[data-theme="light"] .file-edit-op-${name} {`);
+      const block = styles.slice(start, styles.indexOf("}", start) + 1);
+      expect(block).toContain(`background: ${tint};`);
+      expect(block).not.toContain("border");
+    }
     const diffStart = styles.indexOf(".file-edit-diff {");
     const diff = styles.slice(diffStart, styles.indexOf("}", diffStart) + 1);
     // 用户反馈：diff 框与文本同宽——内层框取消，滚动行为保留。

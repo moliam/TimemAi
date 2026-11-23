@@ -1178,3 +1178,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 实现落点：`model_api::model_error_provider` 改为复用 `model_requirements::provider`，让「厂商选择决定一切」在鉴权、能力与错误分类三处同源；`model_error` 新增 `VENDOR_STATUS` 厂商状态覆盖表与 `classify_vendor_status`，`classify_http` 按「业务码 → 厂商状态 → 公共状态」求值。
 - 厂商语义：智谱业务码 1000-1321、OpenAI 符号码照旧；Kimi / Kimi Code 把 403 归为套餐失败（其错误参考中模型调用的 403 全部是订阅/套餐不含该模型或上下文档位、无法确认会员权益），因此可换端点；Kimi 429 保持限流（同码还覆盖纯流量与引擎过载，不做过度推断）；DeepSeek 只发布状态，直接使用公共表。
 - 测试看护：`model_error_tests` 新增「厂商表只在该厂商文档覆盖处生效」用例（Kimi 403 套餐、404/429 不变、其它厂商 403 仍为权限、厂商名大小写归一、业务码优先于厂商状态行）；`retry_policy_tests` 新增 Kimi 403 端到端用例（订阅类触发换端点、不可重试；zhipu/openai/deepseek/未声明仍为权限且不换端点）；`model_api_tests` 新增「错误表跟随厂商选择」用例（显式 zhipu 得 `[billing,zhipu/1113]`、显式通用得 `[rate_limited,1113]`、旧版目录回退得 `[billing,zhipu/1113]`）。验证：`cargo test -p agent_core --lib` 1042 过、fmt 过。
+
+## 2026-11-23 diff 卡片与轮次总结：新建/修改/删除改为彩色无框胶囊
+
+- 用户反馈：diff 卡片与总结卡片里「新建 / 修改 / 删除」这几个字要用不同颜色的底色胶囊，且不要边框。
+- 实现：`.file-edit-op` 由裸文字改为胶囊（`border: 0`、`border-radius: 999px`、`padding: 0 7px`、`line-height: 16px`），三种 op 各用同色系浅底 + 提亮前景：新建绿、修改琥珀、删除红；`unchanged`/`skipped` 保持中性灰胶囊，语义仍是「无需处理」。明色主题各有一行浅底覆盖，仍未带边框。行高锁在 16px，文件名行仍是单行高度，不挤压 diff。
+- 覆盖范围：动作卡片的 `FileEditsPanel` 与轮次总结卡片共用同一 `FileEditSection`，一处样式两处生效。
+- 测试看护：`file_edits.test.ts` 的「面板无框」契约同步改写——断言胶囊形状（无边框 + 圆角 + 内边距）与三色底色（含明色主题），不再断言「op 无背景」。验证：`pnpm exec vitest run tests/file_edits.test.ts` 29 过、tsc 过；dist 已重建（entry JS 内容未变，文件名随 CSS 依赖哈希变化）。
