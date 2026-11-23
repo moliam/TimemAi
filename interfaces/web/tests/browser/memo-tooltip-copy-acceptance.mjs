@@ -417,33 +417,48 @@ async function main() {
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Long task')`), "ready snapshot reloaded");
     const indicator = await center(browser, ".thread-memo-indicator");
+    // 用户反馈：导航列要与输入框顶部对齐且比输入框矮，所以 memo 指示器在输入区
+    // 操作行里（附件/发送按钮左侧），导航列永远只保留 上下箭头/圆钮 三个控件。
+    assert(await browser.evaluate(`(() => {
+      const nav = document.querySelector('.user-message-navigation');
+      const chip = document.querySelector('.thread-memo-indicator');
+      const composer = document.querySelector('.composer');
+      if (!nav || !chip || !composer) return false;
+      const n = nav.getBoundingClientRect();
+      const c = composer.getBoundingClientRect();
+      return chip.closest('.composer-buttons') !== null
+        && !nav.contains(chip)
+        && nav.children.length === 3
+        && n.height < c.height
+        && Math.abs(n.top - c.top) <= 1;
+    })()`), "memo chip sits in the composer action row so the nav column keeps three controls, stays shorter than the composer and aligns to its top");
     assert(indicator, "memo indicator present in ready state");
     await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: indicator.x, y: indicator.y, button: "none", buttons: 0 });
     await waitFor(() => browser.evaluate(`(() => {
-      const t = document.querySelector('.thread-memo-indicator .thread-memo-tooltip');
+      const t = document.querySelector('.thread-working-memo-tooltip.is-portal');
       if (!t) return false;
       return getComputedStyle(t).opacity === '1' && getComputedStyle(t).pointerEvents === 'auto';
     })()`), "css tooltip opens with pointer-events restored");
-    const cssCopy = await center(browser, ".thread-memo-indicator .thread-memo-copy");
+    const cssCopy = await center(browser, ".thread-working-memo-tooltip.is-portal .thread-memo-copy");
     assert(cssCopy, "css tooltip has a copy button");
     assert(await browser.evaluate(`(() => {
-      const t = document.querySelector('.thread-memo-indicator .thread-memo-tooltip').getBoundingClientRect();
-      const b = document.querySelector('.thread-memo-indicator .thread-memo-copy').getBoundingClientRect();
+      const t = document.querySelector('.thread-working-memo-tooltip.is-portal').getBoundingClientRect();
+      const b = document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy').getBoundingClientRect();
       return b.left >= t.left - 1 && b.right <= t.right + 1 && b.top >= t.top - 1 && b.bottom <= t.bottom + 1;
     })()`), "copy button stays inside the tooltip box");
     assert(await browser.evaluate(`(() => {
-      const b = document.querySelector('.thread-memo-indicator .thread-memo-copy');
+      const b = document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy');
       const r = b.getBoundingClientRect();
       const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
       return !!hit && !!hit.closest('.thread-memo-copy');
     })()`), "elementFromPoint lands on the css tooltip copy button (pointer-events: auto)");
     await click(browser, cssCopy);
-    await waitFor(() => browser.evaluate(`document.querySelector('.thread-memo-indicator .thread-memo-copy')?.className.includes("copy-success")`), "css tooltip copy feedback shows copy-success", 1500);
-    const cssFeedback = await browser.evaluate(`document.querySelector('.thread-memo-indicator .thread-memo-copy').className`);
+    await waitFor(() => browser.evaluate(`document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy')?.className.includes("copy-success")`), "css tooltip copy feedback shows copy-success", 1500);
+    const cssFeedback = await browser.evaluate(`document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy').className`);
     assert(cssFeedback.includes("copy-success"), "css tooltip copy feedback shows copy-success, got: " + cssFeedback);
     const gap = await browser.evaluate(`(() => {
       const i = document.querySelector('.thread-memo-indicator').getBoundingClientRect();
-      const t = document.querySelector('.thread-memo-indicator .thread-memo-tooltip').getBoundingClientRect();
+      const t = document.querySelector('.thread-working-memo-tooltip.is-portal').getBoundingClientRect();
       return t.left - i.right;
     })()`);
     assert(gap <= 0.5, "tooltip overlaps the indicator edge (no dead gap), gap=" + gap);

@@ -65,7 +65,10 @@ describe("fixed composer scroll ownership", () => {
     expect(source).toContain('<div className="composer-row">');
     expect(source).toContain('<nav\n        ref={userMessageNavigationRef}');
     expect(styles).toMatch(/\.composer-row \{[^}]*display: grid;[^}]*grid-template-columns: auto minmax\(0, 1fr\);/);
-    expect(styles).toMatch(/\.user-message-navigation \{[^}]*order: 1;[^}]*align-self: end;/);
+    // 用户反馈：导航列要与输入框顶部对齐，且整体比输入框矮（3×24 + 2×6 = 84px
+    // 对输入框约 94px），所以从底部对齐改成顶部对齐并统一缩小一档。
+    expect(styles).toMatch(/\.user-message-navigation \{[^}]*order: 1;[^}]*align-self: start;/);
+    expect(styles).toMatch(/\.user-message-navigation button \{[^}]*width: 24px;[^}]*height: 24px;/);
     expect(styles).not.toMatch(/\.user-message-navigation \{[^}]*position: absolute;/);
     // 输入框左右内边距一致；正文左内边距让出按钮列（+22px）后与输入框左边缘对齐。
     expect(styles).toMatch(/\.composer-wrap \{[^}]*padding: 16px max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\) 20px max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\);/);

@@ -12155,6 +12155,35 @@ function TimemThread({
                   {composerHint}
                 </span>
                 <div className="composer-buttons">
+                  {/* 导航列只保留上下箭头与圆钮三个控件，才可能整体矮于输入框；
+                      会话级 memo 指示器随输入区操作行走（悬停/聚焦看备忘录）。 */}
+                  {activeSession?.active_memo && activeSession.state !== "working" && (
+                    <span
+                      ref={setMemoIndicatorEl}
+                      className="thread-memo-indicator"
+                      role="status"
+                      tabIndex={0}
+                      aria-label={t("messageNav.memoIndicator")}
+                      onPointerEnter={showWorkingMemoTooltip}
+                      onPointerLeave={hideWorkingMemoTooltip}
+                      onFocus={showWorkingMemoTooltip}
+                      onBlur={hideWorkingMemoTooltip}
+                    >
+                      <span className="thread-memo-icon" aria-hidden="true">
+                        <MemoIcon size={12} />
+                      </span>
+                    </span>
+                  )}
+                  {memoIndicatorEl && activeSession?.active_memo && activeSession.state !== "working" && (
+                    <MemoTooltip
+                      anchor={memoIndicatorEl}
+                      caption={t("messageNav.memoIndicator")}
+                      text={activeSession.active_memo}
+                      visible={workingMemoVisible}
+                      onPointerEnter={handleWorkingMemoTooltipEnter}
+                      onPointerLeave={handleWorkingMemoTooltipLeave}
+                    />
+                  )}
                   <button
                     className={`attach-button ${uploadingAttachment ? "uploading" : ""}`}
                     type="button"
@@ -12245,7 +12274,7 @@ function TimemThread({
           disabled={!userMessageNavigation.previous}
           onClick={() => navigateUserMessage("previous")}
         >
-          <ChevronUp size={14} strokeWidth={1.65} aria-hidden="true" />
+          <ChevronUp size={13} strokeWidth={1.7} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -12263,7 +12292,7 @@ function TimemThread({
             else navigateToThreadBottom();
           }}
         >
-          <ChevronDown size={14} strokeWidth={1.65} aria-hidden="true" />
+          <ChevronDown size={13} strokeWidth={1.7} aria-hidden="true" />
         </button>
         {activeSession && (
           <button
@@ -12308,7 +12337,7 @@ function TimemThread({
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      <MemoIcon size={16.8} />
+                      <MemoIcon size={14} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -12317,8 +12346,8 @@ function TimemThread({
               ) : (
                 <ArrowDownToLine
                   className="thread-idle-bottom-icon"
-                  size={17}
-                  strokeWidth={1.7625}
+                  size={14}
+                  strokeWidth={1.76}
                 />
               )}
             </span>
@@ -12326,33 +12355,6 @@ function TimemThread({
               {activeSession.state === "working" ? "Working" : "Jump to bottom"}
             </span>
           </button>
-        )}
-        {activeSession?.active_memo && activeSession.state !== "working" && (
-          <span
-            ref={setMemoIndicatorEl}
-            className="thread-memo-indicator"
-            role="status"
-            tabIndex={0}
-            aria-label={t("messageNav.memoIndicator")}
-            onPointerEnter={showWorkingMemoTooltip}
-            onPointerLeave={hideWorkingMemoTooltip}
-            onFocus={showWorkingMemoTooltip}
-            onBlur={hideWorkingMemoTooltip}
-          >
-            <span className="thread-memo-icon" aria-hidden="true">
-              <MemoIcon size={13} />
-            </span>
-          </span>
-        )}
-        {memoIndicatorEl && activeSession?.active_memo && activeSession.state !== "working" && (
-          <MemoTooltip
-            anchor={memoIndicatorEl}
-            caption={t("messageNav.memoIndicator")}
-            text={activeSession.active_memo}
-            visible={workingMemoVisible}
-            onPointerEnter={handleWorkingMemoTooltipEnter}
-            onPointerLeave={handleWorkingMemoTooltipLeave}
-          />
         )}
         {activeSession?.state === "working" &&
           activeSession.active_memo &&

@@ -57,13 +57,28 @@ describe("thread working indicator", () => {
 
     expect(source).toContain("ClipboardCheck,");
     expect(source).toContain("return <ClipboardCheck size={size} />;");
-    expect(source).toContain('<MemoIcon size={16.8} />');
-    expect(source.match(/<MemoIcon size=\{13\} \/>/g)).toHaveLength(2);
+    // 导航列统一缩小一档：working 圆钮里的图标 16.8 → 14；移出导航列的 memo chip 12。
+    // 回合内 memo 通知行的图标不属于导航列，保持 13。
+    expect(source).toContain('<MemoIcon size={14} />');
+    expect(source.match(/<MemoIcon size=\{12\} \/>/g)).toHaveLength(1);
+    expect(source).toContain('<MemoIcon size={13} />');
     expect(mark).toContain("isolation: isolate");
     expect(arc).toContain("z-index: 0");
     expect(memoArc).toContain("opacity: .62");
     expect(pin).toContain("z-index: 1");
     expect(pin).toContain("opacity: 1");
+    // 用户反馈：导航列只有 上下箭头/下一箭头/圆钮 三个控件才可能比输入框矮，
+    // memo 指示器因此移到输入区操作行，不再参与导航列高度。
+    const nav = source.slice(
+      source.indexOf('<nav\n        ref={userMessageNavigationRef}'),
+      source.indexOf("</nav>"),
+    );
+    expect(nav).not.toContain("thread-memo-indicator");
+    const buttons = source.slice(
+      source.indexOf('<div className="composer-buttons">'),
+      source.indexOf('<input\n                    ref={fileInput}'),
+    );
+    expect(buttons).toContain('className="thread-memo-indicator"');
     expect(source).not.toContain("<StickyNote");
     expect(source).not.toContain("<Pin size={13}");
   });

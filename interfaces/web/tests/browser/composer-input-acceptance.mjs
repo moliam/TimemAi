@@ -285,6 +285,29 @@ async function main() {
       "heavy history final answers not rendered",
     );
 
+    // 0. 导航列几何：上下箭头 + 工作圆钮三个控件，整列必须比输入框矮，且顶边
+    //    与输入框顶边对齐（用户反馈：导航缩小后要跟输入框高度协调）。
+    const geometry = await browser.evaluate(`(() => {
+      const nav = document.querySelector(".user-message-navigation");
+      const composer = document.querySelector(".composer");
+      if (!nav || !composer) return null;
+      const n = nav.getBoundingClientRect();
+      const c = composer.getBoundingClientRect();
+      return { controls: nav.children.length, navHeight: n.height, navTop: n.top,
+        composerHeight: c.height, composerTop: c.top };
+    })()`);
+    assert(geometry, "navigation column or composer is missing");
+    assert(geometry.controls === 3,
+      `navigation column must keep the three nav controls, got ${geometry.controls}`);
+    assert(geometry.navHeight < geometry.composerHeight,
+      `navigation column ${geometry.navHeight}px must stay shorter than the composer ${geometry.composerHeight}px`);
+    assert(Math.abs(geometry.navTop - geometry.composerTop) <= 1,
+      `navigation column top ${geometry.navTop} must align with the composer top ${geometry.composerTop}`);
+    console.log(
+      `navigation geometry: controls=${geometry.controls} nav=${geometry.navHeight}px ` +
+      `composer=${geometry.composerHeight}px top_delta=${(geometry.navTop - geometry.composerTop).toFixed(2)}px`,
+    );
+
     // 1. Type 120 keystrokes one by one; per keystroke, measure how long the
     // next animation frame takes to arrive after the input event. Keystrokes
     // must stay local to the composer field: only the throttled write-through
