@@ -386,7 +386,6 @@ export type WebTurnFileChange = {
   truncated?: boolean;
   skip_reason?: string | null;
   size_bytes?: number | null;
-  capture_count?: number;
 };
 
 export type WebTurnFileChanges = {

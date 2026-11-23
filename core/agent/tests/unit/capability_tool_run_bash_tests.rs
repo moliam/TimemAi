@@ -3422,3 +3422,93 @@ fn polling_command_streams_previews_after_warmup_and_quick_polls_stay_silent() {
         .iter()
         .any(|text| text.contains("tick")));
 }
+
+fn last_turn_edits(runtime: &PreviewCaptureRuntime) -> Vec<serde_json::Value> {
+    runtime
+        .events
+        .iter()
+        .filter_map(|event| event.payload.get("turn_edits").cloned())
+        .last()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_else(|| panic!("no turn_edits payload captured"))
+}
+
+#[cfg(unix)]
+#[test]
+fn run_bash_ships_ledger_turn_edits_alongside_per_call_edits() {
+    // 端到端：run_bash 的 edit 声明登记进轮级维护表，完成的 finish 事件同时
+    // 携带 per-call `edits` 与基线→终态的 `turn_edits`；文件轮内新建又删除时，
+    // 净结果为空数组（权威地清空总结）而不是误导性的「新建」。
+    let memory_dir = tmp_memory_dir("turn_edits_e2e");
+    let cwd = tmp_cwd("turn_edits_e2e");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        &memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    core.change_prompt_cwd(cwd.to_string_lossy().as_ref())
+        .expect("set cwd");
+    // 轮循环在执行动作前设置当前 turn id；维护表按它判重与重置。
+    core.current_action_turn_id = Some("turn-e2e".to_string());
+
+    let action = |cmd: &str, edits: &[&str], call: &str| ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: call.to_string(),
+        raw_input: serde_json::json!({
+            "cmd": cmd,
+            "timeout_ms": 12_000,
+            "edit": edits,
+        }),
+    };
+    let mut runtime = PreviewCaptureRuntime::default();
+
+    let ActionExecution::Completed(outcome) = core.execute_action(
+        action("printf 'a\\nb\\n' > gen.txt", &["gen.txt"], "call-1"),
+        &mut runtime,
+    ) else {
+        panic!("call-1 should complete directly in approve mode");
+    };
+    assert!(outcome.edits.is_some(), "per-call evidence stays");
+    let rows = last_turn_edits(&runtime);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["path"], "gen.txt");
+    assert_eq!(rows[0]["op"], "created");
+    assert_eq!(rows[0]["added_lines"], 2);
+
+    // 轮内删除：净结果清空。
+    let ActionExecution::Completed(_) =
+        core.execute_action(action("rm gen.txt", &["gen.txt"], "call-2"), &mut runtime)
+    else {
+        panic!("call-2 should complete directly in approve mode");
+    };
+    let rows = last_turn_edits(&runtime);
+    assert!(
+        rows.is_empty(),
+        "created-then-deleted must net out to no row: {rows:?}"
+    );
+
+    // 轮次推进后维护表重置：下一轮重新按首触登记。
+    core.current_action_turn_id = Some("turn-2".to_string());
+    let ActionExecution::Completed(outcome) = core.execute_action(
+        action("printf 'fresh\\n' > gen.txt", &["gen.txt"], "call-3"),
+        &mut runtime,
+    ) else {
+        panic!("call-3 should complete directly in approve mode");
+    };
+    assert!(outcome.edits.is_some());
+    let rows = last_turn_edits(&runtime);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["op"], "created");
+    // 新一轮的基线是「命令执行前」的状态（文件已被删除）：重建后整文件 1 行。
+    assert_eq!(rows[0]["added_lines"], 1);
+
+    let _ = fs::remove_dir_all(memory_dir);
+    let _ = fs::remove_dir_all(cwd);
+}

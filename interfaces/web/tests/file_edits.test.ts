@@ -243,7 +243,6 @@ describe("file edits surfaces", () => {
       "collapseCommand",
       "turnEditsTitle",
       "turnEditsOverflow",
-      "captureCount",
     ];
     for (const key of keys) {
       expect(en).toContain(`${key}:`);
@@ -399,17 +398,15 @@ describe("turnFileChangesSummary", () => {
   // 净变化（首触 op vs 末态 op、中途创建又删除丢弃、按首触顺序、64 个上限）现在由
   // Host 折叠并随 turn 下发，Rust 侧 server::tests 覆盖；这里只校验客户端如何接受
   // 并渲染这份权威投影。
-  it("parses the host summary and keeps the capture count", () => {
+  it("parses the host summary as-is; rows carry no capture count", () => {
     const summary = turnFileChangesSummary({
-      edits: [
-        { ...validEntry, capture_count: 2 },
-        { ...validEntry, path: "docs/x.md", op: "created", capture_count: 1 },
-      ],
+      edits: [validEntry, { ...validEntry, path: "docs/x.md", op: "created" }],
       overflow_count: 0,
     });
     expect(summary?.edits.map((edit) => edit.path)).toEqual(["src/main.rs", "docs/x.md"]);
-    expect(summary?.edits[0]).toMatchObject({ capture_count: 2 });
     expect(summary?.overflowCount).toBe(0);
+    // 用户反馈：总结不记录修改次数，capture_count 不再是合法字段。
+    expect(turnFileChangesSummary({ edits: [{ ...validEntry, capture_count: 2 }] })).toBeUndefined();
   });
 
   it("reports the host overflow count", () => {
@@ -451,18 +448,18 @@ describe("turnFileChangesSummary", () => {
 });
 
 describe("turn edits summary box renders server-side", () => {
-  it("renders the title, chip, capture badge and overflow note", () => {
+  it("renders the title, chip and overflow note without a capture badge", () => {
     const summary = {
       edits: [
-        { ...entry({ path: "src/lib.rs", added_lines: 6, removed_lines: 2 }), capture_count: 2 },
-        { ...entry({ path: "docs/x.md", op: "created" }), capture_count: 1 },
+        entry({ path: "src/lib.rs", added_lines: 6, removed_lines: 2 }),
+        entry({ path: "docs/x.md", op: "created" }),
       ],
       overflowCount: 0,
     };
     const html = renderToString(createElement(TurnEditsSummaryBox, { summary })).replace(/<!-- -->/g, "");
     expect(html).toContain("turn-edits-summary");
-    expect(html).toContain("file-edit-captures");
-    expect(html).toContain("×2");
+    expect(html).not.toContain("file-edit-captures");
+    expect(html).not.toContain("×2");
     expect(html).toContain("+6");
     expect(html).not.toContain("file-edit-notice");
   });

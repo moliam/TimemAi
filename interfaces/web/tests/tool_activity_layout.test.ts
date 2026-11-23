@@ -41,7 +41,9 @@ describe("tool activity row layout", () => {
     expect(styles).toContain(".tool-activity.running.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }");
     expect(styles).not.toContain(".tool-activity.terminal-status.tool-activity-static { grid-template-columns: 14px");
     expect(activity).toMatch(/tool-activity-running-marker[\s\S]*<b>[\s\S]*tool-activity-command/);
-    expect(activity).toContain("event.currentTarget.contains(selection.anchorNode)");
+    // 选中文字不再靠 isCollapsed 猜：拖拽、从文本区起手、或仍有选区都交还给浏览器。
+    expect(activity).toContain("if (ignoreToggle(event)) {");
+    expect(activity).toContain("onPointerDown={trackSelectionGesture}");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
     expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
@@ -127,7 +129,7 @@ describe("collapsed tool summary", () => {
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*border: 0;/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*background: rgba\(255, 255, 255, 0\.08\);/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*border-radius: 999px;/);
-    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 9px 2px 5px;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 3px 8px 3px 5px;/);
     expect(styles).not.toMatch(/\.stream-tool-run-toggle \{[^}]*border: 1px solid/);
   });
 });
@@ -150,8 +152,8 @@ it("collapses tool rows continuously and never animates the viewport", () => {
   expect(source).not.toContain("foldAnchorScrollTop");
   expect(source).toContain("function reserveStreamScrollGap(");
   expect(source).toContain("reserveStreamScrollGap(run.getBoundingClientRect().height, viewport);");
-  // 用户反馈：空槽不能被滚成整屏空白——预留仍按整块高度（收拢期间不跳动），但空槽
-  // 存在时滚动位置夹在内容底边，上滚越过空槽高度即撤销；总量限制在两个视口高。
+  // 用户反馈：空槽不能被滚成整屏空白——预留仍按整块高度（收拢不跳动），但空槽存在
+  // 时滚动位置夹在内容底边，上滚越过空槽高度即撤销；总量限制在两个视口高。
   expect(source).toContain("const STREAM_SCROLL_GAP_VIEWPORTS = 2;");
   expect(source).toContain("Math.min(Math.round(value), streamScrollGapLimit)");
   expect(source).toContain("if (event.currentTarget.scrollTop > contentTop + 1) {");
@@ -170,13 +172,17 @@ it("badge keeps one flat capsule: smaller font, sign merged into the pill backgr
   // 用户反馈：徽章字体再小一点；左侧 +/− 不要单独底色，并进胶囊底色。
   const toggle = styles.match(/\.stream-tool-run-toggle \{([^}]*)\}/)?.[1];
   expect(toggle).toBeDefined();
-  expect(toggle).toContain("font-size: calc(var(--content-size) * .85);");
+  expect(toggle).toContain("font-size: calc(var(--content-size) * .78);");
   const sign = styles.match(/\.stream-tool-run-sign \{([^}]*)\}/)?.[1];
   expect(sign).toBeDefined();
   expect(sign).not.toContain("background");
   expect(sign).not.toContain("border-radius");
   expect(styles).not.toContain(':root[data-theme="light"] .stream-tool-run-sign');
   // 计数跟随徽章字号，不再用独立的 content-size 比例。
+  // 用户反馈：折叠徽章的 logo 再小一点、精致一点（图标尺寸与笔画同步收细）。
+  expect(toggle).toContain("gap: 4px;");
+  expect(source).toContain('<Wrench size={10.5} strokeWidth={1.45}');
+  expect(source).toContain('<Plus size={9} strokeWidth={1.5} />');
   const count = styles.match(/\.stream-tool-count \{([^}]*)\}/)?.[1];
   expect(count).toBeDefined();
   expect(count).toContain("font-size: 1em;");
@@ -210,7 +216,8 @@ it("shows the folded turn change summary beside the archived frame", () => {
   expect(turnScope).toContain("<TurnEditsSummaryBox summary={turnEditsSummary} />");
   expect(styles).toContain(".turn-edits-summary");
   expect(styles).toContain(".turn-edits-summary-head");
-  expect(styles).toContain(".file-edit-captures");
+  // 用户反馈：总结行不展示捕获次数，×N 徽章及其样式已移除。
+  expect(styles).not.toContain(".file-edit-captures");
 });
 
 it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
@@ -219,7 +226,7 @@ it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
   expect(styles).toMatch(/\.stream-tool-run,[\s\S]*\.tool-activity \{[\s\S]*font-family: "IBM Plex Mono"/);
   expect(styles).toContain('.stream-tool-head,\n.tool-activity,\n.tool-activity b { font-size: 12.5px; }');
   // 折叠徽章有自己更小的字号，不再继承工具行的 12.5px。
-  expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-size: calc\(var\(--content-size\) \* \.85\);/);
+  expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-size: calc\(var\(--content-size\) \* \.78\);/);
   // 计数按徽章字号缩放（1em），不再单独用 content-size 比例，避免比徽章还大。
   expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-size: 1em; font-weight: 300;/);
   const font = readFileSync(new URL("../public/fonts/IBMPlexMono-Latin-300.woff2", import.meta.url));
@@ -319,7 +326,7 @@ it("uses terminal glyphs for Bash and reduces default Lucide stroke weight", () 
   expect(source).toContain('<SquareTerminal size={14} aria-hidden="true" />');
   expect(source).toContain('className="bash-tool-icon" title={toolName}');
   expect(styles).toContain(':where(svg.lucide[stroke-width="2"]) { stroke-width: 1.5; }');
-  expect(source).toContain('strokeWidth={1.575}');
+  expect(source).toContain('strokeWidth={1.45}');
 });
 
 it("renders an Infinity reasoning notice only from Core upgrade projections", () => {

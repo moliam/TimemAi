@@ -1519,6 +1519,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .composer-cwd-inline b { color: #84939a; }
 :root[data-theme="light"] .composer-cwd-inline span { color: #627780; }
 :root[data-theme="light"] .composer-actions { border-top-color: #17324d14; }
+/* 用户反馈：待发送队列与输入框外框同宽、同左缘（即聊天内容列的左缘），
+   不再右移让出导航按钮列的 gutter。 */
 .queued-message-list { min-height: 0; width: 100%; display: grid; gap: 5px; margin-bottom: 7px; padding: 8px 9px; border: 1px solid #404040; border-radius: 11px; background: #292929; }
 .queued-message-list.summary-only { gap: 0; padding-block: 7px; }
 .queued-message-list > header { min-width: 0; display: flex; align-items: center; gap: 7px; padding: 0 2px 2px; color: #c5c5c5; font-size: 11px; font-weight: 700; }
@@ -5852,16 +5854,17 @@ body.workspace-modal-open .app-shell { user-select: none; }
   width: fit-content;
   margin-left: auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: 100%;
   border: 0;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   color: inherit;
-  padding: 2px 9px 2px 5px;
+  /* 纵向 3px：字号调小后仍要维持折叠组 18~24px 的行高契约（徽章就是组高）。 */
+  padding: 3px 8px 3px 5px;
   cursor: pointer;
-  /* 用户反馈：徽章这块的字体再小一点；仍跟随聊天字号设置缩放（默认 13.5→11.475）。 */
-  font-size: calc(var(--content-size) * .85);
+  /* 用户反馈：徽章这块的字体再小一点；仍跟随聊天字号设置缩放（默认 13.5→10.53）。 */
+  font-size: calc(var(--content-size) * .78);
   font-weight: 400;
   transition: background .15s ease;
 }
@@ -5872,7 +5875,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-run-toggle:focus-visible { background: rgba(20, 40, 50, 0.12); }
 /* Compact glyph row: wrench stands for "tools", the leading sign flips between
    a fine-lined plus (merged) and minus (expanded) inside the same capsule. */
-.stream-tool-run-glyph { flex: none; opacity: .85; }
+.stream-tool-run-glyph { flex: none; opacity: .72; }
 /* 用户反馈：徽章左侧的 +/− 不要单独底色，直接并进胶囊底色里。 */
 .stream-tool-run-sign { display: inline-flex; align-items: center; justify-content: center; flex: none; color: inherit; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
@@ -7323,16 +7326,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .turn-edits-summary { padding: 8px 0; }
 .turn-edits-summary-head { padding: 0 10px; }
 .turn-edits-summary > .file-edit-notice { padding-left: 10px; padding-right: 10px; }
-.file-edit-captures {
-  flex: none;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: rgba(127, 214, 164, 0.12);
-  color: #7fd6a4;
-  font-size: 10px;
-  line-height: 15px;
-  font-variant-numeric: tabular-nums;
-}
 .file-edit-head {
   display: flex;
   align-items: center;
@@ -7478,7 +7471,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 :root[data-theme="light"] .turn-edits-summary-head { color: #5c6f7a; }
 :root[data-theme="light"] .turn-edits-summary-head b { color: #24333a; }
-:root[data-theme="light"] .file-edit-captures { background: #d9f2e4; color: #1c7a4e; }
 :root[data-theme="light"] .file-edits-panel {
   background: rgba(20, 40, 50, 0.02);
 }

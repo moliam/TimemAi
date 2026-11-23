@@ -268,8 +268,6 @@ export type FileEditPresentation = {
   skip_reason: string | null;
   /** Size at capture time; the only evidence a non-text edit can show. */
   size_bytes?: number | null;
-  /** Turn summary only: how many captures touched this path. */
-  capture_count?: number;
 };
 export type FileEditsPresentation = FileEditPresentation[];
 
@@ -322,9 +320,7 @@ export function fileEditsPresentation(
     if (item.size_bytes !== undefined
       && item.size_bytes !== null
       && (typeof item.size_bytes !== "number" || !Number.isSafeInteger(item.size_bytes) || item.size_bytes < 0)) return;
-    if (item.capture_count !== undefined
-      && (typeof item.capture_count !== "number" || !Number.isSafeInteger(item.capture_count) || item.capture_count < 1)) return;
-    if (Object.keys(item).some(key => !["path", "op", "diff", "added_lines", "removed_lines", "truncated", "skip_reason", "size_bytes", "capture_count"].includes(key))) return;
+    if (Object.keys(item).some(key => !["path", "op", "diff", "added_lines", "removed_lines", "truncated", "skip_reason", "size_bytes"].includes(key))) return;
     if (item.op === "unchanged" || item.op === "skipped") continue;
     edits.push({
       path: item.path,
@@ -335,7 +331,6 @@ export function fileEditsPresentation(
       truncated: item.truncated,
       skip_reason: item.skip_reason,
       ...(typeof item.size_bytes === "number" ? { size_bytes: item.size_bytes } : {}),
-      ...(typeof item.capture_count === "number" ? { capture_count: item.capture_count } : {}),
     });
   }
   return edits;

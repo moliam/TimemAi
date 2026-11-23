@@ -2001,6 +2001,12 @@ pub(crate) fn execute_run_bash_action(
         .unwrap_or(true);
     let edited_files = action.input_list("edit");
     let tool_call_id = action.call_id.as_str();
+    if !edited_files.is_empty() {
+        // Baselines must exist before the command mutates anything, so the
+        // turn ledger registers here, ahead of execution.
+        core.file_edits_ledger
+            .register(&cwd, &turn_id, &edited_files);
+    }
     execute_run_bash_with_tail(
         &command_to_run,
         &cwd,

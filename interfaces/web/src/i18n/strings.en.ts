@@ -319,7 +319,6 @@ export const en: Strings = {
     fileEditsAria: "File edits",
     turnEditsTitle: "Files changed in this task",
     turnEditsOverflow: "{count} more changed files not shown",
-    captureCount: "Captured {count} times",
     fileOpCreated: "New",
     fileOpModified: "Modified",
     fileOpDeleted: "Deleted",

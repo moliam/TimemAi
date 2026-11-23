@@ -316,7 +316,6 @@ export const zh = {
     fileEditsAria: "文件修改",
     turnEditsTitle: "本次任务文件变更",
     turnEditsOverflow: "另有 {count} 个文件的修改未展示",
-    captureCount: "共捕获 {count} 次",
     fileOpCreated: "新建",
     fileOpModified: "修改",
     fileOpDeleted: "删除",

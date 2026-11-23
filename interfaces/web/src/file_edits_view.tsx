@@ -9,6 +9,7 @@ import type { StringKey } from "./i18n";
 import { fileEditsPresentation, parseDiffRows } from "./tool_presentation";
 import type { DiffRow, FileEditOp, FileEditPresentation, FileEditsPresentation } from "./tool_presentation";
 import { redactSensitiveDisplayText } from "./view_model";
+import { useSelectionGestureGuard } from "./selection_gesture";
 
 const OP_LABEL_KEYS: Record<FileEditOp, StringKey> = {
   created: "tools.fileOpCreated",
@@ -95,10 +96,8 @@ export function FileEditsPanel({ edits }: { edits: ReadonlyArray<TurnEditEntry> 
   );
 }
 
-// A per-path entry in the turn-level change summary. `capture_count` records
-// how many tool calls captured that path during the turn; the displayed
-// op/diff is the final non-skipped capture so the row reflects the end state.
-export type TurnEditEntry = FileEditPresentation & { capture_count?: number };
+// A per-path entry in the turn-level change summary.
+export type TurnEditEntry = FileEditPresentation;
 
 export type TurnEditsSummary = {
   edits: TurnEditEntry[];
@@ -203,11 +202,15 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
   const kindTitle = kindLabel
     ? sizeLabel ? `${kindLabel} · ${sizeLabel}` : kindLabel
     : undefined;
-  const toggle = () => {
+  // User feedback: selecting text inside a diff must not collapse/expand it (that
+  // made the page jump). A drag, a gesture starting in selectable text, or any
+  // live selection belongs to the browser: it only selects. ASCII only here:
+  // this view file is checked to stay free of literal CJK strings.
+  const { onPointerDown: trackSelectionGesture, ignoreToggle } = useSelectionGestureGuard();
+  const toggle = (event?: { clientX: number; clientY: number }) => {
     if (!expandable) return;
+    if (event && ignoreToggle(event)) return;
     manualToggle.current = true;
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && sectionRef.current?.contains(selection.anchorNode)) return;
     setExpanded(current => !current);
   };
   return (
@@ -218,7 +221,8 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
         tabIndex={expandable ? 0 : undefined}
         aria-expanded={expandable ? expanded : undefined}
         aria-label={expandable ? (expanded ? t("tools.collapseOutput") : t("tools.expandOutput")) : undefined}
-        onClick={toggle}
+        onPointerDown={trackSelectionGesture}
+        onClick={event => toggle(event)}
         onKeyDown={event => {
           if (!expandable || (event.key !== "Enter" && event.key !== " ")) return;
           event.preventDefault();
@@ -231,14 +235,6 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
           {directory && <span className="file-edit-directory">{directory}</span>}
           <span className="file-edit-name">{name}</span>
         </span>
-        {(edit.capture_count ?? 0) > 1 && (
-          <span
-            className="file-edit-captures"
-            title={t("tools.captureCount", { count: edit.capture_count ?? 0 })}
-          >
-            ×{edit.capture_count}
-          </span>
-        )}
         {kindLabel && (
           <span className="file-edit-kind" title={kindTitle}>{kindLabel}</span>
         )}

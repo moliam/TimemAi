@@ -774,3 +774,161 @@ fn capture_probe_skips_binary_files_before_copy() {
     assert!(!staged.exists());
     let _ = fs::remove_dir_all(&dir);
 }
+
+fn ledger_row<'a>(evidence: &'a FileEditsEvidence, path: &str) -> &'a FileEditEntry {
+    evidence
+        .edits
+        .iter()
+        .find(|entry| entry.path == path)
+        .unwrap_or_else(|| panic!("no ledger row for {path}: {:?}", evidence.edits))
+}
+
+#[test]
+fn turn_ledger_drops_created_then_deleted_tmp_tree() {
+    // /tmp 场景：worktree 整树建了又删。目录根先登记（当时不存在 → Absent），
+    // 其下的文件后来才首次声明（祖先 Absent ⇒ 推导基线也是 Absent），轮末
+    // 一把算：双方都回到不存在，一行都不留。
+    let dir = temp_dir("ledger_tmp_tree");
+    let root = dir.join("tree");
+    let root_declared = root.to_string_lossy().into_owned();
+    let file = root.join("src").join("main.rs");
+    let file_declared = file.to_string_lossy().into_owned();
+
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn", &[root_declared.clone()]);
+    fs::create_dir_all(&file.parent().unwrap()).unwrap();
+    write_file(&file, "fn a() {}\nfn b() {}\n");
+    ledger.register(&dir, "turn", &[file_declared.clone()]);
+
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    let row = ledger_row(&net, &file_declared);
+    assert_eq!(row.op, FileEditOp::Created);
+    assert_eq!(row.added_lines, 2);
+
+    fs::remove_dir_all(&root).unwrap();
+    ledger.register(&dir, "turn", &[root_declared]);
+
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    assert!(
+        net.edits.is_empty(),
+        "created-then-deleted tree must net out to nothing: {:?}",
+        net.edits
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_folds_repeated_edits_into_one_baseline_diff() {
+    let dir = temp_dir("ledger_repeat");
+    let file = dir.join("notes.txt");
+    let declared = file.to_string_lossy().into_owned();
+    write_file(&file, "one\n");
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn", &[declared.clone()]);
+
+    write_file(&file, "one\ntwo\n");
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    let row = ledger_row(&net, &declared);
+    assert_eq!(row.op, FileEditOp::Modified);
+    assert!(row.diff.as_deref().unwrap().contains("+two"));
+
+    // 第二次改动后，diff 仍是 基线→终态 的全程变化，不是最后一跳。
+    write_file(&file, "one\ntwo\nthree\n");
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    let row = ledger_row(&net, &declared);
+    assert_eq!(row.added_lines, 2);
+    assert!(row.diff.as_deref().unwrap().contains("+three"));
+    assert_eq!(net.edits.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_deleted_then_recreated_reads_modified() {
+    let dir = temp_dir("ledger_rebuild");
+    let file = dir.join("cfg.txt");
+    let declared = file.to_string_lossy().into_owned();
+    write_file(&file, "old\n");
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn", &[declared.clone()]);
+
+    fs::remove_file(&file).unwrap();
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    assert_eq!(ledger_row(&net, &declared).op, FileEditOp::Deleted);
+
+    write_file(&file, "new\n");
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    let row = ledger_row(&net, &declared);
+    assert_eq!(row.op, FileEditOp::Modified);
+    assert!(row.diff.as_deref().unwrap().contains("+new"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_non_text_paths_report_existence_only() {
+    let dir = temp_dir("ledger_binary");
+    let blob = dir.join("logo.bin");
+    let declared = blob.to_string_lossy().into_owned();
+    write_file(
+        &blob,
+        [0u8, 1, 2, 3]
+            .iter()
+            .map(|b| *b as char)
+            .collect::<String>()
+            .as_str(),
+    );
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn", &[declared.clone()]);
+
+    // 仍然存在：无基线可对比，不产生行。
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    assert!(net.edits.is_empty(), "{:?}", net.edits);
+
+    fs::remove_file(&blob).unwrap();
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    let row = ledger_row(&net, &declared);
+    assert_eq!(row.op, FileEditOp::Deleted);
+    assert_eq!(row.skip_reason, Some("binary"));
+    assert!(row.diff.is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_resets_between_turns_and_ignores_stale_refreshes() {
+    let dir = temp_dir("ledger_turns");
+    let file = dir.join("f.txt");
+    let declared = file.to_string_lossy().into_owned();
+    write_file(&file, "a\n");
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn-1", &[declared.clone()]);
+
+    // 新一轮重新登记基线；旧轮次的刷新请求不再产出（总结已随旧轮下发）。
+    ledger.register(&dir, "turn-2", &[declared.clone()]);
+    assert!(ledger.net_evidence_for_turn("turn-1").is_none());
+
+    write_file(&file, "b\n");
+    let net = ledger.net_evidence_for_turn("turn-2").unwrap();
+    assert!(net.edits[0].diff.as_deref().unwrap().contains("+b"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_entry_cap_is_hard() {
+    let dir = temp_dir("ledger_cap");
+    let mut ledger = TurnFileEditsLedger::default();
+    let declared: Vec<String> = (0..160)
+        .map(|index| {
+            dir.join(format!("f{index}.txt"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    ledger.register(&dir, "turn", &declared);
+    assert_eq!(ledger.net_evidence_for_turn("turn").unwrap().edits.len(), 0);
+    // 上限之后的新路径不再进入维护表，条目总数有界。
+    let extra = dir.join("extra.txt");
+    ledger.register(&dir, "turn", &[extra.to_string_lossy().into_owned()]);
+    let net = ledger.net_evidence_for_turn("turn").unwrap();
+    assert!(net.edits.is_empty());
+    assert_eq!(ledger.tracked_len(), 128);
+    let _ = fs::remove_dir_all(&dir);
+}

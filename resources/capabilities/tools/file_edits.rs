@@ -297,6 +297,253 @@ impl EditContext {
         }
     }
 }
+/// Turn-scoped ledger of declared edit paths. The first `edit` declaration
+/// that mentions a path in one turn registers its baseline: diffable text
+/// files get a staged content snapshot, everything else only records
+/// existence (binary / directory / oversize paths never render a diff, so
+/// they take no snapshot). The turn summary is derived as baseline ->
+/// current state at refresh time, so a file created and deleted inside one
+/// turn nets out to no row, a deleted-then-recreated file reads as
+/// modified, and repeated edits of one file fold into a single
+/// baseline-to-final diff.
+#[derive(Debug)]
+pub(crate) struct TurnFileEditsLedger {
+    turn_id: String,
+    entries: Vec<LedgerEntry>,
+    index: HashMap<String, usize>,
+    resolved_index: HashMap<PathBuf, usize>,
+    snapshot_dir: Option<Arc<SnapshotDirHandle>>,
+    budget: u64,
+}
+
+/// Hard ledger entry cap per turn. Past the cap, first mentions stay
+/// untracked so the ledger can never grow without bound.
+const TURN_LEDGER_MAX_ENTRIES: usize = 128;
+
+#[derive(Debug, Clone)]
+struct LedgerEntry {
+    /// Declared form, used verbatim in every row.
+    path: String,
+    resolved: PathBuf,
+    baseline: LedgerBaseline,
+    /// Size at first mention; the only size a deleted row can keep.
+    baseline_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerBaseline {
+    /// Staged text snapshot; enables a real baseline-to-final diff.
+    Text(FileContentSnapshot),
+    /// The path did not exist at first mention - observed directly, or
+    /// inferred from an ancestor directory registered as absent earlier:
+    /// nothing can live under a directory that did not exist.
+    Absent,
+    /// The path existed but has no baseline (not diffable, or the entry or
+    /// byte budget was exhausted). Only a later disappearance is reportable.
+    Existed { reason: &'static str },
+}
+
+impl Default for TurnFileEditsLedger {
+    fn default() -> Self {
+        Self {
+            turn_id: String::new(),
+            entries: Vec::new(),
+            index: HashMap::new(),
+            resolved_index: HashMap::new(),
+            snapshot_dir: None,
+            budget: MAX_SNAPSHOT_TOTAL_BYTES as u64,
+        }
+    }
+}
+
+impl TurnFileEditsLedger {
+    /// Register the first mentions of one call's declared paths. Must run
+    /// before the command mutates the filesystem. Later declarations of an
+    /// already tracked path are no-ops; the baseline never moves.
+    pub(crate) fn register(&mut self, cwd: &Path, turn_id: &str, declared_paths: &[String]) {
+        if declared_paths.is_empty() {
+            return;
+        }
+        if self.turn_id != turn_id {
+            *self = Self {
+                turn_id: turn_id.to_string(),
+                ..Self::default()
+            };
+        }
+        for declared in declared_paths {
+            let declared = declared.trim();
+            if declared.is_empty() || declared.chars().count() > MAX_DECLARED_PATH_CHARS {
+                continue;
+            }
+            let resolved = resolve_declared_path(cwd, declared);
+            if self.index.contains_key(declared) || self.resolved_index.contains_key(&resolved) {
+                continue;
+            }
+            if self.entries.len() >= TURN_LEDGER_MAX_ENTRIES {
+                // Hard cap: past it, first mentions stay untracked so the
+                // ledger can never grow without bound. Per-call rows still
+                // report those paths for the call that touched them.
+                continue;
+            }
+            let (baseline, baseline_size) = self.probe_baseline(&resolved);
+            let slot = self.entries.len();
+            self.index.insert(declared.to_string(), slot);
+            self.resolved_index.insert(resolved.clone(), slot);
+            self.entries.push(LedgerEntry {
+                path: declared.to_string(),
+                resolved,
+                baseline,
+                baseline_size,
+            });
+        }
+    }
+
+    /// Snapshot the first-mention state of one path.
+    fn probe_baseline(&mut self, resolved: &Path) -> (LedgerBaseline, Option<u64>) {
+        let metadata = match fs::metadata(resolved) {
+            Ok(metadata) => metadata,
+            Err(_) => return (LedgerBaseline::Absent, None),
+        };
+        let size = metadata.len();
+        if !metadata.is_file() {
+            let reason = if metadata.is_dir() {
+                SKIP_DIRECTORY
+            } else {
+                SKIP_UNREADABLE
+            };
+            return (LedgerBaseline::Existed { reason }, Some(size));
+        }
+        if self.absent_ancestor(resolved) {
+            return (LedgerBaseline::Absent, None);
+        }
+        if (size as u64) > self.budget {
+            return (
+                LedgerBaseline::Existed {
+                    reason: SKIP_BUDGET,
+                },
+                Some(size),
+            );
+        }
+        if self.snapshot_dir.is_none() {
+            self.snapshot_dir = create_snapshot_dir().map(|dir| Arc::new(SnapshotDirHandle(dir)));
+        }
+        let Some(dir) = self.snapshot_dir.as_deref() else {
+            return (
+                LedgerBaseline::Existed {
+                    reason: SKIP_NOT_CAPTURED,
+                },
+                Some(size),
+            );
+        };
+        let slot = self.entries.len();
+        let snapshot = capture_snapshot(resolved, dir, slot, &mut self.budget);
+        match snapshot {
+            FileContentSnapshot::OnDisk { .. } => (LedgerBaseline::Text(snapshot), Some(size)),
+            FileContentSnapshot::Binary => (
+                LedgerBaseline::Existed {
+                    reason: SKIP_BINARY,
+                },
+                Some(size),
+            ),
+            FileContentSnapshot::TooLarge => (
+                LedgerBaseline::Existed {
+                    reason: SKIP_TOO_LARGE,
+                },
+                Some(size),
+            ),
+            _ => (
+                LedgerBaseline::Existed {
+                    reason: SKIP_UNREADABLE,
+                },
+                Some(size),
+            ),
+        }
+    }
+
+    fn absent_ancestor(&self, resolved: &Path) -> bool {
+        let mut ancestor = resolved.parent();
+        while let Some(dir) = ancestor {
+            if let Some(&slot) = self.resolved_index.get(dir) {
+                if self.entries[slot].baseline == LedgerBaseline::Absent {
+                    return true;
+                }
+            }
+            ancestor = dir.parent();
+        }
+        false
+    }
+
+    /// Test hook: how many paths the ledger currently tracks (cap check).
+    #[cfg(test)]
+    pub(crate) fn tracked_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Net begin-to-end rows for the owning turn. `None` when `turn_id` is
+    /// not the turn the ledger tracks (e.g. a background job exiting after
+    /// its turn closed and a later turn re-registered the ledger): the
+    /// summary already shipped for that turn stays untouched.
+    pub(crate) fn net_evidence_for_turn(&self, turn_id: &str) -> Option<FileEditsEvidence> {
+        (self.turn_id == turn_id).then(|| self.net_evidence())
+    }
+
+    fn net_evidence(&self) -> FileEditsEvidence {
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let (after, after_size) = read_snapshot(&entry.resolved);
+            let size_bytes = if after_size > 0 {
+                Some(after_size as u64)
+            } else {
+                entry.baseline_size
+            };
+            let row = match &entry.baseline {
+                LedgerBaseline::Text(staged) => {
+                    let (before, _) = match staged {
+                        FileContentSnapshot::OnDisk { path } => read_snapshot(path),
+                        other => (other.clone(), 0),
+                    };
+                    net_row(build_entry(&entry.path, &before, &after, size_bytes))
+                }
+                LedgerBaseline::Absent => net_row(build_entry(
+                    &entry.path,
+                    &FileContentSnapshot::Missing,
+                    &after,
+                    size_bytes,
+                )),
+                LedgerBaseline::Existed { reason } => {
+                    // Without a baseline, a path that still exists carries no
+                    // net information; only a disappearance is reportable.
+                    matches!(after, FileContentSnapshot::Missing).then(|| {
+                        let mut row = build_entry(
+                            &entry.path,
+                            &FileContentSnapshot::Unreadable,
+                            &after,
+                            size_bytes,
+                        );
+                        row.skip_reason = Some(reason);
+                        row
+                    })
+                }
+            };
+            if let Some(row) = row {
+                entries.push(row);
+            }
+        }
+        FileEditsEvidence {
+            edits: apply_payload_budget(entries),
+        }
+    }
+}
+
+/// "No net change" rows are dropped: the turn summary only reports what a
+/// reader would experience as a change between the turn boundaries.
+fn net_row(entry: FileEditEntry) -> Option<FileEditEntry> {
+    matches!(
+        entry.op,
+        FileEditOp::Created | FileEditOp::Modified | FileEditOp::Deleted
+    )
+    .then_some(entry)
+}
 
 fn resolve_declared_path(cwd: &Path, declared: &str) -> PathBuf {
     let path = Path::new(declared);

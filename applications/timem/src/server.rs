@@ -948,7 +948,6 @@ struct WebTurnFileChange {
     skip_reason: Option<String>,
     /// Size at capture time: the only evidence for binary/oversized files.
     size_bytes: Option<u64>,
-    capture_count: u32,
 }
 
 fn is_zero_usize(value: &usize) -> bool {
@@ -960,7 +959,6 @@ fn is_zero_usize(value: &usize) -> bool {
 /// state.
 #[derive(Debug, Clone, Default)]
 struct TurnFileChangeState {
-    captures: u32,
     start_op: Option<String>,
     /// First comparable capture. When the path did not exist at the turn
     /// boundary this is the creation itself, i.e. whole-file evidence.
@@ -972,6 +970,10 @@ struct TurnFileChangeState {
 struct TurnFileChangeAccumulator {
     states: Vec<TurnFileChangeState>,
     index: HashMap<String, usize>,
+    /// `turn_edits` rows observed on this turn's events: the ledger's
+    /// authoritative begin-to-end evidence. When present it replaces the
+    /// heuristic fold above (older archives have no ledger rows).
+    net: Option<WebTurnFileChanges>,
 }
 
 const TURN_FILE_CHANGES_LIMIT: usize = 64;
@@ -1012,12 +1014,11 @@ impl TurnFileChangeAccumulator {
                 }
             };
             let state = &mut self.states[slot];
-            state.captures += 1;
             if change.op == "skipped" || change.op == "unchanged" {
                 // Neither is a change worth summarizing: a skipped capture has
                 // no comparable baseline, and an unchanged capture would add a
-                // "no change" row next to real edits. The capture still counts,
-                // so an earlier real edit is not erased by a later no-op.
+                // "no change" row next to real edits. The real edit recorded
+                // earlier for this path is not erased by a later no-op.
                 continue;
             }
             if state.start_op.is_none() {
@@ -1049,8 +1050,54 @@ impl TurnFileChangeAccumulator {
         }
     }
 
+    fn observe_net(&mut self, rows: &[Value]) {
+        self.net = Some(web_turn_file_changes_from_rows(rows));
+    }
+
     fn summary_if_any(&self) -> Option<WebTurnFileChanges> {
+        if self.net.is_some() {
+            return self.net.clone();
+        }
         (!self.states.is_empty()).then(|| self.summary())
+    }
+}
+
+/// The `turn_edits` array of a `core.action` topic payload, when the event
+/// carries ledger rows. Presence (even empty) marks authoritative net
+/// evidence: a created-then-deleted file legitimately yields no row.
+fn action_event_turn_edits(payload: &Value) -> Option<Vec<Value>> {
+    if payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str)
+        != Some(CORE_TOPIC_ACTION)
+    {
+        return None;
+    }
+    payload
+        .get("payload")
+        .and_then(|inner| inner.get("turn_edits"))
+        .and_then(Value::as_array)
+        .cloned()
+}
+
+/// Clamp ledger rows into the same bounded summary shape as the fold.
+fn web_turn_file_changes_from_rows(rows: &[Value]) -> WebTurnFileChanges {
+    let mut edits = Vec::new();
+    let mut overflow_count = 0usize;
+    for row in rows {
+        let Some(change) = web_turn_file_change(row) else {
+            continue;
+        };
+        if edits.len() >= TURN_FILE_CHANGES_LIMIT {
+            overflow_count += 1;
+            continue;
+        }
+        edits.push(change);
+    }
+    WebTurnFileChanges {
+        edits,
+        overflow_count,
     }
 }
 
@@ -1081,7 +1128,6 @@ fn web_turn_file_change(edit: &Value) -> Option<WebTurnFileChange> {
             .and_then(Value::as_str)
             .map(str::to_string),
         size_bytes: edit.get("size_bytes").and_then(Value::as_u64),
-        capture_count: 1,
     })
 }
 
@@ -1100,7 +1146,7 @@ fn net_turn_file_change(state: &TurnFileChangeState) -> Option<WebTurnFileChange
         // The last capture can be a later in-turn touch (formatter, codemod) whose
         // delta is meaningless next to a created file: a 428-line file formatted
         // afterwards would otherwise claim "+9 −2". Keep the creation capture as
-        // the diff/count evidence; capture_count still reports later touches.
+        // the diff/count evidence.
         if let Some(opening) = state.opening.as_ref() {
             change.diff = opening.diff.clone();
             change.added_lines = opening.added_lines;
@@ -1112,7 +1158,6 @@ fn net_turn_file_change(state: &TurnFileChangeState) -> Option<WebTurnFileChange
     } else if change.op == "created" {
         change.op = "modified".to_string();
     }
-    change.capture_count = state.captures;
     Some(change)
 }
 
@@ -9143,6 +9188,9 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn.completion = Some(completion);
                 }
                 turn.events_slimmed = turn.events_slimmed || events_slimmed;
+                if let Some(rows) = action_event_turn_edits(&payload) {
+                    turn.file_change_state.observe_net(&rows);
+                }
                 let folded_edits = action_event_edits(&payload);
                 if !folded_edits.is_empty() {
                     turn.file_change_state.observe(&folded_edits);
@@ -17103,6 +17151,7 @@ fn append_turn_event(
     // Fold file-change evidence in the same step the event enters the turn, so
     // the client renders an authoritative summary instead of re-deriving it.
     let folded_edits = action_event_edits(&payload);
+    let net_edits = action_event_turn_edits(&payload);
     turn.events.push(WebTurnEvent {
         event_id: event_id.clone(),
         source: source.to_string(),
@@ -17110,7 +17159,10 @@ fn append_turn_event(
         created_at_ms,
         timeline_seq: Some(timeline_seq),
     });
-    if !folded_edits.is_empty() {
+    if let Some(rows) = net_edits {
+        turn.file_change_state.observe_net(&rows);
+        turn.file_changes = turn.file_change_state.summary_if_any();
+    } else if !folded_edits.is_empty() {
         turn.file_change_state.observe(&folded_edits);
         turn.file_changes = turn.file_change_state.summary_if_any();
     }

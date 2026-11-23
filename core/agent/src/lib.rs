@@ -2172,6 +2172,10 @@ pub struct AgentCore {
     pub(crate) scratch: FileScratchStore,
     pub(crate) chat_history: FileChatHistoryStore,
     pub(crate) shell_jobs: ShellJobManager,
+    /// Turn-scoped ledger of declared edit paths (see file_edits module):
+    /// first mention registers a baseline, each finished edit-carrying call
+    /// refreshes the net begin-to-end rows shipped as `turn_edits`.
+    pub(crate) file_edits_ledger: file_edits::TurnFileEditsLedger,
     pub(crate) disk_pressure: runtime_info::DiskPressureTracker,
     /// Test-only override for the disk sample (total free, total capacity)
     /// so disk pressure windows can be simulated without mutating a real
@@ -2376,6 +2380,7 @@ impl AgentCore {
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: ShellJobManager::new(memory_dir),
+            file_edits_ledger: file_edits::TurnFileEditsLedger::default(),
             disk_pressure: runtime_info::DiskPressureTracker::new(),
             #[cfg(test)]
             disk_free_override: None,
@@ -2832,7 +2837,18 @@ impl AgentCore {
                 // manager's exit listener must not emit a duplicate topic;
                 // the textual RUNNING_JOB_UPDATE below still goes to the model.
                 .filter(|update| !update.topic_published)
-                .map(host::running_shell_job_exit_topic_event)
+                .map(|update| {
+                    let mut event = host::running_shell_job_exit_topic_event(update);
+                    if update.edits.is_some() {
+                        if let Some(net) = self
+                            .file_edits_ledger
+                            .net_evidence_for_turn(&update.turn_id)
+                        {
+                            event.payload["turn_edits"] = crate::file_edits::edits_payload(&net);
+                        }
+                    }
+                    event
+                })
                 .collect::<Vec<_>>();
             if !events.is_empty() {
                 runtime.on_core_topic_events(&events);
@@ -3119,7 +3135,18 @@ impl AgentCore {
                 // manager's exit listener must not emit a duplicate topic;
                 // the textual RUNNING_JOB_UPDATE below still goes to the model.
                 .filter(|update| !update.topic_published)
-                .map(host::running_shell_job_exit_topic_event)
+                .map(|update| {
+                    let mut event = host::running_shell_job_exit_topic_event(update);
+                    if update.edits.is_some() {
+                        if let Some(net) = self
+                            .file_edits_ledger
+                            .net_evidence_for_turn(&update.turn_id)
+                        {
+                            event.payload["turn_edits"] = crate::file_edits::edits_payload(&net);
+                        }
+                    }
+                    event
+                })
                 .collect::<Vec<_>>();
             if !events.is_empty() {
                 runtime.on_core_topic_events(&events);
@@ -7968,6 +7995,19 @@ Runtime tool_call ids:",
         if action_counts_as_tool_call(&action.action) {
             self.current_stats.tool_calls += 1;
         }
+        // Baseline the declared edit paths before the worker thread runs the
+        // approved command; refresh happens when its outcome is emitted.
+        if let PendingApprovedAction::RunBash {
+            cwd,
+            turn_id,
+            edited_files,
+            ..
+        } = &pending.approved_action
+        {
+            if !edited_files.is_empty() {
+                self.file_edits_ledger.register(cwd, turn_id, edited_files);
+            }
+        }
         thread::spawn(move || {
             let wall_start = Instant::now();
             let result = match &pending_for_thread.approved_action {
@@ -8532,6 +8572,13 @@ Runtime tool_call ids:",
         }
         if let Some(edits) = &outcome.edits {
             event.payload["edits"] = file_edits::edits_payload(edits);
+            // The turn ledger owns the begin-to-end summary; ship its net
+            // rows alongside the per-call evidence so hosts render the
+            // authoritative fold instead of re-deriving one.
+            let turn_id = self.current_action_turn_id();
+            if let Some(net) = self.file_edits_ledger.net_evidence_for_turn(&turn_id) {
+                event.payload["turn_edits"] = file_edits::edits_payload(&net);
+            }
         }
         runtime.on_core_topic_events(&[event]);
     }

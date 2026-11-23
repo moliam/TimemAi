@@ -375,13 +375,12 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
         state.summary()
     };
 
-    // 同一个文件多次修改：保留末态 diff，记录捕获次数。
+    // 同一个文件多次修改：保留末态 diff。
     let first = fold(&[
         edit("src/a.rs", "modified", Some("--- a\n+x\n"), 0),
         edit("src/a.rs", "modified", Some("--- a\n+y\n"), 2),
     ]);
     assert_eq!(first.edits.len(), 1);
-    assert_eq!(first.edits[0].capture_count, 2);
     assert_eq!(first.edits[0].removed_lines, 2);
     assert!(first.edits[0].diff.as_deref().unwrap().contains("+y"));
 
@@ -418,7 +417,6 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     assert_eq!(created_then_formatted.edits[0].op, "created");
     assert_eq!(created_then_formatted.edits[0].added_lines, 428);
     assert_eq!(created_then_formatted.edits[0].removed_lines, 0);
-    assert_eq!(created_then_formatted.edits[0].capture_count, 2);
     assert_eq!(created_then_formatted.edits[0].size_bytes, Some(9123));
     assert!(created_then_formatted.edits[0]
         .diff
@@ -440,7 +438,6 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
         edit("b.txt", "created", Some("--- /dev/null\n+y\n"), 0),
     ]);
     assert_eq!(rebuilt.edits[0].op, "modified");
-    assert_eq!(rebuilt.edits[0].capture_count, 3);
 
     // 非文本：op 仍是修改，类型作为标签，只保留路径/大小，没有 diff。
     let binary = fold(&[json!([{
@@ -474,13 +471,12 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     let untouched = fold(&[edit("same.txt", "unchanged", None, 0)]);
     assert!(untouched.edits.is_empty());
 
-    // 修改后再「无变化」：保留那次修改，捕获次数照记，不被 no-op 覆盖。
+    // 修改后再「无变化」：保留那次修改，不被 no-op 覆盖。
     let modified_then_untouched = fold(&[
         edit("edited.txt", "modified", Some("--- a\n+x\n"), 1),
         edit("edited.txt", "unchanged", None, 0),
     ]);
     assert_eq!(modified_then_untouched.edits[0].op, "modified");
-    assert_eq!(modified_then_untouched.edits[0].capture_count, 2);
     assert!(modified_then_untouched.edits[0].diff.is_some());
 
     // 上限 64 个文件，其余计入 overflow。
@@ -490,6 +486,116 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     let capped = fold(&many);
     assert_eq!(capped.edits.len(), 64);
     assert_eq!(capped.overflow_count, 2);
+}
+
+#[test]
+fn ledger_turn_edits_rows_replace_the_heuristic_fold() {
+    // `turn_edits` 出现（含空数组）即代表维护表的权威净结果：宿主整体替换，
+    // 不与启发式折叠叠加；后续只有 per-call edits 的事件也不能把折叠「复活」，
+    // 否则新建后又删除的文件会重新以「新建」出现在总结里。
+    let edit = |path: &str, op: &str| {
+        json!([{
+            "path": path,
+            "op": op,
+            "diff": Some("--- a\n+x\n"),
+            "added_lines": 1,
+            "removed_lines": 0,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": Value::Null,
+        }])
+    };
+    let mut state = TurnFileChangeAccumulator::default();
+    state.observe(edit("tmp/tree/src/main.rs", "created").as_array().unwrap());
+    assert_eq!(state.summary_if_any().unwrap().edits.len(), 1);
+
+    // 维护表事件：整树轮末已删除，净结果为空。
+    let payload = json!({
+        "topic": {"name": CORE_TOPIC_ACTION},
+        "payload": {"edits": [], "turn_edits": []},
+    });
+    let rows = action_event_turn_edits(&payload).unwrap();
+    assert!(rows.is_empty());
+    state.observe_net(&rows);
+    let summary = state.summary_if_any().unwrap();
+    assert!(summary.edits.is_empty());
+
+    // 之后只带 per-call edits 的收尾事件不再改变总结。
+    state.observe(edit("tmp/tree/src/main.rs", "modified").as_array().unwrap());
+    assert!(state.summary_if_any().unwrap().edits.is_empty());
+}
+
+#[test]
+fn ledger_turn_edits_rows_carry_net_ops_with_kind_tags() {
+    let payload = json!({
+        "topic": {"name": CORE_TOPIC_ACTION},
+        "payload": {
+            "turn_edits": [
+                {
+                    "path": "src/lib.rs",
+                    "op": "modified",
+                    "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@\n+a\n",
+                    "added_lines": 1,
+                    "removed_lines": 0,
+                    "truncated": false,
+                    "skip_reason": Value::Null,
+                    "size_bytes": Value::Null,
+                },
+                {
+                    "path": "assets/logo.png",
+                    "op": "deleted",
+                    "diff": Value::Null,
+                    "added_lines": 0,
+                    "removed_lines": 0,
+                    "truncated": false,
+                    "skip_reason": "binary",
+                    "size_bytes": 4096,
+                },
+            ],
+        },
+    });
+    let rows = action_event_turn_edits(&payload).unwrap();
+    let summary = web_turn_file_changes_from_rows(&rows);
+    assert_eq!(summary.edits.len(), 2);
+    assert_eq!(summary.edits[0].op, "modified");
+    assert_eq!(summary.edits[1].op, "deleted");
+    assert_eq!(summary.edits[1].skip_reason.as_deref(), Some("binary"));
+    assert_eq!(summary.edits[1].size_bytes, Some(4096));
+
+    // 行数上限与折叠路径一致：64 行进总结，其余计 overflow。
+    let many: Vec<Value> = (0..66)
+        .map(|index| {
+            json!({
+                "path": format!("f{index}.txt"),
+                "op": "created",
+                "diff": Value::Null,
+                "added_lines": 0,
+                "removed_lines": 0,
+                "truncated": false,
+                "skip_reason": Value::Null,
+                "size_bytes": Value::Null,
+            })
+        })
+        .collect();
+    let capped = web_turn_file_changes_from_rows(&many);
+    assert_eq!(capped.edits.len(), 64);
+    assert_eq!(capped.overflow_count, 2);
+}
+
+#[test]
+fn action_event_turn_edits_requires_the_action_topic() {
+    let missing = json!({"topic": {"name": CORE_TOPIC_ACTION}, "payload": {"edits": []}});
+    assert!(action_event_turn_edits(&missing).is_none());
+    let wrong_topic = json!({
+        "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+        "payload": {"turn_edits": []},
+    });
+    assert!(action_event_turn_edits(&wrong_topic).is_none());
+    let present = json!({
+        "topic": {"name": CORE_TOPIC_ACTION},
+        "payload": {"turn_edits": []},
+    });
+    assert!(action_event_turn_edits(&present).unwrap().is_empty());
 }
 
 #[test]
@@ -659,7 +765,6 @@ fn restored_long_turns_keep_every_file_in_the_turn_summary() {
         .diff
         .as_deref()
         .is_some_and(|diff| diff.contains("+++ b/file")));
-    assert_eq!(text.capture_count, 1);
     let binary = &summary.edits[5];
     assert_eq!(binary.op, "modified");
     assert_eq!(binary.skip_reason.as_deref(), Some("binary"));
