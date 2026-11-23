@@ -391,6 +391,40 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
         edit("new.txt", "modified", Some("--- a\n+y\n"), 0),
     ]);
     assert_eq!(created.edits[0].op, "created");
+    // 轮内新建后再被格式化：新建行数取整文件证据，而不是末次差异（否则一个
+    // 428 行的新文件会显示成 +9 −2）。
+    let created_then_formatted = fold(&[
+        json!([{
+            "path": "gen.rs",
+            "op": "created",
+            "diff": "--- /dev/null\n+++ b/gen.rs\n@@ -0,0 +1,2 @@\n+fn a() {}\n+fn b() {}\n",
+            "added_lines": 428,
+            "removed_lines": 0,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": 9123,
+        }]),
+        json!([{
+            "path": "gen.rs",
+            "op": "modified",
+            "diff": "--- a/gen.rs\n+++ b/gen.rs\n+a\n-b\n",
+            "added_lines": 9,
+            "removed_lines": 2,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": 9140,
+        }]),
+    ]);
+    assert_eq!(created_then_formatted.edits[0].op, "created");
+    assert_eq!(created_then_formatted.edits[0].added_lines, 428);
+    assert_eq!(created_then_formatted.edits[0].removed_lines, 0);
+    assert_eq!(created_then_formatted.edits[0].capture_count, 2);
+    assert_eq!(created_then_formatted.edits[0].size_bytes, Some(9123));
+    assert!(created_then_formatted.edits[0]
+        .diff
+        .as_deref()
+        .unwrap()
+        .starts_with("--- /dev/null"));
 
     // 轮内新建又删除：整轮边界上都不存在，不出现在总结里。
     let vanished = fold(&[

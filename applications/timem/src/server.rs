@@ -963,6 +963,9 @@ struct TurnFileChangeState {
     captures: u32,
     start_op: Option<String>,
     saw_captured: bool,
+    /// First comparable capture. When the path did not exist at the turn
+    /// boundary this is the creation itself, i.e. whole-file evidence.
+    opening: Option<WebTurnFileChange>,
     display: Option<WebTurnFileChange>,
 }
 
@@ -1023,6 +1026,9 @@ impl TurnFileChangeAccumulator {
                 state.start_op = Some(change.op.clone());
             }
             state.saw_captured = true;
+            if state.opening.is_none() {
+                state.opening = Some(change.clone());
+            }
             state.display = Some(change);
         }
     }
@@ -1097,6 +1103,18 @@ fn net_turn_file_change(state: &TurnFileChangeState) -> Option<WebTurnFileChange
         return None;
     }
     if !start_existed {
+        // The row reads "created", so its +/− must describe the whole new file.
+        // The last capture can be a later in-turn touch (formatter, codemod) whose
+        // delta is meaningless next to a created file: a 428-line file formatted
+        // afterwards would otherwise claim "+9 −2". Keep the creation capture as
+        // the diff/count evidence; capture_count still reports later touches.
+        if let Some(opening) = state.opening.as_ref() {
+            change.diff = opening.diff.clone();
+            change.added_lines = opening.added_lines;
+            change.removed_lines = opening.removed_lines;
+            change.truncated = opening.truncated;
+            change.size_bytes = opening.size_bytes;
+        }
         change.op = "created".to_string();
     } else if change.op == "created" {
         change.op = "modified".to_string();

@@ -1163,3 +1163,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Web 呈现：新增 `interfaces/web/src/model_error.ts` 镜像分类表；`model_service_ui` 判定顺序改为 配置缺失 → cache_control → 流失败可执行类（认证/权限/欠费/套餐/额度/请求非法/模型不存在/内容策略）→ 流失败过载 → 分类文案（新增 permission/billing/subscription/quota/rateLimited/timeout/serverError/invalidRequest/inputTooLarge/contentPolicy 的中英文 Title+Detail，复用 authFailed/unavailable/overloaded/unreachable）→ 旧文本兜底；`view_model` 的重试显示先读类（超时→response-timeout、限流/额度→rate-limited、传输→network-error、过载/服务错误→service-error），再走旧文本兜底。中英文 i18n 同步新增 20 行。
 - 测试看护：新增 `core/agent/tests/unit/model_error_tests.rs` 10 例（智谱码表逐条、跨供应商不串表、OpenAI 符号码与流码、只有状态的供应商、规范头 roundtrip、旧串按状态归类且不读文案、流失败 class 还原、四谓词语义、未声明 provider 不解释业务码）；`retry_policy_tests.rs` 新增 96 行端到端用例（智谱 1113 在 429 下判为欠费并换端点、1261 输入超限、流失败 terminal 不重试）；`model_api_tests.rs`/`model_transport_tests.rs` 断言改到规范头；Web 新增 `tests/model_error.test.ts`（表镜像与解析）与 `model_service_ui.test.ts` +56 行分类文案用例。验证：`cargo test -p agent_core --lib` 1039 过、`cargo test -p timem --lib` 535 过、web `pnpm test` 1059 过、tsc 过、module_boundary/test_contract/fmt/`git diff --check` 过。
 - 后续：新供应商接入时补其业务码表即可，UI 与重试策略无需改动；只发状态的供应商保持现状。
+
+## 2026-11-23 轮次文件变更摘要：新建文件的行数不再取末次差异
+
+- 现象（用户反馈）：一轮里新建的文件在轮次变更摘要里显示「新建 … ×2」却只有 `+9 −2`，而该文件实际有 428 行。原因在 Host 的轮次折叠逻辑：`TurnFileChangeState` 保留首次 op 与**最后一次**捕获，`net_turn_file_change` 只把 op 归一到 `created`，行数与 diff 仍来自末次捕获——先新建、随后被 `cargo fmt` 重排时，末次捕获就是格式化的 `+9 −2`。
+- 修复：折叠状态新增 `opening`（首次可比捕获）。当轮次边界上该路径原本不存在（净变化为 `created`）时，行数、diff、truncated、size 一律取创建捕获（整文件证据），`capture_count` 仍记录后续被改动次数；路径先存在再重建等其它情形保持原有「保留末态 diff」规则不变。
+- 语义边界：摘要行表达的是「轮次开始到结束」的净变化，因此新建行按创建时的整文件计；轮内后续改动仍逐条出现在各自的动作卡片里，不丢失。
+- 测试看护：`web_host_tests::turn_file_change_summary_folds_net_begin_to_end_change` 新增用例——创建 `added_lines=428` 后再来一次 `+9 −2` 的修改捕获，断言摘要仍为 `created`、`added_lines=428`、`removed_lines=0`、`capture_count=2`、`size_bytes` 取创建时的值、diff 以 `--- /dev/null` 开头；原有「同文件多次修改保留末态、新建后删除不出现、删除后重建算修改、非文本只留大小」断言不变。验证：`cargo test -p timem --lib` 535 过、fmt、`git diff --check` 过。
