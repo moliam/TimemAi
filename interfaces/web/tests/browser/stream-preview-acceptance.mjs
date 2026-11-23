@@ -645,21 +645,36 @@ async function main() {
       return {duration: style.transitionDuration, property: style.transitionProperty,
         viewportDuration: viewport.transitionDuration, scrollBehavior: viewport.scrollBehavior};
     })()`);
-    assert(handoffTiming.duration.split(',')[0].trim() === '0s', `automatic tool handoff must stay instant and compensate scroll instead: ${JSON.stringify(handoffTiming)}`);
+    // 用户反馈：界面必须保持连续——行在 ~220ms 内平滑收拢，其他内容被慢慢推上去，
+    // 而不是提交那一帧就整块消失；但视口本身绝不能有过渡或平滑滚动。
+    assert(handoffTiming.duration.split(',')[0].trim() === '0.22s' && handoffTiming.property.includes('grid-template-rows'),
+      `automatic tool handoff must collapse smoothly: ${JSON.stringify(handoffTiming)}`);
     assert(handoffTiming.viewportDuration === '0s' && handoffTiming.scrollBehavior === 'auto', `handoff must never animate the viewport: ${JSON.stringify(handoffTiming)}`);
-    // 跟随时收纳不移动视口内容：提交后逐帧采样必须保持稳定。
-    const settledPositions = await browser.evaluate(`new Promise(resolve => {
-      const positions = []; let remaining = 18;
+    const collapseTrack = await browser.evaluate(`new Promise(resolve => {
+      const run = document.querySelector('.stream-tool-run');
+      const heights = []; let remaining = 16;
       const sample = () => {
-        const viewport = document.querySelector('.chat-scroll');
-        const row = document.querySelector('.stream-tool-row.running');
-        positions.push({scroll: viewport.scrollTop, top: row.getBoundingClientRect().top});
+        heights.push(Math.round(run.getBoundingClientRect().height * 10) / 10);
+        if (--remaining) requestAnimationFrame(sample); else resolve(heights);
+      }; requestAnimationFrame(sample);
+    })`);
+    const collapseSteps = collapseTrack.slice(1).map((height, index) => Math.abs(height - collapseTrack[index]));
+    assert(Math.max(...collapseSteps) < 40, `tool collapse must not jump in a single frame: ${JSON.stringify(collapseTrack)}`);
+    assert(collapseTrack[0] - collapseTrack[collapseTrack.length - 1] > 10, `tool collapse must shrink across the transition: ${JSON.stringify(collapseTrack)}`);
+    // 收拢结束后滚动位置与可见行稳定，不会持续抖动。
+    await sleep(320);
+    const settled = await browser.evaluate(`new Promise(resolve => {
+      const viewport = document.querySelector('.chat-scroll');
+      const row = document.querySelector('.stream-tool-row.running');
+      const positions = []; let remaining = 10;
+      const sample = () => {
+        positions.push([viewport.scrollTop, row.getBoundingClientRect().top]);
         if (--remaining) requestAnimationFrame(sample); else resolve(positions);
       }; requestAnimationFrame(sample);
     })`);
-    for (const field of ['scroll', 'top']) {
-      const values = settledPositions.map(position => position[field]);
-      assert(Math.max(...values) - Math.min(...values) < 1, `serial handoff keeps ${field} stable after commit: ${JSON.stringify(values)}`);
+    for (const index of [0, 1]) {
+      const values = settled.map(position => position[index]);
+      assert(Math.max(...values) - Math.min(...values) < 1, `settled tool collapse keeps position ${index} stable: ${JSON.stringify(values)}`);
     }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
@@ -1447,6 +1462,13 @@ async function main() {
       host.setSession(editDone); host.send({type: "hello", snapshot: makeSnapshot(editDone)});
       await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-edits-chip[role="button"]')`), "diff chip is not its own control");
       assert(await browser.evaluate(`document.querySelectorAll('.file-edit-section').length === 2 && document.querySelectorAll('.file-edit-index').length === 2`), "multi-file panel must number its sections");
+      // 用户反馈：工作过程中展开文件修改展示框（默认开）——工具行已折叠，diff 仍打开。
+      assert(await browser.evaluate(`document.querySelectorAll('.file-edit-diff').length === 2`), "diff sections must stay expanded while the turn is working");
+      await browser.evaluate(`localStorage.setItem("timem-web-file-edits-during-work-v1", "false")`);
+      await browser.call("Page.reload", {ignoreCache: true});
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.file-edit-section').length === 2`), "diff sections missing after switching the setting off");
+      assert(await browser.evaluate(`document.querySelectorAll('.file-edit-diff').length === 0`), "switching the work expansion off must fold the diff sections");
+      await browser.evaluate(`localStorage.removeItem("timem-web-file-edits-during-work-v1")`);
       assert(await browser.evaluate(`!document.querySelector('.stream-tool-result-preview') && !!document.querySelector('.stream-tool-result-reopen')`), "completed edit row re-opened the result preview instead of offering the eye badge");
       await browser.evaluate(`document.querySelector('.stream-tool-head').click()`);
       await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-command-shell')`), "row head must still expand the command view");
@@ -1509,6 +1531,15 @@ async function main() {
           const turns = base.turns.map(t => ({...t, events: [...runningA, phase("swing-a", "finish", "completed", 4), startB]}));
           const next = {...base, turns};
           host.setSession(next); host.send({type: "hello", snapshot: makeSnapshot(next)});
+          // 收纳必须连续：逐帧采样组高，任何一帧都不许跳掉大半高度。
+          probes[`${mode}Track`] = await browser.evaluate(`new Promise(resolve => {
+            const run = document.querySelector('.stream-tool-run');
+            const heights = []; let remaining = 16;
+            const sample = () => {
+              heights.push(Math.round(run.getBoundingClientRect().height * 10) / 10);
+              if (--remaining) requestAnimationFrame(sample); else resolve(heights);
+            }; requestAnimationFrame(sample);
+          })`);
           await sleep(400);
           probes[`${mode}After`] = await browser.evaluate(measure);
           probes[`${mode}Counts`] = await browser.evaluate(counts);
@@ -1521,8 +1552,11 @@ async function main() {
           const before = probes[`${mode}Before`];
           assert(before.previewHeight > 70 && before.previewHeight < 140,
             `${mode}: result preview must stay about four lines ${JSON.stringify(probes)}`);
-          assert(before.runHeight - probes[`${mode}Counts`].runHeight <= 140,
-            `${mode}: handoff must not move more than a few lines ${JSON.stringify(probes)}`);
+          const track = probes[`${mode}Track`];
+          assert(track.every((height, index) => index === 0 || Math.abs(height - track[index - 1]) < 40),
+            `${mode}: absorbed row must collapse continuously ${JSON.stringify(track)}`);
+          assert(track[0] - track[track.length - 1] > 40,
+            `${mode}: the transition must reclaim the absorbed height ${JSON.stringify(track)}`);
         }
         // 量化的证据：预览限高后，交接只撤掉几行，而不是整块 240px。
         console.log("PASS Chrome tool handoff sizing", JSON.stringify(probes));

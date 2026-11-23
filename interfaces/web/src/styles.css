@@ -5800,7 +5800,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* 用户反馈：工具收起时（常连带结果预览）界面上下跳得厉害。缓动救不了这件事，
    因为要解决的是位移本身，所以收纳保持瞬时，由 main.tsx 的 useStreamLayoutAnchor
    把高度差反向补进 scrollTop：正在阅读的内容原地不动。 */
-.stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
+/* 用户反馈：收纳不要整块瞬移。行用 220ms 平滑收拢，下面的内容被连续推上去；
+   期间行仍保持原内容（见 STREAM_COLLAPSE_MS），所以收拢起点就是原来的高度。 */
+.stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows .22s cubic-bezier(.4, 0, .2, 1), opacity .22s ease; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
 /* 用户反馈：徽章是无框色块（取消描边，只用底色把徽章和正文分开），而且必须

@@ -132,13 +132,15 @@ describe("collapsed tool summary", () => {
   });
 });
 
-it("absorbs tools instantly and compensates the scroll instead of animating the page", () => {
-  // 用户反馈：收起时界面上下跳（常连带结果预览一起收起，变化很大）。缓动只把
-  // 位移拉长，救不了阅读位置；因此收纳保持瞬时，位移由 useStreamLayoutAnchor
-  // 反向补进 scrollTop，且不得出现整页高度/滚动动画。
+it("collapses tool rows continuously and never animates the viewport", () => {
+  // 用户反馈：收起时界面上下跳——要的是连续性，不是瞬时位移。行用 220ms 平滑收拢，
+  // 其他内容被连续推上去；内容（预览/命令缩略）等收拢结束再切换，否则过渡会从
+  // 更矮的高度起步，等于没有动画。视口本身绝不能有过渡或平滑滚动。
   const rule = styles.match(/\.stream-tool-merged-item \{([^}]*)\}/)?.[1];
   expect(rule).toBeDefined();
-  expect(rule).not.toContain("transition:");
+  expect(rule).toContain("transition: grid-template-rows .22s");
+  expect(source).toContain("const STREAM_COLLAPSE_MS = 220;");
+  expect(source).toContain("setSettledAbsorbed(true), STREAM_COLLAPSE_MS");
   expect(source).toContain("function useStreamShrinkAnchor(");
   expect(source).toContain("useStreamShrinkAnchor(runRef);");
   // 什么时候补偿交给 foldAnchorScrollTop 判定：整块已滚出视口上方才补，
@@ -263,7 +265,7 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview && <span");
   expect(stream).toContain('{!editsAutoOpen && code && (');
   expect(stream).toContain('<div className="stream-tool-command-shell">');
-  expect(stream).toContain('const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;');
+  expect(stream).toContain('const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;');
   expect(stream).toContain('<pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>');
   expect(stream).toContain('{!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}');
   expect(stream).not.toContain("const command =");
@@ -413,7 +415,7 @@ describe("command multi-line preview one-way shrink", () => {
     const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
     const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
     expect(stream).toContain("absorbed?: boolean");
-    expect(stream).toContain("const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;");
+    expect(stream).toContain("const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;");
     expect(stream).toContain("if (previous.absorbed !== next.absorbed) return false;");
     expect(source).toContain("absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))}");
     expect(ordinary).toContain("const commandCap = running ? COMMAND_PREVIEW_MAX_LINES : 1;");

@@ -1,7 +1,9 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy, PenLine, X } from "lucide-react";
 import { useTimedClipboardCopy } from "./clipboard_copy";
 import { useBetaPreference } from "./beta_preferences";
+import { useStreamWorkInProgress } from "./stream_work_context";
+import { useFileEditsDuringWork } from "./stream_ui_mode";
 import { t } from "./i18n";
 import type { StringKey } from "./i18n";
 import { parseDiffRows } from "./tool_presentation";
@@ -215,7 +217,17 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
   // off, sections carrying a diff stay expanded and notice-only sections
   // (skipped/unchanged) remain header-only.
   const autoCollapse = useBetaPreference("autoCollapse");
-  const [expanded, setExpanded] = useState(() => !!edit.diff && !autoCollapse);
+  // User request: keep file edit panels expanded while work is in progress, so
+  // the diff stays open even after its tool row folds; the finished turn falls
+  // back to the auto-collapse rule, and a section the user toggled keeps that
+  // explicit choice.
+  const expandDuringWork = useFileEditsDuringWork() && useStreamWorkInProgress();
+  const [expanded, setExpanded] = useState(() => !!edit.diff && (!autoCollapse || expandDuringWork));
+  const manualToggle = useRef(false);
+  useEffect(() => {
+    if (manualToggle.current) return;
+    setExpanded(!!edit.diff && (expandDuringWork || !autoCollapse));
+  }, [expandDuringWork, autoCollapse, edit.diff]);
   const sectionRef = useRef<HTMLDivElement | null>(null);
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(edit.diff ?? "", {
     idle: t("tools.copyDiff"),
@@ -230,6 +242,7 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
     : undefined;
   const toggle = () => {
     if (!expandable) return;
+    manualToggle.current = true;
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && sectionRef.current?.contains(selection.anchorNode)) return;
     setExpanded(current => !current);

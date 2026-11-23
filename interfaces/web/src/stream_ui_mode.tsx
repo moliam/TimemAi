@@ -5,6 +5,15 @@ export function useStreamUiMode() { return useBetaPreference("stream"); }
 export function setStreamArchive(value: boolean) { setBetaPreference("streamArchive", value); }
 export function useStreamArchive() { return useBetaPreference("streamArchive"); }
 export function useToolResultStatus() { return useBetaPreference("toolResults"); }
+export function setFileEditsDuringWork(value: boolean) { setBetaPreference("fileEditsDuringWork", value); }
+export function useFileEditsDuringWork() { return useBetaPreference("fileEditsDuringWork"); }
+export function FileEditsDuringWorkSetting() {
+  const active = useFileEditsDuringWork();
+  useT();
+  return <section className="settings-group system-feature-card"><div className="settings-group-heading"><div>
+    <strong>{t("system.fileEditsDuringWorkTitle")}</strong><p>{t("system.fileEditsDuringWorkDesc")}</p>
+    </div><button type="button" role="switch" className="settings-feature-switch" aria-label={t("system.fileEditsDuringWorkAria")} aria-checked={active} onClick={() => setFileEditsDuringWork(!active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
+}
 export function ToolResultStatusSetting() {
   const active = useToolResultStatus();
   useT();

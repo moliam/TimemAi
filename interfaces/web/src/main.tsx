@@ -8,7 +8,8 @@ import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_dr
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault, setBetaPreference, useBetaPreference } from "./beta_preferences";
-import { StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { FileEditsDuringWorkSetting, StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { StreamWorkProvider } from "./stream_work_context";
 import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
@@ -13446,7 +13447,19 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
   const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const code = activity.code?.trim();
   // 收纳前（运行中或新近完成）命令体最多 5 行；收纳后永久单行。
-  const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;
+  // 用户反馈：收纳要连续、不能瞬移——先把整块平滑收拢，收拢结束再换成收纳后的
+  // 紧凑内容；否则内容在提交那一刻先变矮，过渡只能从更矮的起点开始，等于没动画。
+  const [settledAbsorbed, setSettledAbsorbed] = useState(absorbed);
+  useEffect(() => {
+    if (absorbed === settledAbsorbed) return;
+    if (!absorbed) {
+      setSettledAbsorbed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSettledAbsorbed(true), STREAM_COLLAPSE_MS);
+    return () => window.clearTimeout(timer);
+  }, [absorbed, settledAbsorbed]);
+  const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;
   const commandPreview = useMemo(
     () => (code ? commandPreviewText(code, commandCap) : undefined),
     [code, commandCap],
@@ -13477,7 +13490,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { acti
   const [previewDismissed, setPreviewDismissed] = useState(false);
   // 用户反馈：带文件修改证据的命令优先显示 diff 框，不再默认展开结果预览；
   // 预览只在用户主动点行尾眼睛徽章后出现。
-  const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !absorbed)));
+  const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !settledAbsorbed)));
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -13822,12 +13835,14 @@ function TurnAnswerDelivery({
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working" && streamArchive} onArchived={onStreamArchived} hostId={processHostId}>
-        <StreamActivityPresentation
-          thoughtText={intermediate && !retainedThought ? thoughtText : ""}
-          thoughtTimelineSeq={preview?.timeline_seq}
-          activities={streamTools}
-          responseArriving={!!previewText}
-        />
+        <StreamWorkProvider value={streamWorking}>
+          <StreamActivityPresentation
+            thoughtText={intermediate && !retainedThought ? thoughtText : ""}
+            thoughtTimelineSeq={preview?.timeline_seq}
+            activities={streamTools}
+            responseArriving={!!previewText}
+          />
+        </StreamWorkProvider>
       </StreamProcess>}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
       {(hasFinal || !!previewText) && (
@@ -15582,6 +15597,9 @@ function toolInvocationPreview(activity: Activity) {
 // COMMAND_PREVIEW_MAX_LINES 行（结尾省略行+底部渐隐）；一经折叠收纳（handoff/
 // superseded）或进入归档视图，永久收缩为单行，不再恢复完整多行展示。
 const COMMAND_PREVIEW_MAX_LINES = 5;
+// 收纳的收拢时长（与 styles.css 的 .stream-tool-merged-item 过渡一致）：这段时间里
+// 行保持原有内容与高度平滑收拢，内容（预览、命令缩略）等收拢结束再切换。
+const STREAM_COLLAPSE_MS = 220;
 function commandPreviewText(code: string, maxLines: number): { text: string; clipped: boolean } {
   const lines = code.replace(/\r\n?/g, "\n").split("\n");
   while (lines.length > 1 && !lines[lines.length - 1].trim()) lines.pop();
@@ -17576,6 +17594,7 @@ const SettingsCenter = memo(function SettingsCenter(
                   </label>
                 </section>
                 <StreamUiModeSetting />
+                <FileEditsDuringWorkSetting />
                 <ToolResultStatusSetting />
               </section>
             )}

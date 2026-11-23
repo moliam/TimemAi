@@ -80,15 +80,16 @@ describe("settings category regroup", () => {
   it("defaults the new switches on and pins them against the debug flag", () => {
     expect(prefs).toContain('autoCollapse: "timem-web-turn-auto-collapse-v1"');
     expect(prefs).toContain('fileEditsWrap: "timem-web-file-edits-wrap-v1"');
-    expect(prefs).toMatch(/const defaults: Record<Preference, boolean> = \{\s*stream: true, streamArchive: false, toolResults: true,\s*autoCollapse: true, fileEditsWrap: true,\s*\};/);
-    for (const name of ["stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap"]) {
+    expect(prefs).toMatch(/const defaults: Record<Preference, boolean> = \{\s*stream: true, streamArchive: false, toolResults: true,\s*autoCollapse: true, fileEditsWrap: true, fileEditsDuringWork: true,\s*\};/);
+    expect(prefs).toContain('fileEditsDuringWork: "timem-web-file-edits-during-work-v1"');
+    for (const name of ["stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap", "fileEditsDuringWork"]) {
       expect(prefs).toContain(`"${name}"`);
     }
   });
 
   it("folds file edit sections by default and wraps diffs when enabled", () => {
     expect(editsView).toContain('const autoCollapse = useBetaPreference("autoCollapse");');
-    expect(editsView).toContain("useState(() => !!edit.diff && !autoCollapse)");
+    expect(editsView).toContain("useState(() => !!edit.diff && (!autoCollapse || expandDuringWork))");
     expect(editsView).toContain('useBetaPreference("fileEditsWrap")');
     expect(editsView).toContain('`file-edits-panel${wrap ? " edits-wrap" : ""}`');
     expect(styles).toContain(".file-edits-panel.edits-wrap .file-edit-diff-table { width: 100%; }");

@@ -129,7 +129,8 @@ describe("result preview surfaces and contracts", () => {
     // 流式行（用户反馈）：自动展开（运行中/未收纳常驻持续刷新 tail）；无标题标签；
     // 收纳或手动收起后仅在工具行头行尾保留图标徽章（不单独占行）再展开。
     // 用户反馈：命令带 diff 框时优先显示 diff，结果预览不再默认展开（仅眼睛徽章可开）。
-    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !absorbed)));");
+    // 收纳后预览要在收拢动画结束后才撤掉，否则过渡从更矮的高度起步。
+    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (previewReopened || (!hasEdits && (running || !settledAbsorbed)));");
     expect(main).toContain("{previewVisible && (");
     // 用户反馈：收起带来的位移不能让阅读位置跑掉——由流内局部滚动锚定补偿。
     expect(main).toContain("useStreamShrinkAnchor(runRef);");

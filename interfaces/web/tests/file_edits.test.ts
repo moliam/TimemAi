@@ -342,7 +342,7 @@ describe("file edits components render server-side", () => {
 
 describe("file edits auto-expand contract", () => {
   it("folds diff sections under auto-collapse while tool cards still auto-open", () => {
-    expect(component).toContain("useState(() => !!edit.diff && !autoCollapse)");
+    expect(component).toContain("useState(() => !!edit.diff && (!autoCollapse || expandDuringWork))");
     expect(main).toContain("const hasEdits = !!activity.edits?.length;");
     expect(main).toContain("const [expanded, setExpanded] = useState(() => hasEdits)");
     expect(main).toContain("if (hasEdits) setExpanded(true);");
