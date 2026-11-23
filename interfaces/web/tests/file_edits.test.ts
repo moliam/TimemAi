@@ -134,14 +134,15 @@ describe("file edits surfaces", () => {
     expect(gutter).toContain("white-space: nowrap;");
   });
 
-  it("keeps the panel as the single framed box with summed head totals", () => {
-    // 用户反馈：文件名列表不渲染为框，仅展开的 diff 正文保留内层框；
-    // 面板顶部栏显示所有文件合计的 +/- 数量。
-    expect(component).toContain('className="file-edits-panel-head"');
-    expect(component).toContain('className="file-edits-panel-totals"');
-    expect(component).toContain('t("tools.fileEditsPanelCount"');
-    expect(en).toContain("fileEditsPanelCount:");
-    expect(zh).toContain("fileEditsPanelCount:");
+  it("keeps the panel as the single framed box and counts nowhere but the header chip", () => {
+    // 用户反馈：文件名列表不渲染为框，仅展开的 diff 正文保留内层框。
+    // 面板内也不再渲染第二份「N 个文件 +x −y」：卡片头部 chip 已是唯一计数处，
+    // 面板再报一遍会让同一组数字在一张卡里出现三次。
+    expect(component).not.toContain('className="file-edits-panel-head"');
+    expect(component).not.toContain('className="file-edits-panel-totals"');
+    expect(component).not.toContain('t("tools.fileEditsPanelCount"');
+    expect(en).not.toContain("fileEditsPanelCount:");
+    expect(zh).not.toContain("fileEditsPanelCount:");
     const sectionStart = styles.indexOf(".file-edit-section {");
     const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
     expect(section).not.toContain("border:");
@@ -151,21 +152,30 @@ describe("file edits surfaces", () => {
     expect(op).not.toContain("background");
     const diffStart = styles.indexOf(".file-edit-diff {");
     const diff = styles.slice(diffStart, styles.indexOf("}", diffStart) + 1);
-    expect(diff).toContain("border: 1px solid");
-    expect(diff).toContain("border-radius: 8px;");
+    // 用户反馈：diff 框与文本同宽——内层框取消，滚动行为保留。
+    expect(diff).not.toContain("border:");
+    expect(diff).not.toContain("background:");
+    expect(diff).not.toContain("border-radius");
+    expect(diff).toContain("overflow: auto;");
+    expect(diff).toContain("max-height: 420px;");
+    const embeddedStart = styles.indexOf(".turn-edits-summary .file-edits-panel {");
+    const embedded = styles.slice(embeddedStart, styles.indexOf("}", embeddedStart) + 1);
+    expect(embedded).toContain("border: none;");
+    expect(embedded).toContain("padding: 0;");
   });
 
-  it("renders the summed +/- totals in the panel head", () => {
+  it("renders no second head or summed totals inside the panel", () => {
     const html = renderToString(createElement(FileEditsPanel, {
       edits: [
         { ...validEntry },
         { ...validEntry, path: "b.rs", added_lines: 2, removed_lines: 0 },
       ],
     })).replace(/<!-- -->/g, "");
-    expect(html).toContain("file-edits-panel-head");
-    expect(html).toContain("file-edits-panel-totals");
-    expect(html).toContain(">+3<");
-    expect(html).toContain(">\u22121<");
+    expect(html).not.toContain("file-edits-panel-head");
+    expect(html).not.toContain("file-edits-panel-totals");
+    // 每行自己的 +/- 保留：per-file 数字不是重复，是定位到哪个文件。
+    expect(html).toContain("file-edit-additions");
+    expect(html).toContain("file-edit-deletions");
   });
 
   it("keeps the diff tint across the full horizontal scroll range", () => {
@@ -285,7 +295,7 @@ describe("file edits auto-expand contract", () => {
     // 自动展开只呈现 diff 面板：命令保持单行缩略，完整代码/输出由手动展开控制。
     expect(main).toContain("const editsAutoOpen = hasEdits && !manuallyToggled;");
     expect(main).toContain('<div className="stream-tool-command-shell">');
-    expect(main).toContain('<pre className="stream-tool-command">{code}</pre>');
+    expect(main).toContain('<pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>');
     expect(main).toContain("(!open || editsAutoOpen) && invocationPreview");
     // 带修改证据的行豁免折叠组合并，diff 卡片始终完整可见。
     expect(main).toContain("const mergeableCount = completed.filter(activity => !activity.edits?.length).length;");
@@ -437,5 +447,18 @@ describe("turn edits summary box renders server-side", () => {
       createElement(TurnEditsSummaryBox, { summary: summarizeTurnEdits(groups) }),
     );
     expect(html).toContain("file-edit-notice");
+  });
+});
+
+describe("file edits panel numbering", () => {
+  it("labels each section head with its 1-based index before the op badge", () => {
+    expect(component).toContain('<FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} />');
+    expect(component).toContain("edit: TurnEditEntry; index: number");
+    const headIndex = component.indexOf('<span className="file-edit-index">{index + 1}.</span>');
+    const opIndex = component.indexOf("file-edit-op file-edit-op-");
+    expect(headIndex).toBeGreaterThan(-1);
+    expect(headIndex).toBeLessThan(opIndex);
+    expect(styles).toContain(".file-edit-index { flex: none; min-width: 1.2em; text-align: right;");
+    expect(styles).toContain(':root[data-theme="light"] .file-edit-index');
   });
 });

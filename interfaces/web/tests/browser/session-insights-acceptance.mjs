@@ -1238,7 +1238,8 @@ async function main() {
     const shield = await center(browser, ".session-insights-shield");
     await click(browser, shield);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#settings-center .system-resource-caps')`), "shield opens system resource settings");
-    assert(await browser.evaluate(`document.querySelector('.settings-center-nav button.active')?.textContent.includes('System')`), "system settings section is active");
+    // 9b38b593 设置重组：资源管控位于「管控 / Governance」面板。
+    assert(await browser.evaluate(`(() => { const text = document.querySelector('.settings-center-nav button.active')?.textContent ?? ''; return text.includes('管控') || text.includes('Governance'); })()`), "governance settings section is active");
     await browser.evaluate(`document.querySelectorAll('.settings-center-nav button')[1].click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.endpoint-settings-pane')`), "endpoint settings pane opens for the spacing regression");
     await sleep(200);

@@ -122,10 +122,18 @@ describe("activityFromTopic result preview mapping", () => {
 describe("result preview surfaces and contracts", () => {
   it("renders the preview in both stream and archived tool rows", () => {
     expect(main.match(/<StreamToolResultPreview/g)).toHaveLength(2);
-    // 运行中常驻 / 结束自动收起（瞬时窗口）/ 点击徽章可再次展开。
+    // 归档视图：结束自动收起（瞬时窗口），徽章再展开。
     expect(main).toContain("resultPreview && (running || previewReopened)");
     expect(main).toContain("!running && resultPreview && !previewReopened");
     expect(main).toContain('className="stream-tool-result-reopen"');
+    // 流式行（用户反馈）：自动展开（运行中/未收纳常驻持续刷新 tail）；无标题标签；
+    // 收纳或手动收起后仅在工具行头行尾保留图标徽章（不单独占行）再展开。
+    expect(main).toContain("const previewVisible = !!resultPreview && !previewDismissed && (running || !absorbed || previewReopened);");
+    expect(main).toContain("{previewVisible && (");
+    expect(main).toContain("!running && resultPreview && !previewVisible && (");
+    expect(main).toContain('aria-label={t("tools.resultPreview")}');
+    expect(main).not.toContain("stream-tool-result-preview-badge");
+    expect(main).not.toContain("resultPreviewLiveHint");
     expect(main).toContain("a.result_preview === b.result_preview");
     // 仅观察语义：只读 log；文本允许复制。
     expect(main).toContain('role="log"');
@@ -137,7 +145,10 @@ describe("result preview surfaces and contracts", () => {
     expect(styles).toContain(".stream-tool-result-preview {");
     const start = styles.indexOf(".stream-tool-result-preview {");
     const block = styles.slice(start, styles.indexOf("}", start) + 1);
-    expect(block).toContain("border: 1px dashed");
+    // 用户反馈：无框色块（非虚线框）。
+    expect(block).toContain("border: none;");
+    expect(block).toContain("background:");
+    expect(block).not.toContain("dashed");
     expect(styles).toContain("@keyframes stream-result-pulse");
     for (const selector of [
       ':root[data-theme="light"] .stream-tool-result-preview {',

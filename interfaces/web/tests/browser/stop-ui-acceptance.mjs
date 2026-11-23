@@ -359,11 +359,20 @@ async function main() {
     `[...document.querySelectorAll(${JSON.stringify(selector)})].some((node) => node.textContent?.includes(${JSON.stringify(text)}) === true)`,
   );
   const sent = (type) => host.commands.filter((command) => command.type === type);
+  // startBrowser only waits for the CDP target: the first document may still be
+  // about:blank, where localStorage access throws. Wait for the app shell first.
+  await waitFor(() => exists('textarea[aria-label="Message Timem"]'), "composer missing at startup");
+  await waitFor(() => host.getConnectionCount() === 1, "initial websocket connection missing");
   // Pin the classic (non-streaming) UI mode: this acceptance exercises the
   // formal working frame, which streaming mode replaces by design. The
   // streaming default now ships on, so the mode must be explicit here.
   await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "false");`);
   await browser.call("Page.reload", { ignoreCache: true });
+  // Reload races the next evaluate; wait for the composer before typing.
+  await waitFor(() => exists('textarea[aria-label="Message Timem"]'), "composer missing after classic-mode reload");
+  // Classic pinning needs one explicit reload: baseline for later no-reconnect
+  // assertions is therefore exactly two accepted connections.
+  await waitFor(() => host.getConnectionCount() === 2, "classic-mode reload reconnect missing");
   const enterMessage = async (text) => {
     await browser.evaluate(`(() => {
       const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
@@ -489,7 +498,7 @@ async function main() {
       () => exists('.turn-assistant-frame.working .turn-work-item'),
       "first process event did not populate the formal working frame",
     );
-    assert(host.getConnectionCount() === 1, "non-zero event baseline forced a WebSocket reconnect");
+    assert(host.getConnectionCount() === 2, "non-zero event baseline forced a WebSocket reconnect");
     assert(
       !(await contains('body', "Runtime event gap")),
       "non-zero event baseline surfaced a runtime sequence error",
@@ -506,7 +515,7 @@ async function main() {
       });
     }
     await sleep(750);
-    assert(host.getConnectionCount() === 1, "progress burst rebuilt the WebSocket connection");
+    assert(host.getConnectionCount() === 2, "progress burst rebuilt the WebSocket connection");
     assert(
       !(await contains('body', "Runtime event gap")) &&
         !(await contains('body', "Runtime disconnected")) &&
@@ -746,9 +755,10 @@ async function main() {
     await sleep(180);
     assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "late Core event revived spinner");
 
-    // Every valid operation above must preserve the original transport. A page
-    // reload below is the first action allowed to create another connection.
-    assert(host.getConnectionCount() === 1, "valid UI operations rebuilt the WebSocket connection");
+    // Every valid operation above must preserve the pinned transport (initial
+    // load + classic-mode pin reload). The page reload below is the next action
+    // allowed to create another connection.
+    assert(host.getConnectionCount() === 2, "valid UI operations rebuilt the WebSocket connection");
     assert(
       !(await contains('body', "Runtime event gap")) &&
         !(await contains('body', "Runtime disconnected")) &&

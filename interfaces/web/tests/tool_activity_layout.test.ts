@@ -96,15 +96,20 @@ describe("stream tool status continuity", () => {
     expect(row).not.toContain("summarized");
     expect(styles).toContain(".stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }");
     expect(styles).not.toContain(".stream-tool-run { position: relative; }");
-    // 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行尾
-    //（右缘上移一个自身高度），按钮保持可点击；仅折叠态生效。
-    expect(styles).toContain(
-      ".stream-tool-run.merged { position: relative; height: 0; margin: 0; }",
-    );
+    // 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行尾，
+    // 且胶囊行盒要与文本末行等高对齐（高度取正文行高，上移自身高度 + 块间距）。
+    expect(styles).toContain(".stream-tool-run.merged { position: relative; margin: 0; }");
+    expect(styles).toContain(".stream-tool-run.merged.floating { height: 0; }");
     expect(styles).toMatch(
-      /\.stream-tool-run\.merged \.stream-tool-run-toggle \{[^}]*position: absolute;[^}]*transform: translateY\(-100%\);/s,
+      /\.stream-tool-run\.merged\.floating \.stream-tool-run-toggle \{[^}]*position: absolute;[^}]*height: calc\(var\(--content-size\) \* 1\.68\);[^}]*transform: translateY\(calc\(var\(--stream-content-gap\) \* -1\)\);/s,
     );
-    expect(source).toContain('className={`stream-tool-run${merged ? " merged" : ""}`}');
+    // 零高度悬浮只允许出现在「每一行都确实收起」的组里；混合组仍有可见行
+    // （文件修改卡、运行中行）时必须保持正常流高度，否则可见行会溢出叠印正文。
+    expect(source).toContain("const folded = merged && completedIds.size === activities.length;");
+    expect(source).toContain("const floating = folded && afterText;");
+    // 组前不是正文段落（文件修改卡、无前文）时不悬浮，徽章回到流内靠右。
+    expect(source).toContain('const afterText = index > 0 && groups[index - 1][0].activity?.tone !== "action";');
+    expect(source).toContain('className={`stream-tool-run${folded ? " merged" : ""}${floating ? " floating" : ""}`}');
     expect(styles).not.toContain("stream-tool-row::before");
     expect(styles).toContain(".stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }");
   });
@@ -123,7 +128,10 @@ describe("collapsed tool summary", () => {
       summary?.indexOf("stream-tool-run-glyph") ?? -1,
     );
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
-    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px 2px 0;/);
+    // 用户反馈：徽章要有底色色块，不再以透明字形浮在正文上。
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*background: rgba\(255, 255, 255, 0\.07\);/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*border-radius: 999px;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 9px 2px 5px;/);
   });
 });
 
@@ -228,7 +236,8 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview && <span");
   expect(stream).toContain('{!editsAutoOpen && code && (');
   expect(stream).toContain('<div className="stream-tool-command-shell">');
-  expect(stream).toContain('<pre className="stream-tool-command">{code}</pre>');
+  expect(stream).toContain('const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;');
+  expect(stream).toContain('<pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>');
   expect(stream).toContain('{!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}');
   expect(stream).not.toContain("const command =");
   expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
@@ -359,4 +368,33 @@ it("renders pipe-delimited result size before elapsed in both tool views", () =>
   expect(styles).toContain(".tool-activity-meta,");
   expect(styles).toContain(".tool-activity-duration-slot { display: none; }");
   expect(styles).toContain(".tool-activity summary .tool-activity-sep { display: none; }");
+});
+
+describe("command multi-line preview one-way shrink", () => {
+  const helper = source.slice(source.indexOf("const COMMAND_PREVIEW_MAX_LINES"), source.indexOf("function activitiesFromTurnEvent("));
+  it("caps live commands at five lines with a trailing ellipsis and normalizes newlines", () => {
+    expect(helper).toContain("const COMMAND_PREVIEW_MAX_LINES = 5;");
+    expect(helper).toContain("code.replace(/\\r\\n?/g, \"\\n\").split(\"\\n\")");
+    expect(helper).toContain('[...lines.slice(0, maxLines), "…"].join("\\n")');
+    expect(helper).toContain("clipped: true");
+    expect(helper).toContain("function commandHasMoreLines(activity: Activity): boolean");
+  });
+  it("stream rows shrink permanently once absorbed and archive rows settle single-line", () => {
+    const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+    expect(stream).toContain("absorbed?: boolean");
+    expect(stream).toContain("const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;");
+    expect(stream).toContain("if (previous.absorbed !== next.absorbed) return false;");
+    expect(source).toContain("absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))}");
+    expect(ordinary).toContain("const commandCap = running ? COMMAND_PREVIEW_MAX_LINES : 1;");
+    expect(ordinary).not.toContain("fencedCode");
+  });
+  it("head previews hint multi-line commands and clipped bodies fade at the bottom", () => {
+    expect(source).toContain('{invocationPreview.replace(/\\s+/g, " ")}{multilineCommand ? " …" : ""}</span>');
+    expect(source).toContain('{invocationPreview}{multilineCommand ? " …" : ""}');
+    expect(styles).toMatch(/\.stream-tool-command \{[^}]*position: relative;/s);
+    expect(styles).toContain(".stream-tool-command-clipped::after");
+    expect(styles).toContain('linear-gradient(180deg, transparent, #262626)');
+    expect(styles).toContain(':root[data-theme="light"] .stream-tool-command-clipped::after');
+  });
 });

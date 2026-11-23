@@ -330,7 +330,7 @@ async function openSystemPane(browser) {
     await browser.evaluate(`document.querySelector('[aria-controls="settings-center"]').click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.settings-center')`), "settings center opens");
   }
-  await browser.evaluate(`([...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.trim() === '系统')).click()`);
+  await browser.evaluate(`([...document.querySelectorAll('.settings-center-nav button')].find(b => ['管控', 'Governance'].includes(b.textContent.trim()))).click()`);
   await waitFor(() => browser.evaluate(`!!document.querySelector('.system-resource-caps .resource-caps-actions button')`), "system resource caps pane");
 }
 
@@ -411,7 +411,7 @@ async function saveActionFlow() {
     await waitFor(() => browser.evaluate(`!!document.querySelector('.segmented-control')`), "appearance pane");
     await browser.evaluate(`([...document.querySelectorAll('.segmented-control button')].find(b => b.textContent.trim() === '浅色')).click()`);
     await waitFor(() => browser.evaluate(`document.documentElement.dataset.theme === 'light'`), "light theme applied");
-    await browser.evaluate(`([...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.trim() === '系统')).click()`);
+    await browser.evaluate(`([...document.querySelectorAll('.settings-center-nav button')].find(b => ['管控', 'Governance'].includes(b.textContent.trim()))).click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.system-resource-caps .resource-caps-actions button')`), "system pane after theme switch");
     const light = await capsButtonStyle(browser);
     assert(light.label === "保存", "light theme keeps the short label");

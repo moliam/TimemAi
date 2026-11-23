@@ -531,12 +531,11 @@ const THINKING_CHAIN_CHANGE_EVENT = "timem:thinking-chain-change";
 // rendered while a model round streams. Pure UI preference persisted in the
 // browser like the sidebar layout; every session in this web UI follows it.
 function thinkingChainVisible(): boolean {
-  // Instance-wide display preference; default off so the thinking window
-  // only appears after an explicit opt-in.
+  // Instance-wide display preference; defaults on (explicit "0" opts out).
   try {
-    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) === "1";
+    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) !== "0";
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -13282,7 +13281,10 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
         // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
-        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
+        // 只有紧贴正文段落的折叠组才把徽章悬浮到末行行尾；组前若是实体块
+        // （文件修改卡、定时器等），悬浮徽章会压住它的内容，改为流内靠右。
+        const afterText = index > 0 && groups[index - 1][0].activity?.tone !== "action";
+        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} afterText={afterText} />;
       }
       const previewText = group[0].thoughtText;
       if (previewText)
@@ -13296,7 +13298,7 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   </section>;
 }
 
-function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
+function StreamToolRun({ activities, superseded, handoffIds, afterText }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string>; afterText: boolean }) {
   const showResults = useToolResultStatus();
   const [expanded, setExpanded] = useState(false);
   // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
@@ -13329,6 +13331,12 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
     return subscribeStreamInteraction(update);
   }, []);
   const merged = mergeableCount > 0 && !expanded && !interactionHeld;
+  // 用户反馈：组里还有可见行（文件修改卡、运行中行）时界面很乱——容器一旦
+  // 收成零高度，可见行就从锚点向下溢出、叠印后续正文。零高度悬浮只允许出现
+  // 在「每一行都确实被收起」的组里；混合组保持正常流高度，徽章也回到流内。
+  const folded = merged && completedIds.size === activities.length;
+  // 悬浮徽章只对齐正文末行；组前是实体块时落在流内（靠右单行），不压别人。
+  const floating = folded && afterText;
   // Visual contract: pulse when NEW results actually enter collapsed Tools,
   // including deferred handoff after completion. Completion alone must not pulse.
   // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
@@ -13352,12 +13360,13 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 控件契约：视觉收起（含双击选中展开等交互保持）显示 + tools xN，
   // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
-  return <div ref={runRef} className={`stream-tool-run${merged ? " merged" : ""}`}>
+  return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}${floating ? " floating" : ""}`}>
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
       <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
-      <div><StreamToolRow activity={activity} /></div>
+      {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
+      <div><StreamToolRow activity={activity} absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))} /></div>
     </div>)}
   </div>;
 
@@ -13397,7 +13406,7 @@ function ToolActivityIcon({
   return toolName;
 }
 
-const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
+const StreamToolRow = memo(function StreamToolRow({ activity, absorbed }: { activity: Activity; absorbed?: boolean }) {
   useT();
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
@@ -13407,6 +13416,13 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   );
   const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const code = activity.code?.trim();
+  // 收纳前（运行中或新近完成）命令体最多 5 行；收纳后永久单行。
+  const commandCap = running || !absorbed ? COMMAND_PREVIEW_MAX_LINES : 1;
+  const commandPreview = useMemo(
+    () => (code ? commandPreviewText(code, commandCap) : undefined),
+    [code, commandCap],
+  );
+  const multilineCommand = commandHasMoreLines(activity);
   const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
@@ -13425,9 +13441,12 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const hasEdits = !!activity.edits?.length;
   const [expanded, setExpanded] = useState(() => hasEdits);
   const [manuallyToggled, setManuallyToggled] = useState(false);
-  // 结果预览：运行中常驻实时 tail；结束自动收起（瞬时窗口），点击徽章可再次展开。
+  // 用户反馈：结果预览自动展开显示（运行中/未收纳常驻 tail，持续刷新）；不展示
+  // 「结果预览」标签；被收纳或手动收起后仅在工具行尾保留图标徽章可再展开。
   const resultPreview = activity.result_preview;
   const [previewReopened, setPreviewReopened] = useState(false);
+  const [previewDismissed, setPreviewDismissed] = useState(false);
+  const previewVisible = !!resultPreview && !previewDismissed && (running || !absorbed || previewReopened);
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -13484,7 +13503,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span>}
         {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
         {((running
           ? liveElapsedMs
@@ -13519,6 +13538,19 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
             </span>
           );
         })()}
+        {!running && resultPreview && !previewVisible && (
+          <button
+            type="button"
+            className="stream-tool-result-reopen"
+            onClick={event => {
+              event.stopPropagation();
+              setPreviewReopened(true);
+            }}
+            aria-label={t("tools.resultPreview")}
+          >
+            <Eye size={12} aria-hidden="true" />
+          </button>
+        )}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
@@ -13529,36 +13561,24 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
                   {t("tools.collapseCommand")}
                 </button>
               )}
-              <pre className="stream-tool-command">{code}</pre>
+              <pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>
             </div>
           )}
           {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
           {!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
-      {resultPreview && (running || previewReopened) && (
+      {previewVisible && (
         <StreamToolResultPreview
           text={resultPreview}
           running={running}
-          onCollapse={() => setPreviewReopened(false)}
+          onCollapse={() => setPreviewDismissed(true)}
         />
-      )}
-      {!running && resultPreview && !previewReopened && (
-        <button
-          type="button"
-          className="stream-tool-result-reopen"
-          onClick={event => {
-            event.stopPropagation();
-            setPreviewReopened(true);
-          }}
-        >
-          <Eye size={12} aria-hidden="true" />
-          {t("tools.resultPreview")}
-        </button>
       )}
     </div>
   );
 }, (previous, next) => {
+  if (previous.absorbed !== next.absorbed) return false;
   const a = previous.activity;
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
@@ -13569,9 +13589,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     JSON.stringify(a.edits) === JSON.stringify(b.edits);
 });
 
-// 结果预览框：仅观察的瞬时窗口（虚线边框 + 眼睛徽章，与文件编辑卡明确区分）。
-// 运行中随流式快照实时更新 tail；结束后自动消失，重新打开时保持只读渲染。
-// 文本允许复制；展示前逐行执行敏感信息脱敏，与 diff 行为一致。
+// 结果预览框：内容优先（不渲染「结果预览」标题），运行中持续刷新 tail
+// （aria-live + 呼吸点），可随时手动收起；重新展开由工具行尾的图标徽章承担。
+// 仅展示 tail；文本允许复制，展示前逐行执行敏感信息脱敏，与 diff 行为一致。
 const StreamToolResultPreview = memo(function StreamToolResultPreview({
   text,
   running,
@@ -13601,14 +13621,7 @@ const StreamToolResultPreview = memo(function StreamToolResultPreview({
       aria-label={t("tools.resultPreviewAria")}
     >
       <div className="stream-tool-result-preview-head">
-        <span className="stream-tool-result-preview-badge">
-          <Eye size={12} aria-hidden="true" />
-          {t("tools.resultPreview")}
-          {running && <span className="stream-tool-result-preview-pulse" aria-hidden="true" />}
-        </span>
-        {running && (
-          <span className="stream-tool-result-preview-hint">{t("tools.resultPreviewLiveHint")}</span>
-        )}
+        {running && <span className="stream-tool-result-preview-pulse" aria-hidden="true" />}
         <button
           type="button"
           className={`stream-tool-result-preview-copy ${copyClass}`}
@@ -15290,6 +15303,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
+  // 归档视图：完成即视为已收纳，命令预览收缩为单行；运行中（经典模式）给 5 行。
+  const commandCap = running ? COMMAND_PREVIEW_MAX_LINES : 1;
+  const commandPreview = useMemo(
+    () => (code ? commandPreviewText(code, commandCap) : undefined),
+    [code, commandCap],
+  );
+  const multilineCommand = commandHasMoreLines(activity);
   const hasExpandableDetail = !!detail || !!code || !!activity.edits?.length;
   const editsAutoOpen = hasEdits && !manuallyToggled;
   const collapseCommand = () => {
@@ -15321,7 +15341,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
       {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
-          {invocationPreview}
+          {invocationPreview}{multilineCommand ? " …" : ""}
         </code>
       )}
       {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
@@ -15430,9 +15450,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
                 {t("tools.collapseCommand")}
               </button>
             )}
-            <MarkdownContent
-              text={fencedCode(activity.code_language ?? "text", code)}
-            />
+            <pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>
           </div>
         )}
         {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
@@ -15453,9 +15471,9 @@ function ToolActivity({ activity }: { activity: Activity }) {
             event.stopPropagation();
             setPreviewReopened(true);
           }}
+          aria-label={t("tools.resultPreview")}
         >
           <Eye size={12} aria-hidden="true" />
-          {t("tools.resultPreview")}
         </button>
       )}
     </>
@@ -15512,6 +15530,24 @@ function toolInvocationPreview(activity: Activity) {
   const code = activity.code?.split("\n", 1)[0]?.trim();
   if (code) return code;
   return activity.detail?.split("\n", 1)[0]?.trim();
+}
+// 用户需求：命令多行预览一次性不可恢复。未被折叠收纳（运行中/新近完成）最多
+// COMMAND_PREVIEW_MAX_LINES 行（结尾省略行+底部渐隐）；一经折叠收纳（handoff/
+// superseded）或进入归档视图，永久收缩为单行，不再恢复完整多行展示。
+const COMMAND_PREVIEW_MAX_LINES = 5;
+function commandPreviewText(code: string, maxLines: number): { text: string; clipped: boolean } {
+  const lines = code.replace(/\r\n?/g, "\n").split("\n");
+  while (lines.length > 1 && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length <= maxLines) return { text: lines.join("\n"), clipped: false };
+  return { text: [...lines.slice(0, maxLines), "…"].join("\n"), clipped: true };
+}
+// 与 toolInvocationPreview 同源：优先命令首行，回退详情首行；判断源文本是否还有后续行。
+function commandHasMoreLines(activity: Activity): boolean {
+  const source = activity.code?.split("\n", 1)[0]?.trim() ? activity.code : activity.detail;
+  if (!source) return false;
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  while (lines.length > 1 && !lines[lines.length - 1].trim()) lines.pop();
+  return lines.length > 1;
 }
 
 function activitiesFromTurnEvent(

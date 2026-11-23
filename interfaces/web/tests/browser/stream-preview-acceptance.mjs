@@ -652,13 +652,20 @@ async function main() {
     }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
+      // 悬浮徽章契约（用户指定设计）：折叠组零占位、徽章右缘贴组右、完全位于
+      // 运行行上方且处于文本列右侧；胶囊行盒与上一段文本末行等高，底缘落在
+      // 文本块底缘（即末行行盒底缘）——只上移自身高度会压到下一行去。
       const alignment = await browser.evaluate(`(() => {
-        const summary = document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign');
-        const live = document.querySelector('.stream-tool-row.running .stream-tool-status-slot');
-        const a=summary?.getBoundingClientRect(),b=live?.getBoundingClientRect();
-        return {ok:!!a&&!!b&&Math.abs(a.left-b.left)<1,summary:a&&{left:a.left,width:a.width},live:b&&{left:b.left,width:b.width}};
+        const run = document.querySelector('.stream-tool-run.merged');
+        const badge = document.querySelector('.stream-tool-run-toggle');
+        const live = document.querySelector('.stream-tool-row.running');
+        const prev = run?.previousElementSibling;
+        const g=badge?.getBoundingClientRect(),b=live?.getBoundingClientRect(),r=run?.getBoundingClientRect(),p=prev?.getBoundingClientRect();
+        const lineHeight = prev ? parseFloat(getComputedStyle(prev).lineHeight) : 0;
+        return {ok:!!g&&!!b&&!!r&&!!p&&r.height<2&&Math.abs(g.right-r.right)<2&&Math.abs(g.bottom-p.bottom)<1.5&&Math.abs(g.height-lineHeight)<1&&g.bottom<b.top&&g.left>b.left+4,
+          badge:g&&{left:g.left,right:g.right,bottom:g.bottom,h:g.height},lineHeight,live:b&&{left:b.left,top:b.top},run:r&&{height:r.height,right:r.right},prev:p&&{bottom:p.bottom}};
       })()`);
-      assert(alignment.ok, `collapsed summary and live tool must be peers at ${width}px: ${JSON.stringify(alignment)}`);
+      assert(alignment.ok, `floating collapsed badge must be right-flush and line-aligned above the group anchor without layout height at ${width}px: ${JSON.stringify(alignment)}`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
 
@@ -768,20 +775,23 @@ async function main() {
       await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.settings-center-header .icon-button'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
       await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings center closes");
     };
+    // 9b38b593 设置重组后：显示思维链开关位于「聊天界面」面板；上下文面板还有
+    // 同名 system-thinking-chain 块（思维链加入上下文），必须按可见性定位。
+    const visibleThinkingSection = `[...document.querySelectorAll('.system-thinking-chain')].find(el => el.offsetParent !== null)`;
     const openSystemPane = async () => {
-      const nav = await browser.evaluate(`(() => { const b = [...document.querySelectorAll('.settings-center-nav button')].find(n => n.textContent.includes('系统') || n.textContent.includes('System')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
-      assert(nav, "system settings nav found");
+      const nav = await browser.evaluate(`(() => { const b = [...document.querySelectorAll('.settings-center-nav button')].find(n => n.textContent.includes('聊天界面') || n.textContent.includes('Chat Interface')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      assert(nav, "chat interface settings nav found");
       await click(browser, nav);
-      await waitFor(() => browser.evaluate(`!!document.querySelector('.system-thinking-chain .resource-cap-switch')`), "thinking chain toggle renders");
+      await waitFor(() => browser.evaluate(`!!(${visibleThinkingSection} && ${visibleThinkingSection}.querySelector('.resource-cap-switch'))`), "thinking chain toggle renders");
     };
     const toggleThinkingChain = async () => {
-      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.system-thinking-chain .resource-cap-switch'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+      await click(browser, await browser.evaluate(`(() => { const b = ${visibleThinkingSection}.querySelector('.resource-cap-switch'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
     };
     await openSettings();
     await openSystemPane();
-    assert(await browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle defaults on");
+    assert(await browser.evaluate(`${visibleThinkingSection}.querySelector('input[type="checkbox"]').checked`), "thinking chain toggle defaults on");
     await toggleThinkingChain();
-    await waitFor(() => browser.evaluate(`!document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches off");
+    await waitFor(() => browser.evaluate(`!${visibleThinkingSection}.querySelector('input[type="checkbox"]').checked`), "thinking chain toggle switches off");
     await closeSettings();
     publishThinking(36, thinkingTail);
     await sleep(160);
@@ -790,7 +800,7 @@ async function main() {
     await openSettings();
     await openSystemPane();
     await toggleThinkingChain();
-    await waitFor(() => browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches back on");
+    await waitFor(() => browser.evaluate(`${visibleThinkingSection}.querySelector('input[type="checkbox"]').checked`), "thinking chain toggle switches back on");
     await closeSettings();
     publishThinking(37, thinkingTail);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "re-enabled thinking chain shows the window again");
@@ -1370,7 +1380,7 @@ async function main() {
       // Settings: sub-switch nests under the enabled parent and defaults off.
       await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
       await waitFor(() => browser.evaluate(`!!document.querySelector('.settings-center')`), "settings center missing");
-      await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('系统')).click()`);
+      await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('聊天界面') || b.textContent.includes('Chat Interface')).click()`);
       await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-archive-subsetting')`), "archive sub-setting not rendered under enabled parent");
       const subSwitch = `document.querySelector('.stream-archive-subsetting button[role="switch"]')`;
       assert(await browser.evaluate(`${subSwitch}.getAttribute('aria-checked') === 'false'`), "archive sub-setting default is not off");
@@ -1378,9 +1388,10 @@ async function main() {
       await browser.evaluate(`${subSwitch}.click()`);
       await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.turn-assistant-frame.collapsed-work')`), "live archive-on did not collapse the completed turn");
       // Parent off hides the sub-setting; re-enabling keeps the explicit choice.
-      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      const streamCardSwitch = `(() => { const card = [...document.querySelectorAll('.settings-group.system-feature-card')].find(c => c.textContent.includes('即时显示回答') || c.textContent.includes('Show answers as they arrive')); return card ? card.querySelector(':scope > .settings-group-heading > button[role="switch"]') : null; })()`;
+      await browser.evaluate(`${streamCardSwitch}.click()`);
       await waitFor(() => browser.evaluate(`!document.querySelector('.stream-archive-subsetting')`), "sub-setting still visible with parent off");
-      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      await browser.evaluate(`${streamCardSwitch}.click()`);
       await waitFor(() => browser.evaluate(`document.querySelector('.stream-archive-subsetting button[role="switch"]')?.getAttribute('aria-checked') === 'true'`), "sub-setting choice did not persist");
       await browser.evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
       // Restore the archive-on default for any later assertions and clean the round.

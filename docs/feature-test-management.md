@@ -1132,3 +1132,14 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 悬浮工具计数徽章：流式视图折叠态的 `+ tools xN` 徽章不再占独立行——悬浮于最近文本行尾（右缘、上移一个自身高度），按钮保持可点击；展开态恢复常规行布局。
 - stop-ui 验收钉住 classic 模式：`stop-ui-acceptance.mjs` 在流式默认开启后固定 `timem-web-stream-ui-mode-v1=false` 并 reload，恢复正式工作框断言的前置条件。
 - 测试看护：Rust `capability_tool_run_bash_tests.rs` 新增 9 例（tail 预算/省略标记、stdout+stderr/content 回退/空、bridge 节流与事件形状/硬上限 240/窗口抑制、快速命令无运行中预览、长前台命令有界流式、30 行输出 finish tail=省略+16 行、仅 stderr、快速轮询静默+长轮询暖机后流式）；web 新增 `tests/result_preview.test.ts` 11 例（tail 切片/CRLF、output 事件并入运行行不新增行/start 缺失丢弃/并行流隔离、finish 映射 `result_preview`、双行挂载与瞬时收起契约、明暗虚线样式、i18n 同步、端到端上限守卫含 shell 忽略与历史跳过）；`file_edits.test.ts` 新增面板合计头/单框契约 2 例；`tool_activity_layout.test.ts` 新增悬浮徽章契约。pnpm 1025 过、tsc 过、agent_core/timem/timem_shell lib 过、clippy/fmt 过，dist 已重建提交。
+
+## 2026-11-23 工具命令一次性收缩、diff 序号与同宽、结果预览自动展开
+
+- 命令多行预览一次性不可恢复（用户反馈）：工具命令体在未收纳阶段（运行中或新近完成）最多 5 行，超出以 `…` 行结尾并在底部渐隐（明暗主题适配）；行被折叠收纳（handoff/superseded）后永久收缩为单行，归档视图（ToolActivity）完成态同样单行，不再提供完整多行回顾。单行 head 预览追加专用 `…` 提示——多行命令首行较短时也能看出还有后续内容（`commandPreviewText`/`commandHasMoreLines`，与 `toolInvocationPreview` 同源判定）。
+- diff 卡片序号：面板内每个文件段头部按 1-based 顺序标注 `1.` `2.`（等宽数字、弱化色，排在 op 徽章前）。
+- diff 框与文本同宽（用户反馈）：内层 diff 独立框（border+圆角+底色）取消，diff 行直接铺满外层卡片；卡片本身与文本列同宽，turn 总结框内不再双重描边。滚动（横向滚动、max-height 420px）行为保留在 `.file-edit-diff` 容器。
+- 结果预览修订（用户反馈）：预览不再以小按钮呈现——运行中与未收纳行自动展开常驻，随流式快照持续刷新 tail（aria-live + 呼吸点）；移除「结果预览」标题标签，内容优先（仅保留呼吸点与复制/收起）；被收纳或手动收起后，重开徽章不再单独占行，内联在工具行头部行尾（图标按钮，aria-label 保留）；外框由虚线框改为无框色块；文案「结果预览」统一改为「结果」（zh/en 同步）。
+- 修复 9b38b593 设置重组回归：思维链显示偏好默认值被改为关（`=== "1"`），违反先前交付的「显示思维链默认开」与验收契约——恢复 `!== "0"`（显式 "0" 才关闭）。验收脚本同步适配新设置分组：显示思维链开关与「即时显示回答」（归档子设置）位于「聊天界面」面板、系统资源管控位于「管控」面板；同名 `system-thinking-chain` / `system-feature-card` 多实例按可见性与文案锚定，不再用首个匹配。
+- 验收稳定性加固：stop-ui 在首个 evaluate 前等待应用外壳与初始 WS 连接（about:blank 无 localStorage 会抛 SecurityError）；classic 模式 pin 的 reload 使连接基线确定为 2，后续断线守护断言以该基线比较；Page.reload 后等待 composer 再输入。resource-caps 导航改为「管控 / Governance」。
+- 悬浮徽章验收改为真实几何契约：量按钮整体（非内部 + 号芯片），断言按钮右缘贴组右、视觉底缘=锚线上移一个自身高度（translateY(-100%)）、折叠组零占位、完全位于运行行上方。旧「与运行行同行左对齐」断言对应已废弃的行内布局。
+- 测试看护：web 单测 1029 过（新增/更新：命令 5 行截断与收纳单行契约、head `…` hint、diff 序号标注与样式、diff 无框无虚线契约、预览自动展开 `previewVisible`/无标签/行内图标徽章、i18n「结果」同步）；真 Chrome `test:browser` 11 个脚本全绿（acceptance 跑两次：默认与 CPU bench/perf guard）；tsc 过；dist 已重建提交。

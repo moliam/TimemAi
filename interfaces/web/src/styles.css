@@ -5526,6 +5526,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-sep,
 .tool-activity-sep { flex: none; color: inherit; opacity: .45; }
 .stream-tool-command {
+  position: relative;
   margin: 8px 0 0;
   padding: 8px 10px;
   border: none;
@@ -5576,6 +5577,19 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-bytes { color: #6a7d88; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
+/* 多行命令预览：上限截断后结尾省略行底部渐隐（单行收纳态不裁剪、无渐变）。 */
+.stream-tool-command-clipped::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 14px;
+  border-radius: 0 0 5px 5px;
+  background: linear-gradient(180deg, transparent, #262626);
+  pointer-events: none;
+}
+:root[data-theme="light"] .stream-tool-command-clipped::after { background: linear-gradient(180deg, transparent, #eef2f1); }
 :root[data-theme="light"] .stream-tool-code-collapse,
 :root[data-theme="light"] .tool-activity-code-collapse { border-color: #b9c8ce; background: #eef2f1e6; color: #52646f; }
 :root[data-theme="light"] .stream-tool-code-collapse:hover,
@@ -5788,7 +5802,28 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
-.stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 2px 4px 2px 0; cursor: pointer; font-size: 12px; font-weight: 400; }
+/* 用户反馈：徽章需要底色色块——不再以纯悬浮字形压在正文上，改成一枚贴内容的
+   胶囊（描边 + 浅底 + 圆角），展开/收起两种形态共用同一块底。 */
+.stream-tool-run-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  padding: 2px 9px 2px 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+  transition: background .15s ease, border-color .15s ease;
+}
+.stream-tool-run-toggle:hover,
+.stream-tool-run-toggle:focus-visible { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.18); }
+:root[data-theme="light"] .stream-tool-run-toggle { background: rgba(20, 40, 50, 0.05); border-color: rgba(20, 40, 50, 0.12); }
+:root[data-theme="light"] .stream-tool-run-toggle:hover,
+:root[data-theme="light"] .stream-tool-run-toggle:focus-visible { background: rgba(20, 40, 50, 0.09); border-color: rgba(20, 40, 50, 0.2); }
 /* Compact glyph row: wrench stands for "tools", the sign chip flips between
    a fine-lined plus (merged) and minus (expanded) with a soft tinted pill. */
 .stream-tool-run-glyph { flex: none; opacity: .85; }
@@ -5797,15 +5832,28 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
-/* 用户反馈：折叠态的 +tools xN 计数徽章不占独立行——悬浮到最近文本行的行尾
-   （右缘、上移一个行高），保持按钮可点击；展开态恢复常规行布局。
-   容器在折叠态高度归零（折叠行本身 0fr 已无高度），按钮绝对定位上移覆盖。 */
-.stream-tool-run.merged { position: relative; height: 0; margin: 0; }
-.stream-tool-run.merged .stream-tool-run-toggle {
+/* 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行的行尾。
+   容器在折叠态高度归零（折叠行本身 0fr 已无高度），按钮绝对定位上移覆盖。
+   行盒对齐：按钮高度取正文行高（.stream-thought-text 的 1.68），底缘再上移
+   一个块间距，使胶囊正好覆盖文本末行的行盒、内容垂直居中——只按自身高度
+   上移会落到行盒下沿并压到下一行去，多上移一个间距则会跳到上一行。
+   悬浮只在组前紧邻正文段落时启用（main.tsx 的 floating 判定）；组前是文件
+   修改卡或没有前文时，徽章留在流内靠右，绝不压住别人的内容。
+   零高度组只允许出现在「每一行都已收起」的组里（见 main.tsx floating），
+   组里仍有可见行时容器保持正常流高度，徽章不再悬浮。 */
+.stream-tool-run.merged { position: relative; margin: 0; }
+.stream-tool-run.merged.floating { height: 0; }
+/* 不悬浮时（组前是实体块、或组前没有正文）徽章回到流内单行，靠右对齐。 */
+.stream-tool-run.merged .stream-tool-run-toggle { display: flex; width: fit-content; margin-left: auto; }
+.stream-tool-run.merged.floating .stream-tool-run-toggle {
   position: absolute;
   right: 0;
   bottom: 0;
-  transform: translateY(-100%);
+  height: calc(var(--content-size) * 1.68);
+  margin: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  transform: translateY(calc(var(--stream-content-gap) * -1));
   z-index: 1;
 }
 
@@ -7207,18 +7255,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   gap: 1px;
   min-width: 0;
 }
-.file-edits-panel-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding-bottom: 5px;
-  margin-bottom: 3px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  font-size: 11px;
-  color: #8fa3ad;
-  font-variant-numeric: tabular-nums;
-}
-.file-edits-panel-totals { display: inline-flex; gap: 8px; flex: none; }
 /* 文件名列表保持纯文本行：只有展开的 diff 正文渲染为内层框。 */
 .file-edit-section { min-width: 0; }
 .turn-edits-summary {
@@ -7265,6 +7301,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   min-width: 0;
 }
 .file-edit-toggle { cursor: pointer; }
+.file-edit-index { flex: none; min-width: 1.2em; text-align: right; font-size: 11px; color: #7f929e; font-variant-numeric: tabular-nums; }
 .file-edit-op {
   flex: none;
   padding: 0;
@@ -7312,11 +7349,10 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-copy.copy-success { color: #7fd6a4; border-color: rgba(64, 180, 120, 0.4); }
 .file-edit-copy.copy-failed { color: #e59a94; border-color: rgba(214, 92, 84, 0.4); }
 .file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
+/* 用户反馈：diff 框要与文本一样宽——内层独立框取消，diff 行直接铺满
+   外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。 */
 .file-edit-diff {
   margin: 2px 0 6px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.14);
   overflow: auto;
   max-height: 420px;
 }
@@ -7386,16 +7422,13 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   border-color: rgba(20, 40, 50, 0.1);
   background: rgba(20, 40, 50, 0.02);
 }
-:root[data-theme="light"] .file-edits-panel-head {
-  border-bottom-color: rgba(20, 40, 50, 0.08);
-  color: #5c6f7a;
-}
 :root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; }
 :root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; }
 :root[data-theme="light"] .file-edit-op-unchanged,
 :root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; }
 :root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
+:root[data-theme="light"] .file-edit-index { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-name { color: #24333a; }
 :root[data-theme="light"] .file-edit-additions { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-deletions { color: #b23a31; }
@@ -7404,7 +7437,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; border-color: #8fceae; }
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; border-color: #e0a39e; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
-:root[data-theme="light"] .file-edit-diff { border-color: rgba(0, 0, 0, 0.08); background: #f6f8fa; }
 :root[data-theme="light"] .file-edit-gutter { color: #9aa7b0; }
 :root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c7a4e; }
@@ -7420,11 +7452,12 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 /* 结果预览：仅观察的瞬时窗口。虚线边框 + 眼睛徽章与文件编辑卡（实线框）
    明确区分；运行中带呼吸点实时更新，结束自动收起，徽章按钮可再次展开。
    文本允许复制。 */
+/* 用户反馈：不要虚线框——无框色块呈现，圆角色块直接承载 tail。 */
 .stream-tool-result-preview {
   margin: 6px 0 0;
-  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border: none;
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.16);
+  background: rgba(255, 255, 255, 0.05);
   overflow: hidden;
   min-width: 0;
 }
@@ -7437,14 +7470,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   font-size: 11px;
   color: #7f929e;
 }
-.stream-tool-result-preview-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: #6fd3c0;
-  font-weight: 600;
-}
-.stream-tool-result-preview.running .stream-tool-result-preview-badge { color: #7fd6a4; }
+.stream-tool-result-preview-head > .stream-tool-result-preview-pulse { flex: none; color: #7fd6a4; }
 .stream-tool-result-preview-pulse {
   width: 6px;
   height: 6px;
@@ -7453,7 +7479,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   animation: stream-result-pulse 1.6s ease-in-out infinite;
 }
 @keyframes stream-result-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-.stream-tool-result-preview-hint { font-size: 10px; font-style: italic; color: #5c6f7c; }
 .stream-tool-result-preview-copy {
   margin-left: auto;
   flex: none;
@@ -7495,32 +7520,31 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .stream-tool-result-preview.running .stream-tool-result-preview-body {
   border-left-color: rgba(127, 214, 164, 0.6);
 }
+/* 用户反馈：Eye 徽章不单独占行——内联在工具行头部行尾（margin-left:auto 靠右）。 */
 .stream-tool-result-reopen {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin: 4px 0 0;
-  padding: 1px 8px;
-  border: 1px dashed rgba(255, 255, 255, 0.18);
-  border-radius: 7px;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
   background: transparent;
   color: #8fa3ad;
-  font-size: 10px;
-  line-height: 16px;
   cursor: pointer;
 }
-.stream-tool-result-reopen:hover { color: #c9d6de; border-color: rgba(255, 255, 255, 0.3); }
+.stream-tool-result-reopen:hover { color: #c9d6de; }
 :root[data-theme="light"] .stream-tool-result-preview {
-  border-color: rgba(20, 40, 50, 0.22);
-  background: rgba(20, 40, 50, 0.03);
+  background: rgba(20, 40, 50, 0.05);
 }
 :root[data-theme="light"] .stream-tool-result-preview-head {
   border-bottom-color: rgba(20, 40, 50, 0.12);
   color: #5c6f7a;
 }
-:root[data-theme="light"] .stream-tool-result-preview-badge { color: #1c7a4e; }
-:root[data-theme="light"] .stream-tool-result-preview.running .stream-tool-result-preview-badge { color: #1c7a4e; }
-:root[data-theme="light"] .stream-tool-result-preview-hint { color: #7a8a94; }
+:root[data-theme="light"] .stream-tool-result-preview-head > .stream-tool-result-preview-pulse { color: #1c7a4e; }
 :root[data-theme="light"] .stream-tool-result-preview-copy,
 :root[data-theme="light"] .stream-tool-result-preview-collapse { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-result-preview-copy:hover,
@@ -7532,12 +7556,10 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   color: #43545e;
 }
 :root[data-theme="light"] .stream-tool-result-reopen {
-  border-color: rgba(20, 40, 50, 0.22);
   color: #5c6f7a;
 }
 :root[data-theme="light"] .stream-tool-result-reopen:hover {
   color: #24333a;
-  border-color: rgba(20, 40, 50, 0.36);
 }
 @media (prefers-reduced-motion: reduce) {
   .stream-tool-result-preview-pulse { animation: none; }
