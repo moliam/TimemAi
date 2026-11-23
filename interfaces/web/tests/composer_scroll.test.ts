@@ -53,7 +53,7 @@ describe("fixed composer scroll ownership", () => {
     expect(styles).toMatch(/\.composer-wrap \{[^}]*max\(26px, calc\(\(100% - 980px\)\/2 - 22px\)\)/);
     expect(styles).toMatch(/\.message \{[^}]*max-width: 900px;/);
     expect(styles).toMatch(/\.working-indicator \{[^}]*max-width: 900px;/);
-    expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: 940px;/);
+    expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: 900px;/);
     expect(styles).toMatch(/\.composer-cwd \{[^}]*max-width: 876px;/);
   });
 

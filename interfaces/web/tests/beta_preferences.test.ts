@@ -15,14 +15,20 @@ async function setup(values: Record<string, string> = {}, blocked = false) {
   return { ...(await import("../src/beta_preferences")), data, storage: (key: string | null) => storage({ key }) };
 }
 describe("Beta browser preferences", () => {
-  it("defaults both off normally and on for debug without persisting defaults", async () => {
+  it("keeps every display switch at its fixed default in every mode", async () => {
     const p = await setup();
-    for (const name of ["stream", "toolResults"] as const) expect(p.getBetaPreference(name)).toBe(false);
+    for (const name of ["stream", "toolResults", "autoCollapse", "fileEditsWrap"] as const)
+      expect(p.getBetaPreference(name)).toBe(true);
+    expect(p.getBetaPreference("streamArchive")).toBe(false);
     p.applyBetaDebugDefault(true);
-    for (const name of ["stream", "toolResults"] as const) expect(p.getBetaPreference(name)).toBe(true);
+    for (const name of ["stream", "toolResults", "autoCollapse", "fileEditsWrap"] as const)
+      expect(p.getBetaPreference(name)).toBe(true);
+    expect(p.getBetaPreference("streamArchive")).toBe(false);
     expect(p.data.size).toBe(0);
     p.applyBetaDebugDefault(false);
-    expect(p.getBetaPreference("stream")).toBe(false);
+    expect(p.getBetaPreference("stream")).toBe(true);
+    expect(p.getBetaPreference("autoCollapse")).toBe(true);
+    expect(p.getBetaPreference("fileEditsWrap")).toBe(true);
   });
   it("keeps the archive sub-setting default-off even in debug mode", async () => {
     let p = await setup();

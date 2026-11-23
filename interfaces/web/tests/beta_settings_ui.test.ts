@@ -19,18 +19,27 @@ const stylesSource = readFileSync(
 
 describe("System settings UI contract", () => {
   it("uses System as the first-level category and keeps Beta features below it", () => {
-    expect(mainSource).toContain(
-      'type SettingsSection = "appearance" | "endpoints" | "memory" | "system"',
-    );
-    expect(mainSource).toContain('onClick={() => selectSettingsSection("system")}');
-    expect(mainSource).toContain('<strong>{t("settings.system")}</strong>');
+    expect(mainSource).toMatch(/type SettingsSection =\s*\n\s*\| "appearance"\s*\| "endpoints"\s*\| "memory"\s*\| "context"\s*\| "chat"\s*\| "governance"\s*\| "about";/);
+    const navSections: Array<[string, string]> = [
+      ["context", "settings.context"],
+      ["chat", "settings.chatUi"],
+      ["governance", "settings.governance"],
+      ["about", "settings.about"],
+    ];
+    for (const [section, label] of navSections) {
+      expect(mainSource).toContain(`onClick={() => selectSettingsSection("${section}")}`);
+      expect(mainSource).toContain(`<strong>{t("${label}")}</strong>`);
+    }
+    expect(mainSource).not.toContain('selectSettingsSection("system")');
     expect(mainSource).toContain('t("system.betaFeaturesTitle")');
     expect(mainSource).toContain('<strong>{t("beta.enableToolGen")}</strong>');
     expect(mainSource).toContain('<strong>{t("beta.toolDiscovery")}</strong>');
-    expect(zh.settings.system).toBe("系统");
-    expect(zh.system.title).toBe("系统");
+    expect(zh.settings.context).toBe("上下文");
+    expect(zh.settings.chatUi).toBe("聊天界面");
+    expect(zh.settings.governance).toBe("管控");
+    expect(zh.settings.about).toBe("关于");
     expect(zh.system.betaFeaturesTitle).toBe("Beta 功能");
-    expect(en.settings.system).toBe("System");
+    expect(en.settings.about).toBe("About");
   });
 
   it("offers the exact 30K, 20K, 16K, 10K and 8K Host-backed choices", () => {
@@ -107,7 +116,7 @@ describe("System settings UI contract", () => {
     expect(en.system.contextCompressThresholdDesc).toContain("next model request");
   });
 
-  it("places answer streaming in formal System settings before the Beta subsection", () => {
+  it("places answer streaming in the chat interface pane before the governance Beta subsection", () => {
     expect(zh.system.streamUiTitle).toBe("即时显示回答");
     expect(zh.system.streamUiDesc).toBe("回答生成过程中即可查看内容。");
     expect(en.system.streamUiTitle).toBe("Show answers as they arrive");
@@ -121,8 +130,8 @@ describe("System settings UI contract", () => {
     const betaHeadingPosition = mainSource.indexOf('t("system.betaFeaturesTitle")');
     const betaSwitchPosition = mainSource.indexOf("<ToolResultStatusSetting />");
     expect(streamPosition).toBeGreaterThan(-1);
-    expect(streamPosition).toBeLessThan(betaHeadingPosition);
-    expect(betaHeadingPosition).toBeLessThan(betaSwitchPosition);
+    expect(streamPosition).toBeLessThan(betaSwitchPosition);
+    expect(betaSwitchPosition).toBeLessThan(betaHeadingPosition);
   });
 
   it("nests the archive sub-setting under answer streaming, default off", () => {

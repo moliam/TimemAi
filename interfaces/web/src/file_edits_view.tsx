@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, PenLine } from "lucide-react";
 import { useTimedClipboardCopy } from "./clipboard_copy";
+import { useBetaPreference } from "./beta_preferences";
 import { t } from "./i18n";
 import type { StringKey } from "./i18n";
 import { parseDiffRows } from "./tool_presentation";
@@ -40,8 +41,9 @@ export function FileEditsChip({ edits }: { edits: FileEditsPresentation }) {
 
 // Per-file collapsible diff sections, rendered inside the expanded tool card.
 export function FileEditsPanel({ edits }: { edits: ReadonlyArray<TurnEditEntry> }) {
+  const wrap = useBetaPreference("fileEditsWrap");
   return (
-    <div className="file-edits-panel" aria-label={t("tools.fileEditsAria")}>
+    <div className={`file-edits-panel${wrap ? " edits-wrap" : ""}`} aria-label={t("tools.fileEditsAria")}>
       {edits.map((edit, index) => (
         <FileEditSection key={`${edit.path}:${index}`} edit={edit} />
       ))}
@@ -170,9 +172,12 @@ function splitEditPath(path: string): { directory: string; name: string } {
 }
 
 function FileEditSection({ edit }: { edit: TurnEditEntry }) {
-  // User feedback: sections carrying a diff stay expanded by default;
-  // sections without a diff (skipped/unchanged) remain header-only.
-  const [expanded, setExpanded] = useState(() => !!edit.diff);
+  // With turn auto-collapse on (the default), sections stay folded so the
+  // reader expands only the files they care about; when auto-collapse is
+  // off, sections carrying a diff stay expanded and notice-only sections
+  // (skipped/unchanged) remain header-only.
+  const autoCollapse = useBetaPreference("autoCollapse");
+  const [expanded, setExpanded] = useState(() => !!edit.diff && !autoCollapse);
   const sectionRef = useRef<HTMLDivElement | null>(null);
   const { copy, copyLabel, copyClass } = useTimedClipboardCopy(edit.diff ?? "", {
     idle: t("tools.copyDiff"),

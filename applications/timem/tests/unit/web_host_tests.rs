@@ -6792,11 +6792,11 @@ fn context_compress_threshold_is_authoritative_mem_persistent_and_validated() {
 }
 
 #[test]
-fn restore_prompt_context_on_startup_defaults_off_and_persists_via_command() {
+fn restore_prompt_context_on_startup_defaults_on_and_persists_via_command() {
     let state = routing_test_state();
-    // The default must be opt-in: legacy behavior restores nothing.
+    // The default keeps continuity: restarts restore the kept snapshot.
     assert!(
-        !state
+        state
             .mem
             .lock()
             .unwrap()
@@ -6804,7 +6804,7 @@ fn restore_prompt_context_on_startup_defaults_off_and_persists_via_command() {
             .restore_prompt_context_on_startup
     );
     assert!(
-        !snapshot_for(&state, TEST_PORT)
+        snapshot_for(&state, TEST_PORT)
             .server
             .mem
             .restore_prompt_context_on_startup
@@ -6868,6 +6868,13 @@ fn restore_prompt_context_on_startup_defaults_off_and_persists_via_command() {
 #[test]
 fn restore_prompt_context_on_startup_off_keeps_snapshot_without_importing() {
     let state = routing_test_state();
+    // The default is on now; opt out explicitly to cover the off path.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = false;
     let id = register_real_worker(&state, "handoff-gate-off");
     write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_gate_off")).unwrap();
     let path = current_session_store(&state)
@@ -6907,6 +6914,13 @@ fn restore_prompt_context_on_startup_off_keeps_snapshot_without_importing() {
 #[test]
 fn restore_prompt_context_on_startup_covers_off_on_off_toggle_cycle() {
     let state = routing_test_state();
+    // Phase 0: opt out explicitly; the cycle below starts from off.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = false;
     let id = register_real_worker(&state, "handoff-toggle");
     let handle = session_worker_handle(&state, &id, None).unwrap();
     let path = current_session_store(&state)

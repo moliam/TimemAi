@@ -64,7 +64,7 @@ describe("stream reveal integration", () => {
 
   it("collapses completed and interrupted work independently of stream mode", () => {
     expect(mainSource).toContain(
-      'if (finalArrived || (wasWorking && turn.state !== "working"))\n      setShowWorkStream(false);',
+      'if (autoCollapseTurns && (finalArrived || (wasWorking && turn.state !== "working")))\n      setShowWorkStream(false);',
     );
     expect(mainSource).not.toContain("hasVisibleProcess && !onlyFreeTalk");
   });

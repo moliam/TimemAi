@@ -196,7 +196,7 @@ fn validate_system_resource_cap_percent(percent: f64, field: &str) -> Result<(),
 }
 
 pub(super) const fn default_restore_prompt_context_on_startup() -> bool {
-    false
+    true
 }
 
 pub(super) const fn default_include_reasoning_in_context() -> bool {

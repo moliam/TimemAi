@@ -5,6 +5,8 @@ const keys = {
   stream: "timem-web-stream-ui-mode-v1",
   streamArchive: "timem-web-stream-archive-v1",
   toolResults: "timem-web-tool-result-status-v1",
+  autoCollapse: "timem-web-turn-auto-collapse-v1",
+  fileEditsWrap: "timem-web-file-edits-wrap-v1",
 } as const;
 type Preference = keyof typeof keys;
 const listeners = new Set<() => void>();
@@ -17,17 +19,31 @@ function read(name: Preference): boolean | undefined {
 }
 const choices: Record<Preference, boolean | undefined> = {
   stream: read("stream"), streamArchive: read("streamArchive"), toolResults: read("toolResults"),
+  autoCollapse: read("autoCollapse"), fileEditsWrap: read("fileEditsWrap"),
+};
+// Per-preference defaults. Every current switch is user-facing, so each
+// keeps its fixed default in every mode: streaming display, tool status,
+// turn auto-collapse and diff wrapping default on; the stream archive
+// sub-setting stays off.
+const defaults: Record<Preference, boolean> = {
+  stream: true, streamArchive: false, toolResults: true,
+  autoCollapse: true, fileEditsWrap: true,
 };
 function notify() { listeners.forEach(listener => listener()); }
-// The archive sub-setting must default off even in Host debug mode: its
-// user-facing contract is "keep the interim conversation expanded" by default.
-const debugExempt: ReadonlySet<Preference> = new Set(["streamArchive"]);
+// Debug-exempt switches ignore the Host debug default entirely: their
+// user-facing contract is fixed (archive and diff wrap default off, turn
+// auto-collapse defaults on) in every mode.
+const debugExempt: ReadonlySet<Preference> = new Set([
+  "stream", "streamArchive", "toolResults", "autoCollapse", "fileEditsWrap",
+]);
 export function applyBetaDebugDefault(debug: boolean) {
   if (debugDefault === debug) return;
   debugDefault = debug;
   notify();
 }
-export function getBetaPreference(name: Preference) { return choices[name] ?? (debugExempt.has(name) ? false : debugDefault); }
+export function getBetaPreference(name: Preference) {
+  return choices[name] ?? (debugExempt.has(name) ? defaults[name] : debugDefault || defaults[name]);
+}
 export function setBetaPreference(name: Preference, value: boolean) {
   choices[name] = value;
   try { window.localStorage.setItem(keys[name], JSON.stringify(value)); }

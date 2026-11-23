@@ -7,7 +7,7 @@ import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRe
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
-import { applyBetaDebugDefault } from "./beta_preferences";
+import { applyBetaDebugDefault, setBetaPreference, useBetaPreference } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
@@ -75,7 +75,9 @@ import {
   Gauge,
   Infinity as InfinityIcon,
   GripVertical,
+  Info,
   KeyRound,
+  Layers,
   LoaderCircle,
   Maximize2,
   Menu,
@@ -95,6 +97,7 @@ import {
   Send,
   Share2,
   Settings,
+  Shield,
   Sparkles,
   Star,
   Terminal,
@@ -526,10 +529,12 @@ const THINKING_CHAIN_CHANGE_EVENT = "timem:thinking-chain-change";
 // rendered while a model round streams. Pure UI preference persisted in the
 // browser like the sidebar layout; every session in this web UI follows it.
 function thinkingChainVisible(): boolean {
+  // Instance-wide display preference; default off so the thinking window
+  // only appears after an explicit opt-in.
   try {
-    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) !== "0";
+    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) === "1";
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -1381,7 +1386,7 @@ function TimemApp() {
   ]);
   const openResourceCapsSettings = useCallback(() => {
     setChatLibraryMode(null);
-    setSettingsSection("system");
+    setSettingsSection("governance");
     setShowAppearance(true);
     setResourceCapsPulse((current) => current + 1);
   }, []);
@@ -5648,7 +5653,7 @@ function TimemApp() {
               onResourceCapsChange={saveResourceCaps}
               onResourceCapsEscalate={escalateResourceCaps}
               restorePromptContextOnStartup={
-                server?.mem?.restore_prompt_context_on_startup ?? false
+                server?.mem?.restore_prompt_context_on_startup ?? true
               }
               restorePromptContextPending={pendingRestorePromptContext}
               onRestorePromptContextChange={saveRestorePromptContextOnStartup}
@@ -12610,6 +12615,7 @@ const TurnInteraction = memo(function TurnInteraction({
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const interrupted = cancelled || turn.state === "interrupted";
   const [showWorkStream, setShowWorkStream] = useState(() => !streamUiMode && isWorking);
+  const autoCollapseTurns = useBetaPreference("autoCollapse");
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
     turn.user_entries.some((entry) => entry.kind === "toolgen_instruction") ||
@@ -12631,9 +12637,9 @@ const TurnInteraction = memo(function TurnInteraction({
     previousTurnState.current = isWorking ? "working" : turn.state;
     previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && isWorking) setShowWorkStream(!streamUiMode);
-    if (finalArrived || (wasWorking && turn.state !== "working"))
+    if (autoCollapseTurns && (finalArrived || (wasWorking && turn.state !== "working")))
       setShowWorkStream(false);
-  }, [isWorking, turn.final_answer, turn.state, streamUiMode]);
+  }, [isWorking, turn.final_answer, turn.state, streamUiMode, autoCollapseTurns]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -16382,7 +16388,14 @@ function McpEditor({
   );
 }
 
-type SettingsSection = "appearance" | "endpoints" | "memory" | "system";
+type SettingsSection =
+  | "appearance"
+  | "endpoints"
+  | "memory"
+  | "context"
+  | "chat"
+  | "governance"
+  | "about";
 
 type SettingsCenterProps = {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -16484,6 +16497,8 @@ const SettingsCenter = memo(function SettingsCenter(
 ) {
   useT();
   const showThinkingChain = useShowThinkingChain();
+  const autoCollapsePref = useBetaPreference("autoCollapse");
+  const fileEditsWrapPref = useBetaPreference("fileEditsWrap");
   const {
     panelRef,
     section,
@@ -16776,7 +16791,7 @@ const SettingsCenter = memo(function SettingsCenter(
     setMemoryPage("overview");
   }, [memPath]);
   useEffect(() => {
-    if (section !== "system" || resourceCapsPulse === 0) return;
+    if (section !== "governance" || resourceCapsPulse === 0) return;
     const frame = requestAnimationFrame(() => {
       panelRef.current
         ?.querySelector(".system-resource-caps")
@@ -16902,14 +16917,50 @@ const SettingsCenter = memo(function SettingsCenter(
             </button>
             <button
               type="button"
-              className={section === "system" ? "active" : ""}
-              aria-current={section === "system" ? "page" : undefined}
+              className={section === "context" ? "active" : ""}
+              aria-current={section === "context" ? "page" : undefined}
               disabled={switchPending}
-              onClick={() => selectSettingsSection("system")}
+              onClick={() => selectSettingsSection("context")}
             >
-              <Settings size={16} />
+              <Layers size={16} />
               <span>
-                <strong>{t("settings.system")}</strong>
+                <strong>{t("settings.context")}</strong>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={section === "chat" ? "active" : ""}
+              aria-current={section === "chat" ? "page" : undefined}
+              disabled={switchPending}
+              onClick={() => selectSettingsSection("chat")}
+            >
+              <MessagesSquare size={16} />
+              <span>
+                <strong>{t("settings.chatUi")}</strong>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={section === "governance" ? "active" : ""}
+              aria-current={section === "governance" ? "page" : undefined}
+              disabled={switchPending}
+              onClick={() => selectSettingsSection("governance")}
+            >
+              <Shield size={16} />
+              <span>
+                <strong>{t("settings.governance")}</strong>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={section === "about" ? "active" : ""}
+              aria-current={section === "about" ? "page" : undefined}
+              disabled={switchPending}
+              onClick={() => selectSettingsSection("about")}
+            >
+              <Info size={16} />
+              <span>
+                <strong>{t("settings.about")}</strong>
               </span>
             </button>
           </nav>
@@ -17117,16 +17168,16 @@ const SettingsCenter = memo(function SettingsCenter(
                 onSave={onSaveEndpoint}
               />
             )}
-            {section === "system" && (
+            {section === "context" && (
               <section
                 className="settings-pane toolgen-settings-pane"
-                aria-labelledby="system-settings-title"
+                aria-labelledby="context-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="system-settings-title">{t("system.title")}</h3>
-                  <Settings size={19} aria-hidden="true" />
+                  <h3 id="context-settings-title">{t("settings.contextTitle")}</h3>
+                  <Layers size={19} aria-hidden="true" />
                 </div>
-                <section className="settings-group system-runtime-tuning">
+<section className="settings-group system-runtime-tuning">
                   <div className="system-select-grid">
                     <label className="system-select-field">
                       <span className="system-select-title">
@@ -17196,22 +17247,7 @@ const SettingsCenter = memo(function SettingsCenter(
                       <strong>{t("system.thinkingChainTitle")}</strong>
                     </div>
                   </div>
-                  <label className="resource-cap-switch thinking-chain-switch">
-                    <input
-                      type="checkbox"
-                      role="switch"
-                      checked={showThinkingChain}
-                      aria-label={t("system.thinkingChainAria")}
-                      onChange={(event) =>
-                        setThinkingChainVisible(event.target.checked)
-                      }
-                    />
-                    <span className="resource-cap-slider" aria-hidden="true" />
-                    <span className="resource-cap-name">
-                      {t("system.thinkingChainToggle")}
-                    </span>
-                  </label>
-                  <div className="thinking-chain-context-option">
+<div className="thinking-chain-context-option">
                     <label className="resource-cap-switch thinking-chain-switch">
                       <input
                         type="checkbox"
@@ -17238,7 +17274,120 @@ const SettingsCenter = memo(function SettingsCenter(
                     </p>
                   </div>
                 </section>
-                <section className="settings-group system-resource-caps">
+<section className="settings-group system-restore-prompt-context">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.restorePromptContextTitle")}</strong>
+                      <p>{t("system.restorePromptContextDesc")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-checked={restorePromptContextOnStartup}
+                      aria-label={t("system.restorePromptContextAria")}
+                      disabled={restorePromptContextPending || !connected}
+                      onClick={() =>
+                        onRestorePromptContextChange(!restorePromptContextOnStartup)
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                  {restorePromptContextPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
+              </section>
+            )}
+            {section === "chat" && (
+              <section
+                className="settings-pane toolgen-settings-pane"
+                aria-labelledby="chat-settings-title"
+              >
+                <div className="settings-pane-heading">
+                  <h3 id="chat-settings-title">{t("settings.chatUiTitle")}</h3>
+                  <MessagesSquare size={19} aria-hidden="true" />
+                </div>
+                <section className="settings-group system-feature-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("settings.autoCollapseTitle")}</strong>
+                      <p>{t("settings.autoCollapseDesc")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-label={t("settings.autoCollapseAria")}
+                      aria-checked={autoCollapsePref}
+                      onClick={() =>
+                        setBetaPreference("autoCollapse", !autoCollapsePref)
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                </section>
+                <section className="settings-group system-feature-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("settings.fileEditsWrapTitle")}</strong>
+                      <p>{t("settings.fileEditsWrapDesc")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-label={t("settings.fileEditsWrapAria")}
+                      aria-checked={fileEditsWrapPref}
+                      onClick={() =>
+                        setBetaPreference("fileEditsWrap", !fileEditsWrapPref)
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                </section>
+                <section className="settings-group system-thinking-chain">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("settings.thinkingDisplayTitle")}</strong>
+                      <p>{t("settings.thinkingDisplayDesc")}</p>
+                    </div>
+                  </div>
+                  <label className="resource-cap-switch thinking-chain-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showThinkingChain}
+                      aria-label={t("system.thinkingChainAria")}
+                      onChange={(event) =>
+                        setThinkingChainVisible(event.target.checked)
+                      }
+                    />
+                    <span className="resource-cap-slider" aria-hidden="true" />
+                    <span className="resource-cap-name">
+                      {t("system.thinkingChainToggle")}
+                    </span>
+                  </label>
+                </section>
+                <StreamUiModeSetting />
+                <ToolResultStatusSetting />
+              </section>
+            )}
+            {section === "governance" && (
+              <section
+                className="settings-pane toolgen-settings-pane"
+                aria-labelledby="governance-settings-title"
+              >
+                <div className="settings-pane-heading">
+                  <h3 id="governance-settings-title">{t("settings.governanceTitle")}</h3>
+                  <Shield size={19} aria-hidden="true" />
+                </div>
+<section className="settings-group system-resource-caps">
                   <div className="settings-group-heading">
                     <div>
                       <strong>{t("system.resourceCapsTitle")}</strong>
@@ -17429,40 +17578,11 @@ const SettingsCenter = memo(function SettingsCenter(
                     </div>
                   )}
                 </section>
-                <section className="settings-group system-restore-prompt-context">
-                  <div className="settings-group-heading">
-                    <div>
-                      <strong>{t("system.restorePromptContextTitle")}</strong>
-                      <p>{t("system.restorePromptContextDesc")}</p>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      className="settings-feature-switch"
-                      aria-checked={restorePromptContextOnStartup}
-                      aria-label={t("system.restorePromptContextAria")}
-                      disabled={restorePromptContextPending || !connected}
-                      onClick={() =>
-                        onRestorePromptContextChange(!restorePromptContextOnStartup)
-                      }
-                    >
-                      <span className="settings-feature-switch-thumb" />
-                    </button>
-                  </div>
-                  {restorePromptContextPending && (
-                    <small className="system-setting-status" role="status" aria-live="polite">
-                      {t("system.saving")}
-                    </small>
-                  )}
-                </section>
-                <SelfUpgradeSetting />
-                <StreamUiModeSetting />
-                <div className="system-subsection-heading">
+<div className="system-subsection-heading">
                   <strong>{t("system.betaFeaturesTitle")}</strong>
                   <p>{t("system.betaFeaturesDesc")}</p>
                 </div>
-                <ToolResultStatusSetting />
-                <section className="settings-group toolgen-beta-card">
+<section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
                       <strong>{t("beta.enableToolGen")}</strong>
@@ -17498,7 +17618,7 @@ const SettingsCenter = memo(function SettingsCenter(
                     </small>
                   </div>
                 </section>
-                <section className="settings-group toolgen-beta-card">
+<section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
                       <strong>{t("beta.toolDiscovery")}</strong>
@@ -17521,13 +17641,43 @@ const SettingsCenter = memo(function SettingsCenter(
                     </button>
                   </div>
                 </section>
-                <section className="toolgen-beta-note">
+<section className="toolgen-beta-note">
                   <TriangleAlert size={16} />
                   <div>
                     <strong>{t("beta.capabilityTitle")}</strong>
                     <p>{t("beta.capabilityDesc")}</p>
                   </div>
                 </section>
+              </section>
+            )}
+            {section === "about" && (
+              <section
+                className="settings-pane toolgen-settings-pane"
+                aria-labelledby="about-settings-title"
+              >
+                <div className="settings-pane-heading">
+                  <h3 id="about-settings-title">{t("settings.aboutTitle")}</h3>
+                  <Info size={19} aria-hidden="true" />
+                </div>
+                <section className="settings-group system-feature-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("settings.aboutIntroTitle")}</strong>
+                      <p>{t("settings.aboutDesc")}</p>
+                    </div>
+                  </div>
+                  <div className="about-project-row">
+                    <span>{t("settings.projectLabel")}</span>
+                    <a
+                      href={t("settings.projectUrl")}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t("settings.projectUrl")}
+                    </a>
+                  </div>
+                </section>
+                <SelfUpgradeSetting />
               </section>
             )}
             {section === "memory" && memoryPage === "overview" && (
