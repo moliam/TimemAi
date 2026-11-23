@@ -359,6 +359,11 @@ async function main() {
     `[...document.querySelectorAll(${JSON.stringify(selector)})].some((node) => node.textContent?.includes(${JSON.stringify(text)}) === true)`,
   );
   const sent = (type) => host.commands.filter((command) => command.type === type);
+  // Pin the classic (non-streaming) UI mode: this acceptance exercises the
+  // formal working frame, which streaming mode replaces by design. The
+  // streaming default now ships on, so the mode must be explicit here.
+  await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "false");`);
+  await browser.call("Page.reload", { ignoreCache: true });
   const enterMessage = async (text) => {
     await browser.evaluate(`(() => {
       const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
