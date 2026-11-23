@@ -1667,6 +1667,40 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
     )
 }
 
+/// Live-only mid-run output snapshot of a running action, projected as a
+/// `core.action` "output" event. Interfaces correlate it with the running
+/// start row by action_id; the authoritative finish event later carries the
+/// final bounded preview, so no separate lifecycle state exists. These events
+/// are capped per action and intentionally excluded from chat history.
+pub fn action_output_topic_event(
+    session_id: &str,
+    action: &str,
+    action_id: &str,
+    preview: &str,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id.to_string(),
+        CoreTopic::new(
+            CORE_TOPIC_ACTION,
+            json!({
+                "name": CORE_TOPIC_ACTION,
+                "action": action,
+                "action_id": action_id,
+                "active": true,
+                "event": "output",
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "action": action,
+            "action_id": action_id,
+            "active": true,
+            "event": "output",
+            "tool_output_preview": preview,
+        }),
+    )
+}
+
 pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicStatusHint> {
     events.iter().find_map(|event| {
         let action_topic = event.as_action()?;

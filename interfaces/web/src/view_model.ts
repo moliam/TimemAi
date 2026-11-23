@@ -979,6 +979,30 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       typeof topicEvent.payload.event === "string"
         ? topicEvent.payload.event
         : topicEvent.topic.attributes?.event;
+    if (lifecycle === "output") {
+      // Live-only mid-run preview snapshots ride on the running start row:
+      // they never create standalone rows and are dropped when their start
+      // is missing (e.g. trimmed history). The authoritative finish event
+      // later replaces the preview with the final bounded tail.
+      const startIndexes = pendingStarts.get(key);
+      const startIndex = startIndexes?.[0];
+      const preview =
+        typeof topicEvent.payload.tool_output_preview === "string"
+          ? topicEvent.payload.tool_output_preview
+          : undefined;
+      if (startIndex !== undefined && preview !== undefined) {
+        const started = visible[startIndex];
+        const startedTopic = started.payload as unknown as CoreTopicEvent;
+        visible[startIndex] = {
+          ...started,
+          payload: {
+            ...started.payload,
+            payload: { ...startedTopic.payload, tool_output_preview: preview },
+          },
+        };
+      }
+      continue;
+    }
     if (lifecycle === "start") {
       const index = visible.push(event) - 1;
       pendingStarts.set(key, [...(pendingStarts.get(key) ?? []), index]);
@@ -2681,6 +2705,11 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           typeof payload.tool_output_bytes === "number" &&
           Number.isFinite(payload.tool_output_bytes)
             ? payload.tool_output_bytes
+            : undefined,
+        result_preview:
+          typeof payload.tool_output_preview === "string" &&
+          payload.tool_output_preview.trim().length > 0
+            ? payload.tool_output_preview
             : undefined,
         timeout_ms: numericKindValue("timeout_ms"),
         loop_timeout_ms: numericKindValue("loop_timeout_ms"),

@@ -157,7 +157,12 @@ fn execute_local_shell(
     action: &ParsedAction,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    shell_exec::execute_run_bash_action(core, action, runtime)
+    // Live output snapshots project through a bridge that owns the action
+    // identity and throttle; the executor only sees the ActionRuntime trait.
+    let session_id = core.current_session_id();
+    let mut runtime =
+        crate::RunningOutputBridge::new(runtime, session_id, &action.action, &action.call_id);
+    shell_exec::execute_run_bash_action(core, action, &mut runtime)
 }
 
 #[cfg(test)]

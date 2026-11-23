@@ -1372,6 +1372,69 @@ fn elapsed_thread_cpu(start: Option<Duration>) -> Option<Duration> {
     thread_cpu_time().and_then(|end| end.checked_sub(start?))
 }
 
+/// Live preview budgets for interface projections (read-only result boxes):
+/// at most the last [`TOOL_OUTPUT_PREVIEW_LINES`] lines, never more than
+/// [`TOOL_OUTPUT_PREVIEW_BYTES`] bytes, tail retention. The model-facing
+/// tool-result budget is completely separate and stays untouched.
+pub(crate) const TOOL_OUTPUT_PREVIEW_LINES: usize = 16;
+pub(crate) const TOOL_OUTPUT_PREVIEW_BYTES: usize = 4 * 1024;
+/// Minimum wall-clock spacing between live `core.action` "output" events.
+pub(crate) const OUTPUT_PREVIEW_MIN_INTERVAL: Duration = Duration::from_secs(3);
+/// Hard per-action cap on live output events so a task that keeps producing
+/// output cannot accumulate events without bound; the finish event still
+/// delivers the final tail afterwards.
+pub(crate) const OUTPUT_PREVIEW_MAX_EVENTS_PER_ACTION: u32 = 240;
+
+/// Tail-bounded preview text: at most `max_lines` lines within `max_bytes`
+/// bytes. A leading ellipsis line marks dropped content; it stays
+/// language-neutral so interfaces localize around it.
+pub(crate) fn retain_tail_preview(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let fragment =
+        tool_result_gate::retain_fragment(trimmed, max_bytes, tool_result_gate::Retention::Tail);
+    let all_lines: Vec<&str> = fragment.text.lines().collect();
+    let line_truncated = all_lines.len() > max_lines;
+    let mut body = if line_truncated {
+        all_lines[all_lines.len() - max_lines..].join("\n")
+    } else {
+        fragment.text.clone()
+    };
+    if fragment.truncated || line_truncated {
+        body = format!("\u{2026}\n{body}");
+    }
+    body
+}
+
+/// Combines a tool payload's own text fields (stdout+stderr, else content)
+/// into the bounded preview text; None when the result carries no text.
+pub(crate) fn tool_output_preview_text(tool_output: &Value) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(text) = tool_output.get("stdout").and_then(Value::as_str) {
+        parts.push(text);
+    }
+    if let Some(text) = tool_output.get("stderr").and_then(Value::as_str) {
+        parts.push(text);
+    }
+    if parts.is_empty() {
+        if let Some(text) = tool_output.get("content").and_then(Value::as_str) {
+            parts.push(text);
+        }
+    }
+    let combined = parts.join("\n");
+    if combined.trim().is_empty() {
+        None
+    } else {
+        Some(retain_tail_preview(
+            &combined,
+            TOOL_OUTPUT_PREVIEW_LINES,
+            TOOL_OUTPUT_PREVIEW_BYTES,
+        ))
+    }
+}
+
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
 
@@ -1422,6 +1485,15 @@ pub trait ActionRuntime {
     fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
         None
     }
+
+    /// Mid-execution bounded output snapshot of the running action (display
+    /// tail only). Implementations project it as an authoritative
+    /// `core.action` "output" event and return `true` while further snapshots
+    /// are still wanted; `false` tells the executor to stop offering them
+    /// (silent runtimes and exhausted caps both return `false`).
+    fn report_running_output(&mut self, _preview: &str) -> bool {
+        false
+    }
 }
 
 pub(crate) struct CancelOnlyActionRuntime<'a> {
@@ -1437,6 +1509,122 @@ impl<'a> CancelOnlyActionRuntime<'a> {
 impl ActionRuntime for CancelOnlyActionRuntime<'_> {
     fn should_cancel(&mut self) -> bool {
         (self.should_cancel)()
+    }
+}
+
+/// Wraps the turn runtime during local-shell execution so executor-side
+/// mid-run output snapshots become authoritative `core.action` "output"
+/// events correlated with the running start row. Suppressed unless the
+/// bounded tail actually changed and at least
+/// [`OUTPUT_PREVIEW_MIN_INTERVAL`] has passed since the previous emission;
+/// hard-capped at [`OUTPUT_PREVIEW_MAX_EVENTS_PER_ACTION`] per action.
+/// Every other runtime call forwards untouched.
+pub(crate) struct RunningOutputBridge<'a> {
+    inner: &'a mut dyn ActionRuntime,
+    session_id: String,
+    action: String,
+    action_id: String,
+    last_emitted: Option<(std::time::Instant, String)>,
+    emitted: u32,
+    min_interval: Duration,
+}
+
+impl<'a> RunningOutputBridge<'a> {
+    pub(crate) fn new(
+        inner: &'a mut dyn ActionRuntime,
+        session_id: impl Into<String>,
+        action: &str,
+        action_id: &str,
+    ) -> Self {
+        Self {
+            inner,
+            session_id: session_id.into(),
+            action: action.to_string(),
+            action_id: action_id.to_string(),
+            last_emitted: None,
+            emitted: 0,
+            min_interval: OUTPUT_PREVIEW_MIN_INTERVAL,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_min_interval(mut self, min_interval: Duration) -> Self {
+        self.min_interval = min_interval;
+        self
+    }
+
+    fn project_output(&mut self, preview: &str) -> bool {
+        if self.emitted >= OUTPUT_PREVIEW_MAX_EVENTS_PER_ACTION {
+            return false;
+        }
+        if preview.is_empty() {
+            return true;
+        }
+        if let Some((at, text)) = &self.last_emitted {
+            if *text == preview || at.elapsed() < self.min_interval {
+                return true;
+            }
+        }
+        let session_id = self.session_id.clone();
+        let action = self.action.clone();
+        let action_id = self.action_id.clone();
+        let event = host::action_output_topic_event(&session_id, &action, &action_id, preview);
+        self.last_emitted = Some((std::time::Instant::now(), preview.to_string()));
+        self.emitted += 1;
+        self.inner.on_core_topic_events(&[event]);
+        true
+    }
+}
+
+impl ActionRuntime for RunningOutputBridge<'_> {
+    fn should_cancel(&mut self) -> bool {
+        self.inner.should_cancel()
+    }
+
+    fn should_force_handoff(&mut self) -> bool {
+        self.inner.should_force_handoff()
+    }
+
+    fn on_core_topic_events(&mut self, events: &[host::CoreTopicEvent]) {
+        self.inner.on_core_topic_events(events);
+    }
+
+    fn request_mail_send(&mut self, event: &host::CoreTopicEvent) -> Option<host::MailSendReply> {
+        self.inner.request_mail_send(event)
+    }
+
+    fn on_model_response_validated(&mut self, accepted: bool, final_response: bool) {
+        self.inner
+            .on_model_response_validated(accepted, final_response);
+    }
+
+    fn on_model_response_parsed(
+        &mut self,
+        tool_count: usize,
+        has_free_talk: bool,
+        has_tool_call: bool,
+    ) {
+        self.inner
+            .on_model_response_parsed(tool_count, has_free_talk, has_tool_call);
+    }
+
+    fn on_long_running_command(
+        &mut self,
+        status: &LongRunningCommandStatus,
+    ) -> LongRunningCommandDecision {
+        self.inner.on_long_running_command(status)
+    }
+
+    fn take_bash_always_allow(&mut self) -> bool {
+        self.inner.take_bash_always_allow()
+    }
+
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        self.inner.take_model_tool_result_bytes_update()
+    }
+
+    fn report_running_output(&mut self, preview: &str) -> bool {
+        self.project_output(preview)
     }
 }
 
@@ -8315,6 +8503,9 @@ Runtime tool_call ids:",
             self.structured_tool_output(action, outcome, self.model_tool_result_bytes);
         if let Ok(serialized) = serde_json::to_string(&tool_output) {
             event.payload["tool_output_bytes"] = json!(serialized.len());
+        }
+        if let Some(preview) = tool_output_preview_text(&tool_output) {
+            event.payload["tool_output_preview"] = json!(preview);
         }
         match cpu_time {
             Some(duration) => {

@@ -16829,10 +16829,14 @@ fn append_turn_event(
         created_at_ms,
         timeline_seq: Some(timeline_seq),
     });
+    // Mid-run `core.action` "output" snapshots are live-only projection
+    // events (capped per action): the authoritative finish event carries the
+    // final bounded preview into history, so streaming updates stay transient.
     let history_event = turn
         .events
         .last()
-        .map(|event| (event.created_at_ms as i64, event.payload.clone()));
+        .map(|event| (event.created_at_ms as i64, event.payload.clone()))
+        .filter(|(_, payload)| !is_transient_action_output_event(payload));
     let turn_id = active_turn_id.clone();
     drop(sessions);
     if let Some((created_at_ms, payload)) = history_event {
@@ -16855,6 +16859,20 @@ fn append_turn_event(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// True for the live-only mid-run `core.action` "output" projection events.
+fn is_transient_action_output_event(payload: &Value) -> bool {
+    payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str)
+        == Some(CORE_TOPIC_ACTION)
+        && payload
+            .get("payload")
+            .and_then(|inner| inner.get("event"))
+            .and_then(Value::as_str)
+            == Some("output")
+}
+
 fn append_chat_history_message(
     state: &AppState,
     session_id: &str,

@@ -3080,3 +3080,345 @@ fn run_bash_validation_failure_does_not_attach_edit_evidence() {
     };
     assert!(outcome.edits.is_none());
 }
+
+// ---------- 结果预览（仅观察瞬时窗口）：预算与发射契约 ----------
+
+#[derive(Default)]
+struct PreviewCaptureRuntime {
+    previews: Vec<String>,
+    events: Vec<crate::host::CoreTopicEvent>,
+}
+
+impl ActionRuntime for PreviewCaptureRuntime {
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
+
+    fn on_core_topic_events(&mut self, events: &[crate::host::CoreTopicEvent]) {
+        self.events.extend(events.iter().cloned());
+    }
+
+    fn report_running_output(&mut self, preview: &str) -> bool {
+        self.previews.push(preview.to_string());
+        true
+    }
+}
+
+#[test]
+fn tail_preview_bounds_lines_and_bytes_with_ellipsis_marker() {
+    // 短输出：原样保留，无省略标记。
+    let short = crate::retain_tail_preview("alpha\nbeta", 16, 4096);
+    assert_eq!(short, "alpha\nbeta");
+    // 空输入：空串（不产生预览事件）。
+    assert_eq!(crate::retain_tail_preview("   \n", 16, 4096), "");
+    // 超过 16 行：省略行 + 最后 16 行。
+    let long = (1..=30)
+        .map(|index| format!("row-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let bounded = crate::retain_tail_preview(&long, 16, 4096);
+    let lines: Vec<&str> = bounded.lines().collect();
+    assert_eq!(lines.len(), 17);
+    assert_eq!(lines[0], "\u{2026}");
+    assert_eq!(lines[1], "row-15");
+    assert_eq!(lines[16], "row-30");
+    // 单行超长：按字节截断（UTF-8 安全），保留尾部。
+    let huge = "x".repeat(9_000);
+    let capped = crate::retain_tail_preview(&huge, 16, 4_096);
+    assert!(capped.len() <= 4_096 + 4);
+    assert!(capped.starts_with('\u{2026}'));
+    assert!(capped.ends_with(&huge[huge.len() - 4_096..]));
+}
+
+#[test]
+fn tool_output_preview_text_combines_payload_fields() {
+    // stdout+stderr 依序合并。
+    let combined = serde_json::json!({
+        "stdout": "out-1",
+        "stderr": "err-1",
+    });
+    assert_eq!(
+        crate::tool_output_preview_text(&combined).as_deref(),
+        Some("out-1\nerr-1")
+    );
+    // content 回退。
+    let content = serde_json::json!({ "content": "file body" });
+    assert_eq!(
+        crate::tool_output_preview_text(&content).as_deref(),
+        Some("file body")
+    );
+    // 空结果：None。
+    assert!(crate::tool_output_preview_text(&serde_json::json!({})).is_none());
+    assert!(crate::tool_output_preview_text(&serde_json::json!({
+        "stdout": "   ",
+    }))
+    .is_none());
+}
+
+#[derive(Default, Clone)]
+struct BridgeCaptureRuntime {
+    events: std::rc::Rc<std::cell::RefCell<Vec<crate::host::CoreTopicEvent>>>,
+}
+
+impl ActionRuntime for BridgeCaptureRuntime {
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
+
+    fn on_core_topic_events(&mut self, events: &[crate::host::CoreTopicEvent]) {
+        self.events.borrow_mut().extend(events.iter().cloned());
+    }
+}
+
+fn captured_events(
+    runtime: &BridgeCaptureRuntime,
+) -> std::cell::Ref<'_, Vec<crate::host::CoreTopicEvent>> {
+    runtime.events.borrow()
+}
+
+#[test]
+fn running_output_bridge_projects_throttled_authoritative_events() {
+    let inner = BridgeCaptureRuntime::default();
+    let mut target = inner.clone();
+    let mut bridge = crate::RunningOutputBridge::new(&mut target, "sess-1", "run_bash", "call-7")
+        .with_min_interval(Duration::ZERO);
+    // 首个快照立即投影，事件形状：core.action / event=output / action_id / tail。
+    // 注意：捕获 Ref 必须在下次投影前释放（同一 Rc 的 borrow_mut 会冲突）。
+    assert!(bridge.report_running_output("tail-1"));
+    {
+        let events = captured_events(&inner);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.topic.name, "core.action");
+        assert_eq!(event.topic.attributes["event"], "output");
+        assert_eq!(event.payload["action_id"], "call-7");
+        assert_eq!(event.payload["tool_output_preview"], "tail-1");
+    }
+    // 相同 tail：抑制（保持流式状态）。
+    assert!(bridge.report_running_output("tail-1"));
+    {
+        assert_eq!(captured_events(&inner).len(), 1);
+    }
+    // 空 tail：忽略但不断流。
+    assert!(bridge.report_running_output(""));
+    {
+        assert_eq!(captured_events(&inner).len(), 1);
+    }
+    // 硬上限 240：超出后返回 false（executor 停止快照）。
+    for index in 2..=240 {
+        assert!(bridge.report_running_output(&format!("tail-{index}")));
+    }
+    {
+        assert_eq!(captured_events(&inner).len(), 240);
+    }
+    assert!(!bridge.report_running_output("tail-241"));
+    {
+        assert_eq!(captured_events(&inner).len(), 240);
+    }
+}
+
+#[test]
+fn running_output_bridge_suppresses_changed_text_inside_window() {
+    let inner = BridgeCaptureRuntime::default();
+    let mut target = inner.clone();
+    let mut bridge = crate::RunningOutputBridge::new(&mut target, "s", "run_bash", "c")
+        .with_min_interval(Duration::from_secs(3600));
+    assert!(bridge.report_running_output("first"));
+    assert_eq!(captured_events(&inner).len(), 1);
+    // 窗口内变化文本：仍被抑制。
+    assert!(bridge.report_running_output("second"));
+    assert_eq!(captured_events(&inner).len(), 1);
+}
+
+#[cfg(unix)]
+fn run_bash_with_preview_runtime(
+    command: &str,
+    extra: serde_json::Value,
+    call_id: &str,
+) -> (crate::ActionOutcome, PreviewCaptureRuntime) {
+    let memory_dir = tmp_memory_dir("result_preview");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        &memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut raw_input = serde_json::json!({ "cmd": command, "timeout_ms": 12_000 });
+    if let serde_json::Value::Object(map) = extra {
+        for (key, value) in map {
+            raw_input[key.as_str()] = value;
+        }
+    }
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: call_id.to_string(),
+        raw_input,
+    };
+    let mut runtime = PreviewCaptureRuntime::default();
+    let ActionExecution::Completed(outcome) =
+        execute_run_bash_action(&mut core, &action, &mut runtime)
+    else {
+        panic!("approve mode should execute directly");
+    };
+    let _ = fs::remove_dir_all(memory_dir);
+    (outcome, runtime)
+}
+
+#[test]
+#[cfg(unix)]
+fn quick_command_projects_no_live_preview_but_finish_tail() {
+    // 快速结束（<3s 暖机）：无运行中预览事件。
+    let (outcome, runtime) =
+        run_bash_with_preview_runtime("echo quick-marker", serde_json::json!({}), "quick-1");
+    assert!(runtime.previews.is_empty());
+    let evidence = outcome.bash_result.expect("shell evidence");
+    assert!(evidence.stdout.contains("quick-marker"));
+    // finish 预览可由 tool_output_preview_text 从结构化证据导出。
+    let tool_output = serde_json::json!({
+        "stdout": evidence.stdout.trim_end(),
+    });
+    assert_eq!(
+        crate::tool_output_preview_text(&tool_output).as_deref(),
+        Some("quick-marker")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn long_running_command_streams_bounded_live_previews() {
+    // 长前台命令：暖机后出现运行中预览，且有界（≤16 行 / ≤4KiB）。
+    let (outcome, runtime) = run_bash_with_preview_runtime(
+        "echo early-tail; sleep 4; echo late-tail",
+        serde_json::json!({}),
+        "long-1",
+    );
+    assert!(!runtime.previews.is_empty());
+    for preview in &runtime.previews {
+        assert!(preview.lines().count() <= 17); // 可能带省略行
+        assert!(preview.len() <= 4_096 + 4);
+    }
+    assert!(runtime
+        .previews
+        .iter()
+        .any(|text| text.contains("early-tail")));
+    let evidence = outcome.bash_result.expect("shell evidence");
+    assert!(evidence.stdout.contains("late-tail"));
+}
+
+#[test]
+#[cfg(unix)]
+fn long_output_finish_preview_keeps_tail_with_ellipsis() {
+    // 很长的输出（30 行）：finish 预览 = 省略行 + 最后 16 行。
+    let script = "for i in $(seq 1 30); do echo row-$i; done; sleep 4";
+    let (outcome, runtime) = run_bash_with_preview_runtime(script, serde_json::json!({}), "long-2");
+    let evidence = outcome.bash_result.expect("shell evidence");
+    let tool_output = serde_json::json!({
+        "stdout": evidence.stdout.trim_end(),
+    });
+    let preview = crate::tool_output_preview_text(&tool_output).expect("tail preview");
+    let lines: Vec<&str> = preview.lines().collect();
+    assert_eq!(lines.len(), 17);
+    assert_eq!(lines[0], "\u{2026}");
+    assert_eq!(lines[1], "row-15");
+    assert_eq!(lines[16], "row-30");
+    // 运行中预览同样出现（sleep 4 > 暖机 3s）。
+    assert!(!runtime.previews.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn stderr_only_command_projects_stderr_tail() {
+    // 仅 stderr：预览来自 stderr。
+    let (outcome, runtime) = run_bash_with_preview_runtime(
+        "echo error-marker >&2; sleep 4",
+        serde_json::json!({}),
+        "err-1",
+    );
+    assert!(runtime
+        .previews
+        .iter()
+        .any(|text| text.contains("error-marker")));
+    let evidence = outcome.bash_result.expect("shell evidence");
+    assert!(evidence.stderr.contains("error-marker"));
+}
+
+#[test]
+#[cfg(unix)]
+fn polling_command_streams_previews_after_warmup_and_quick_polls_stay_silent() {
+    // 快速轮询（<3s）：零运行中预览事件。
+    let memory_dir = tmp_memory_dir("result_preview_poll_quick");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        &memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: "poll-quick".to_string(),
+        raw_input: serde_json::json!({
+            "loop_cmd": "true",
+            "interval_ms": 50,
+            "loop_timeout_ms": 300,
+        }),
+    };
+    let mut runtime = PreviewCaptureRuntime::default();
+    let ActionExecution::Completed(outcome) =
+        execute_run_bash_action(&mut core, &action, &mut runtime)
+    else {
+        panic!("approve mode should execute directly");
+    };
+    assert!(runtime.previews.is_empty());
+    assert!(outcome.text.contains("loop_cmd"));
+    let _ = fs::remove_dir_all(memory_dir);
+
+    // 长轮询（>3s 暖机）：出现带 loop 输出的运行中预览。
+    let (_, long_runtime) = {
+        let memory_dir = tmp_memory_dir("result_preview_poll_long");
+        let mut core = AgentCore::new(
+            "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+            crate::CoreProfile {
+                model: "test".to_string(),
+            },
+            &memory_dir,
+        );
+        core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ));
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let action = ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            call_id: "poll-long".to_string(),
+            raw_input: serde_json::json!({
+                "loop_cmd": "echo tick; exit 1",
+                "interval_ms": 200,
+                "loop_timeout_ms": 4_000,
+            }),
+        };
+        let mut runtime = PreviewCaptureRuntime::default();
+        let ActionExecution::Completed(outcome) =
+            execute_run_bash_action(&mut core, &action, &mut runtime)
+        else {
+            panic!("approve mode should execute directly");
+        };
+        let _ = fs::remove_dir_all(memory_dir);
+        (outcome, runtime)
+    };
+    assert!(long_runtime
+        .previews
+        .iter()
+        .any(|text| text.contains("tick")));
+}

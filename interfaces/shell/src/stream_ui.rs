@@ -278,6 +278,12 @@ impl StreamToolFoldState {
         if matches!(action.action.as_str(), "task_finished" | "turn_finished") {
             return StreamToolFoldUpdate::Ignored;
         }
+        // Live-only output snapshots (WebUI preview streaming) carry no shell
+        // lifecycle state; applying them would blank the tracked command
+        // detail, so the terminal fold treats them as transparent noise.
+        if action.event == "output" {
+            return StreamToolFoldUpdate::Ignored;
+        }
         let terminal = stream_tool_terminal_kind(&action.event, &action.status, action.active);
         let signature = stream_tool_fallback_signature(action);
         let explicit = !action.action_id.trim().is_empty();

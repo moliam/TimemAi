@@ -134,6 +134,40 @@ describe("file edits surfaces", () => {
     expect(gutter).toContain("white-space: nowrap;");
   });
 
+  it("keeps the panel as the single framed box with summed head totals", () => {
+    // 用户反馈：文件名列表不渲染为框，仅展开的 diff 正文保留内层框；
+    // 面板顶部栏显示所有文件合计的 +/- 数量。
+    expect(component).toContain('className="file-edits-panel-head"');
+    expect(component).toContain('className="file-edits-panel-totals"');
+    expect(component).toContain('t("tools.fileEditsPanelCount"');
+    expect(en).toContain("fileEditsPanelCount:");
+    expect(zh).toContain("fileEditsPanelCount:");
+    const sectionStart = styles.indexOf(".file-edit-section {");
+    const section = styles.slice(sectionStart, styles.indexOf("}", sectionStart) + 1);
+    expect(section).not.toContain("border:");
+    expect(section).not.toContain("background:");
+    const opStart = styles.indexOf(".file-edit-op {");
+    const op = styles.slice(opStart, styles.indexOf("}", opStart) + 1);
+    expect(op).not.toContain("background");
+    const diffStart = styles.indexOf(".file-edit-diff {");
+    const diff = styles.slice(diffStart, styles.indexOf("}", diffStart) + 1);
+    expect(diff).toContain("border: 1px solid");
+    expect(diff).toContain("border-radius: 8px;");
+  });
+
+  it("renders the summed +/- totals in the panel head", () => {
+    const html = renderToString(createElement(FileEditsPanel, {
+      edits: [
+        { ...validEntry },
+        { ...validEntry, path: "b.rs", added_lines: 2, removed_lines: 0 },
+      ],
+    })).replace(/<!-- -->/g, "");
+    expect(html).toContain("file-edits-panel-head");
+    expect(html).toContain("file-edits-panel-totals");
+    expect(html).toContain(">+3<");
+    expect(html).toContain(">\u22121<");
+  });
+
   it("keeps the diff tint across the full horizontal scroll range", () => {
     const start = styles.indexOf(".file-edit-diff-table {");
     const block = styles.slice(start, styles.indexOf("}", start) + 1);

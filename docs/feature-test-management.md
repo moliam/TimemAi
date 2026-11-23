@@ -1123,3 +1123,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 展示：工作尾部模型请求计数改为 `AI N`，不再复用 `✦`，让星号只承担“模型正在工作”的语义；`waiting_model` 的 tooltip/aria 改为“模型正在工作 / Model is working”。
 - 预览结算：`intermediate` 是响应解析后的状态转换，不是流式 tick。Host 的 150ms 预览节流现在对 `final`、`intermediate` 与思考帧立即 flush 并按序广播；否则前台工具启动后可能长时间没有 preview 事件，客户端会停在旧 `streaming` 帧，误亮模型星标并重复显示临时预览。前台工具运行后，结算帧到达即回到本地扳手。
 - 测试看护：`activity_groups.test.ts` 覆盖等待、流式、中间态与空闲的纯相位；`stream-preview-acceptance.mjs` 在真实 Chrome 覆盖本地-only、`waiting_model + background_running`、`streaming + background_running`、`intermediate + running` 前台工具，并断言计数不再包含 `✦`；`stream_reveal.test.ts` 守卫相位接线与计数文案；`web_host_tests::settled_intermediate_preview_bypasses_broadcast_throttle_without_later_events` 覆盖无后续事件时 intermediate 必须立即广播、且 pending streaming 先按序释放。
+
+## 2026-11 工具结果预览框（仅观察瞬时窗口）+ diff 卡片简化 + 悬浮工具计数徽章
+
+- 工具结果预览框：非 edit 类工具的自身 result 现在以只读预览框展示（默认仅尾 16 行、4KiB 硬上限，前导 `…` 行标记被省略内容）。运行中任务通过新的 `core.action` "output" 事件实时更新 tail（最小间隔 3s、文本变化才发、单 action 硬上限 240 条、不写入 chat history）；finish 事件携带最终 tail（`tool_output_preview`）并照常入历史。视觉与文件编辑卡明确区分：虚线边框 + 眼睛徽章 + 呼吸点（运行中）+ 等宽暗底只读文本；结束自动收起，徽章按钮可再次展开；文本允许复制，渲染前逐行敏感信息脱敏。流式工具行与归档帧工具行两处挂载，turn 归档后预览入口不消失。运行中输出事件在 shell 折叠 UI 中被忽略（`stream_ui.rs`），不污染工具折叠状态。
+- Core 侧：`emit_action_finish_topic` 附带 `tool_output_preview`（`tool_output_preview_text`：stdout+stderr 依序合并、content 回退、`retain_tail_preview` 有界化）；`ActionRuntime::report_running_output` 新 trait 钩子 + `RunningOutputBridge`（registry 本地 shell 执行处包装，负责 action 身份、节流与上限）；前台等待循环与轮询循环在暖机（3s）后提供有界快照，runtime 返回 false 即停止快照。
+- diff 卡片简化：文件名列表不再渲染为每文件一个框（纯文本行、op 徽章改纯色文字）；仅展开的 diff 正文保留内层框；面板顶部栏新增所有文件合计的 `+N −M` 与文件数；turn 总结框内的面板不再双重描边。
+- 悬浮工具计数徽章：流式视图折叠态的 `+ tools xN` 徽章不再占独立行——悬浮于最近文本行尾（右缘、上移一个自身高度），按钮保持可点击；展开态恢复常规行布局。
+- stop-ui 验收钉住 classic 模式：`stop-ui-acceptance.mjs` 在流式默认开启后固定 `timem-web-stream-ui-mode-v1=false` 并 reload，恢复正式工作框断言的前置条件。
+- 测试看护：Rust `capability_tool_run_bash_tests.rs` 新增 9 例（tail 预算/省略标记、stdout+stderr/content 回退/空、bridge 节流与事件形状/硬上限 240/窗口抑制、快速命令无运行中预览、长前台命令有界流式、30 行输出 finish tail=省略+16 行、仅 stderr、快速轮询静默+长轮询暖机后流式）；web 新增 `tests/result_preview.test.ts` 11 例（tail 切片/CRLF、output 事件并入运行行不新增行/start 缺失丢弃/并行流隔离、finish 映射 `result_preview`、双行挂载与瞬时收起契约、明暗虚线样式、i18n 同步、端到端上限守卫含 shell 忽略与历史跳过）；`file_edits.test.ts` 新增面板合计头/单框契约 2 例；`tool_activity_layout.test.ts` 新增悬浮徽章契约。pnpm 1025 过、tsc 过、agent_core/timem/timem_shell lib 过、clippy/fmt 过，dist 已重建提交。

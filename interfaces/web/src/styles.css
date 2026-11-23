@@ -5797,6 +5797,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
+/* 用户反馈：折叠态的 +tools xN 计数徽章不占独立行——悬浮到最近文本行的行尾
+   （右缘、上移一个行高），保持按钮可点击；展开态恢复常规行布局。
+   容器在折叠态高度归零（折叠行本身 0fr 已无高度），按钮绝对定位上移覆盖。 */
+.stream-tool-run.merged { position: relative; height: 0; margin: 0; }
+.stream-tool-run.merged .stream-tool-run-toggle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  transform: translateY(-100%);
+  z-index: 1;
+}
+
 /* Controls remain visible and usable with keyboard, touch, long labels and narrow screens. */
 .stream-tool-run-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
 .stream-tool-run, .live-interim-answer { min-width: 0; overflow-wrap: anywhere; }
@@ -7187,17 +7199,28 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edits-panel {
   margin: 8px 0 0;
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-.file-edit-section {
+  padding: 7px 10px 8px;
   border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 8px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.02);
-  overflow: hidden;
+  display: grid;
+  gap: 1px;
   min-width: 0;
 }
+.file-edits-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 5px;
+  margin-bottom: 3px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  color: #8fa3ad;
+  font-variant-numeric: tabular-nums;
+}
+.file-edits-panel-totals { display: inline-flex; gap: 8px; flex: none; }
+/* 文件名列表保持纯文本行：只有展开的 diff 正文渲染为内层框。 */
+.file-edit-section { min-width: 0; }
 .turn-edits-summary {
   margin: 10px 0 0;
   padding: 8px 10px 10px;
@@ -7215,7 +7238,13 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   color: #9aabb3;
 }
 .turn-edits-summary-head b { color: #c9d6de; font-weight: 650; }
-.turn-edits-summary .file-edits-panel { margin-top: 8px; }
+.turn-edits-summary .file-edits-panel {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
 .file-edit-captures {
   flex: none;
   padding: 0 6px;
@@ -7230,7 +7259,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 4px 2px 4px 0;
   font-size: 12px;
   line-height: 18px;
   min-width: 0;
@@ -7238,17 +7267,16 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-toggle { cursor: pointer; }
 .file-edit-op {
   flex: none;
-  padding: 1px 7px;
-  border-radius: 4px;
+  padding: 0;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.2px;
 }
-.file-edit-op-created { color: #7fd6a4; background: rgba(64, 180, 120, 0.14); }
-.file-edit-op-modified { color: #e8c268; background: rgba(222, 178, 86, 0.14); }
-.file-edit-op-deleted { color: #e59a94; background: rgba(214, 92, 84, 0.15); }
+.file-edit-op-created { color: #7fd6a4; }
+.file-edit-op-modified { color: #e8c268; }
+.file-edit-op-deleted { color: #e59a94; }
 .file-edit-op-unchanged,
-.file-edit-op-skipped { color: #98afbc; background: rgba(255, 255, 255, 0.05); }
+.file-edit-op-skipped { color: #98afbc; }
 .file-edit-path {
   display: inline-flex;
   align-items: baseline;
@@ -7285,7 +7313,9 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-copy.copy-failed { color: #e59a94; border-color: rgba(214, 92, 84, 0.4); }
 .file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
 .file-edit-diff {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin: 2px 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
   background: rgba(0, 0, 0, 0.14);
   overflow: auto;
   max-height: 420px;
@@ -7340,11 +7370,9 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edits-panel.edits-wrap .file-edit-code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .file-edit-row-meta .file-edit-code { white-space: pre-wrap; }
 .file-edit-notice {
-  padding: 6px 10px;
+  padding: 4px 2px;
   font-size: 11px;
   color: #e8c268;
-  background: rgba(222, 178, 86, 0.08);
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
 }
 :root[data-theme="light"] .stream-tool-edits-chip { background: #e5f5ec; color: #1c7a4e; }
 :root[data-theme="light"] .turn-edits-summary {
@@ -7354,12 +7382,19 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .turn-edits-summary-head { color: #5c6f7a; }
 :root[data-theme="light"] .turn-edits-summary-head b { color: #24333a; }
 :root[data-theme="light"] .file-edit-captures { background: #d9f2e4; color: #1c7a4e; }
-:root[data-theme="light"] .file-edit-section { border-color: rgba(0, 0, 0, 0.1); background: #fbfcfd; }
-:root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; background: #e0f2e9; }
-:root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; background: #f7ecd4; }
-:root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; background: #fbe5e3; }
+:root[data-theme="light"] .file-edits-panel {
+  border-color: rgba(20, 40, 50, 0.1);
+  background: rgba(20, 40, 50, 0.02);
+}
+:root[data-theme="light"] .file-edits-panel-head {
+  border-bottom-color: rgba(20, 40, 50, 0.08);
+  color: #5c6f7a;
+}
+:root[data-theme="light"] .file-edit-op-created { color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-op-modified { color: #8a6d1f; }
+:root[data-theme="light"] .file-edit-op-deleted { color: #b23a31; }
 :root[data-theme="light"] .file-edit-op-unchanged,
-:root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; background: #eef1f3; }
+:root[data-theme="light"] .file-edit-op-skipped { color: #5c6f7c; }
 :root[data-theme="light"] .file-edit-directory { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-name { color: #24333a; }
 :root[data-theme="light"] .file-edit-additions { color: #1c7a4e; }
@@ -7369,7 +7404,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; border-color: #8fceae; }
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; border-color: #e0a39e; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
-:root[data-theme="light"] .file-edit-diff { border-top-color: rgba(0, 0, 0, 0.06); background: #f6f8fa; }
+:root[data-theme="light"] .file-edit-diff { border-color: rgba(0, 0, 0, 0.08); background: #f6f8fa; }
 :root[data-theme="light"] .file-edit-gutter { color: #9aa7b0; }
 :root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c7a4e; }
@@ -7380,4 +7415,130 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-row-hunk { background: #e8f1f8; color: #4d7ba3; }
 :root[data-theme="light"] .file-edit-row-meta { color: #9aa7b0; }
-:root[data-theme="light"] .file-edit-notice { color: #8a6d1f; background: #fdf6e3; border-top-color: rgba(0, 0, 0, 0.08); }
+:root[data-theme="light"] .file-edit-notice { color: #8a6d1f; }
+
+/* 结果预览：仅观察的瞬时窗口。虚线边框 + 眼睛徽章与文件编辑卡（实线框）
+   明确区分；运行中带呼吸点实时更新，结束自动收起，徽章按钮可再次展开。
+   文本允许复制。 */
+.stream-tool-result-preview {
+  margin: 6px 0 0;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+  min-width: 0;
+}
+.stream-tool-result-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  color: #7f929e;
+}
+.stream-tool-result-preview-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #6fd3c0;
+  font-weight: 600;
+}
+.stream-tool-result-preview.running .stream-tool-result-preview-badge { color: #7fd6a4; }
+.stream-tool-result-preview-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: stream-result-pulse 1.6s ease-in-out infinite;
+}
+@keyframes stream-result-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.stream-tool-result-preview-hint { font-size: 10px; font-style: italic; color: #5c6f7c; }
+.stream-tool-result-preview-copy {
+  margin-left: auto;
+  flex: none;
+  padding: 0 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #7f929e;
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.stream-tool-result-preview-copy:hover { color: #c9d6de; }
+.stream-tool-result-preview-copy.copy-success { color: #7fd6a4; }
+.stream-tool-result-preview-copy.copy-failed { color: #e59a94; }
+.stream-tool-result-preview-collapse {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #5c6f7c;
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.stream-tool-result-preview-collapse:hover { color: #c9d6de; }
+.stream-tool-result-preview-body {
+  margin: 0;
+  padding: 6px 10px 8px;
+  border-left: 2px solid rgba(111, 211, 192, 0.45);
+  font: 11px/1.55 "SFMono-Regular", Consolas, monospace;
+  color: #9fb3bd;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  user-select: text;
+}
+.stream-tool-result-preview.running .stream-tool-result-preview-body {
+  border-left-color: rgba(127, 214, 164, 0.6);
+}
+.stream-tool-result-reopen {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 1px 8px;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  background: transparent;
+  color: #8fa3ad;
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.stream-tool-result-reopen:hover { color: #c9d6de; border-color: rgba(255, 255, 255, 0.3); }
+:root[data-theme="light"] .stream-tool-result-preview {
+  border-color: rgba(20, 40, 50, 0.22);
+  background: rgba(20, 40, 50, 0.03);
+}
+:root[data-theme="light"] .stream-tool-result-preview-head {
+  border-bottom-color: rgba(20, 40, 50, 0.12);
+  color: #5c6f7a;
+}
+:root[data-theme="light"] .stream-tool-result-preview-badge { color: #1c7a4e; }
+:root[data-theme="light"] .stream-tool-result-preview.running .stream-tool-result-preview-badge { color: #1c7a4e; }
+:root[data-theme="light"] .stream-tool-result-preview-hint { color: #7a8a94; }
+:root[data-theme="light"] .stream-tool-result-preview-copy,
+:root[data-theme="light"] .stream-tool-result-preview-collapse { color: #5c6f7a; }
+:root[data-theme="light"] .stream-tool-result-preview-copy:hover,
+:root[data-theme="light"] .stream-tool-result-preview-collapse:hover { color: #24333a; }
+:root[data-theme="light"] .stream-tool-result-preview-copy.copy-success { color: #1c7a4e; }
+:root[data-theme="light"] .stream-tool-result-preview-copy.copy-failed { color: #b23a31; }
+:root[data-theme="light"] .stream-tool-result-preview-body {
+  border-left-color: rgba(28, 122, 78, 0.5);
+  color: #43545e;
+}
+:root[data-theme="light"] .stream-tool-result-reopen {
+  border-color: rgba(20, 40, 50, 0.22);
+  color: #5c6f7a;
+}
+:root[data-theme="light"] .stream-tool-result-reopen:hover {
+  color: #24333a;
+  border-color: rgba(20, 40, 50, 0.36);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stream-tool-result-preview-pulse { animation: none; }
+}

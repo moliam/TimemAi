@@ -209,6 +209,7 @@ import {
   activeModelRetryStatus,
   activitiesFromTopic,
   activityFromTopic,
+  redactSensitiveDisplayText,
   applySessionRuntimeProfile,
   appendActivityToCurrentTurn,
   appendTurnEvent,
@@ -381,6 +382,7 @@ import { createFrameTask, FrameTask } from "./frame_task";
 import { reconcileSessionTimelineCache } from "./session_timeline_cache";
 import { requestTimelineNavigationWork } from "./timeline_navigation_work";
 import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
+import { resultTailLines } from "./result_preview";
 import "./styles.css";
 
 const STORED_HISTORY_PAGE_SIZE = 50;
@@ -13350,7 +13352,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 控件契约：视觉收起（含双击选中展开等交互保持）显示 + tools xN，
   // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
-  return <div ref={runRef} className="stream-tool-run">
+  return <div ref={runRef} className={`stream-tool-run${merged ? " merged" : ""}`}>
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
       <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
@@ -13423,6 +13425,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const hasEdits = !!activity.edits?.length;
   const [expanded, setExpanded] = useState(() => hasEdits);
   const [manuallyToggled, setManuallyToggled] = useState(false);
+  // 结果预览：运行中常驻实时 tail；结束自动收起（瞬时窗口），点击徽章可再次展开。
+  const resultPreview = activity.result_preview;
+  const [previewReopened, setPreviewReopened] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -13531,6 +13536,26 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
           {!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
+      {resultPreview && (running || previewReopened) && (
+        <StreamToolResultPreview
+          text={resultPreview}
+          running={running}
+          onCollapse={() => setPreviewReopened(false)}
+        />
+      )}
+      {!running && resultPreview && !previewReopened && (
+        <button
+          type="button"
+          className="stream-tool-result-reopen"
+          onClick={event => {
+            event.stopPropagation();
+            setPreviewReopened(true);
+          }}
+        >
+          <Eye size={12} aria-hidden="true" />
+          {t("tools.resultPreview")}
+        </button>
+      )}
     </div>
   );
 }, (previous, next) => {
@@ -13538,10 +13563,78 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.tool_output_bytes === b.tool_output_bytes && a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
+    a.tool_output_bytes === b.tool_output_bytes && a.result_preview === b.result_preview && a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
     JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit) &&
     JSON.stringify(a.edits) === JSON.stringify(b.edits);
+});
+
+// 结果预览框：仅观察的瞬时窗口（虚线边框 + 眼睛徽章，与文件编辑卡明确区分）。
+// 运行中随流式快照实时更新 tail；结束后自动消失，重新打开时保持只读渲染。
+// 文本允许复制；展示前逐行执行敏感信息脱敏，与 diff 行为一致。
+const StreamToolResultPreview = memo(function StreamToolResultPreview({
+  text,
+  running,
+  onCollapse,
+}: {
+  text: string;
+  running: boolean;
+  onCollapse: () => void;
+}) {
+  useT();
+  const lines = useMemo(() => resultTailLines(text), [text]);
+  const previewText = useMemo(
+    () => lines.map(line => redactSensitiveDisplayText(line) || line).join("\n"),
+    [lines],
+  );
+  const { copy, copyLabel, copyClass } = useTimedClipboardCopy(previewText, {
+    idle: t("tools.resultPreviewCopy"),
+    copied: t("tools.resultPreviewCopied"),
+    failed: t("tools.copyFailed"),
+  });
+  if (!lines.length) return null;
+  return (
+    <div
+      className={`stream-tool-result-preview${running ? " running" : ""}`}
+      role="log"
+      aria-live={running ? "polite" : undefined}
+      aria-label={t("tools.resultPreviewAria")}
+    >
+      <div className="stream-tool-result-preview-head">
+        <span className="stream-tool-result-preview-badge">
+          <Eye size={12} aria-hidden="true" />
+          {t("tools.resultPreview")}
+          {running && <span className="stream-tool-result-preview-pulse" aria-hidden="true" />}
+        </span>
+        {running && (
+          <span className="stream-tool-result-preview-hint">{t("tools.resultPreviewLiveHint")}</span>
+        )}
+        <button
+          type="button"
+          className={`stream-tool-result-preview-copy ${copyClass}`}
+          onClick={event => {
+            event.stopPropagation();
+            void copy();
+          }}
+          aria-label={copyLabel}
+        >
+          {copyLabel}
+        </button>
+        <button
+          type="button"
+          className="stream-tool-result-preview-collapse"
+          onClick={event => {
+            event.stopPropagation();
+            onCollapse();
+          }}
+          aria-label={t("tools.resultPreviewCollapse")}
+        >
+          {t("tools.resultPreviewCollapse")}
+        </button>
+      </div>
+      <pre className="stream-tool-result-preview-body">{previewText}</pre>
+    </div>
+  );
 });
 
 const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
@@ -15171,6 +15264,9 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const hasEdits = !!activity.edits?.length;
   const [open, setOpen] = useState(() => hasEdits);
   const [manuallyToggled, setManuallyToggled] = useState(false);
+  // 结果预览：运行中常驻实时 tail；结束自动收起（瞬时窗口），点击徽章可再次展开。
+  const resultPreview = activity.result_preview;
+  const [previewReopened, setPreviewReopened] = useState(false);
   useEffect(() => {
     if (hasEdits) setOpen(true);
   }, [hasEdits]);
@@ -15292,6 +15388,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
       </div>
     );
   return (
+    <>
     <details
       className={`tool-activity ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : status === "completed" ? "settled completed" : "settled terminal-status"}`}
       aria-busy={running || undefined}
@@ -15341,6 +15438,27 @@ function ToolActivity({ activity }: { activity: Activity }) {
         {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
       </div>
     </details>
+      {resultPreview && (running || previewReopened) && (
+        <StreamToolResultPreview
+          text={resultPreview}
+          running={running}
+          onCollapse={() => setPreviewReopened(false)}
+        />
+      )}
+      {!running && resultPreview && !previewReopened && (
+        <button
+          type="button"
+          className="stream-tool-result-reopen"
+          onClick={event => {
+            event.stopPropagation();
+            setPreviewReopened(true);
+          }}
+        >
+          <Eye size={12} aria-hidden="true" />
+          {t("tools.resultPreview")}
+        </button>
+      )}
+    </>
   );
 }
 

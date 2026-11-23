@@ -40,10 +40,29 @@ export function FileEditsChip({ edits }: { edits: FileEditsPresentation }) {
 }
 
 // Per-file collapsible diff sections, rendered inside the expanded tool card.
+// The panel itself is the single framed box; file rows stay plain text lines
+// and only an expanded diff renders as an inner box. The head bar sums every
+// file's +/- counts so the total change reads without expanding anything.
 export function FileEditsPanel({ edits }: { edits: ReadonlyArray<TurnEditEntry> }) {
   const wrap = useBetaPreference("fileEditsWrap");
+  const totals = useMemo(
+    () => ({
+      added: edits.reduce((sum, edit) => sum + edit.added_lines, 0),
+      removed: edits.reduce((sum, edit) => sum + edit.removed_lines, 0),
+    }),
+    [edits],
+  );
   return (
     <div className={`file-edits-panel${wrap ? " edits-wrap" : ""}`} aria-label={t("tools.fileEditsAria")}>
+      <div className="file-edits-panel-head">
+        <span>{t("tools.fileEditsPanelCount", { count: edits.length })}</span>
+        {(totals.added > 0 || totals.removed > 0) && (
+          <span className="file-edits-panel-totals">
+            <span className="file-edit-additions">+{totals.added}</span>
+            <span className="file-edit-deletions">&minus;{totals.removed}</span>
+          </span>
+        )}
+      </div>
       {edits.map((edit, index) => (
         <FileEditSection key={`${edit.path}:${index}`} edit={edit} />
       ))}

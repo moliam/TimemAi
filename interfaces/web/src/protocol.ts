@@ -446,6 +446,10 @@ export type Activity = {
   elapsed_ms?: number;
   /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
   tool_output_bytes?: number;
+  /** Bounded tail of the tool's own result for the read-only preview box.
+   * Live while the action runs (core.action "output" events, capped per
+   * action); the finish event carries the final tail. Transient UI state. */
+  result_preview?: string;
   timeout_ms?: number;
   loop_timeout_ms?: number;
   interval_ms?: number;

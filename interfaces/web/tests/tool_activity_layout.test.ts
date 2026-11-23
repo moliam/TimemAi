@@ -96,6 +96,15 @@ describe("stream tool status continuity", () => {
     expect(row).not.toContain("summarized");
     expect(styles).toContain(".stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }");
     expect(styles).not.toContain(".stream-tool-run { position: relative; }");
+    // 用户反馈：折叠态的 +tools xN 徽章不占独立行——悬浮到最近文本行尾
+    //（右缘上移一个自身高度），按钮保持可点击；仅折叠态生效。
+    expect(styles).toContain(
+      ".stream-tool-run.merged { position: relative; height: 0; margin: 0; }",
+    );
+    expect(styles).toMatch(
+      /\.stream-tool-run\.merged \.stream-tool-run-toggle \{[^}]*position: absolute;[^}]*transform: translateY\(-100%\);/s,
+    );
+    expect(source).toContain('className={`stream-tool-run${merged ? " merged" : ""}`}');
     expect(styles).not.toContain("stream-tool-row::before");
     expect(styles).toContain(".stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }");
   });

@@ -693,6 +693,10 @@ impl ShellJobManager {
         };
         let started = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
+        // Live preview streaming starts only after the warmup interval, so
+        // commands that finish quickly never flash a transient preview box.
+        let mut preview_tick = Instant::now();
+        let mut preview_streaming = true;
         loop {
             if runtime.should_cancel() {
                 match cancel_or_take_direct_result(&job) {
@@ -752,6 +756,15 @@ impl ShellJobManager {
                 self.remove_job(job.pid);
                 job.join_supervisor();
                 return finished_output(clean, tail_out, &finished);
+            }
+            if preview_streaming && preview_tick.elapsed() >= crate::OUTPUT_PREVIEW_MIN_INTERVAL {
+                preview_tick = Instant::now();
+                if let Some(preview) = running_job_output_preview(&job) {
+                    if !runtime.report_running_output(&preview) {
+                        // Runtime went silent (cap exhausted): stop snapshotting.
+                        preview_streaming = false;
+                    }
+                }
             }
             wait_for_job_change(&job, Duration::from_millis(20));
         }
@@ -1125,6 +1138,35 @@ fn shell_output_snapshot(output: &SharedShellOutput) -> ShellOutputSnapshot {
             text: String::new(),
             truncation: None,
         })
+}
+
+/// Bounded live tail of a running job's captured output, for interface
+/// projections only (read-only preview boxes). Combines stdout and stderr in
+/// display order; None while nothing has been produced yet.
+fn running_job_output_preview(job: &ManagedShellJob) -> Option<String> {
+    let stdout = shell_output_snapshot(&job.stdout).text;
+    let stderr = shell_output_snapshot(&job.stderr).text;
+    let stdout = stdout.trim_end();
+    let stderr = stderr.trim_end();
+    let mut combined = String::new();
+    if !stdout.is_empty() {
+        combined.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(stderr);
+    }
+    if combined.is_empty() {
+        None
+    } else {
+        Some(crate::retain_tail_preview(
+            &combined,
+            crate::TOOL_OUTPUT_PREVIEW_LINES,
+            crate::TOOL_OUTPUT_PREVIEW_BYTES,
+        ))
+    }
 }
 
 fn supervise_shell_job(
@@ -2399,6 +2441,10 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
     let mut last_stderr = String::new();
     let mut last_signal = None;
     let mut last_error = None;
+    // Live preview streaming starts only after the warmup interval, so
+    // quick polls never flash a transient preview box.
+    let mut preview_tick = Instant::now();
+    let mut preview_streaming = true;
 
     loop {
         if runtime.should_cancel() {
@@ -2440,6 +2486,32 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
         last_stderr = result.stderr;
         last_output = result.output;
         last_error = result.error;
+        if preview_streaming && preview_tick.elapsed() >= crate::OUTPUT_PREVIEW_MIN_INTERVAL {
+            preview_tick = Instant::now();
+            let stdout = last_stdout.trim_end();
+            let stderr = last_stderr.trim_end();
+            let mut combined = String::new();
+            if !stdout.is_empty() {
+                combined.push_str(stdout);
+            }
+            if !stderr.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(stderr);
+            }
+            if !combined.is_empty() {
+                let preview = crate::retain_tail_preview(
+                    &combined,
+                    crate::TOOL_OUTPUT_PREVIEW_LINES,
+                    crate::TOOL_OUTPUT_PREVIEW_BYTES,
+                );
+                if !runtime.report_running_output(&preview) {
+                    // Runtime went silent (cap exhausted): stop snapshotting.
+                    preview_streaming = false;
+                }
+            }
+        }
 
         if let Some(status) = last_status {
             if status == 0 {
