@@ -142,6 +142,9 @@ describe("result preview surfaces and contracts", () => {
     expect(main).toContain('role="log"');
     expect(main).toContain("resultTailLines");
     expect(main).toContain("redactSensitiveDisplayText(line) || line");
+    // 限高后内部滚动要贴住最新输出；用户自己往上翻过就不再抢滚动。
+    expect(main).toContain("node.scrollTop = node.scrollHeight;");
+    expect(main).toContain("followsTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 8;");
   });
 
   it("styles the transient read-only window in both themes", () => {
@@ -162,6 +165,9 @@ describe("result preview surfaces and contracts", () => {
     const body = styles.slice(bodyStart, styles.indexOf("}", bodyStart) + 1);
     expect(body).not.toContain("border-left");
     expect(body).toContain("border: 0;");
+    // 用户反馈：预览限高 4 行（内部滚动），收纳时撤掉的位移才足够小。
+    expect(body).toContain("max-height: calc(4 * 1.55em + 14px);");
+    expect(body).toContain("overflow: auto;");
     expect(styles).not.toContain(".stream-tool-result-preview.running .stream-tool-result-preview-body");
     expect(styles).toContain("@keyframes stream-result-pulse");
     for (const selector of [

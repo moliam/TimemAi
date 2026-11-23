@@ -7498,6 +7498,8 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   cursor: pointer;
 }
 .stream-tool-result-preview-collapse:hover { color: #c9d6de; }
+/* 用户反馈：输出预览限高 4 行（内部滚动），收纳时撤掉的位移因此从 240px 级
+   降到 ~70px，收起的上下跳不再明显；框里的 16 行尾巴仍可内部滚动查看或整段复制。 */
 .stream-tool-result-preview-body {
   margin: 0;
   padding: 6px 10px 8px;
@@ -7506,7 +7508,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   color: #9fb3bd;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  max-height: 240px;
+  max-height: calc(4 * 1.55em + 14px);
   overflow: auto;
   user-select: text;
 }

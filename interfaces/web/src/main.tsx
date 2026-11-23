@@ -13644,6 +13644,14 @@ const StreamToolResultPreview = memo(function StreamToolResultPreview({
     copied: t("tools.resultPreviewCopied"),
     failed: t("tools.copyFailed"),
   });
+  // 限高 4 行后溢出部分走内部滚动：预览要贴住最新输出，而不是停在最早几行；
+  // 用户自己往上翻过就不再抢滚动。
+  const bodyRef = useRef<HTMLPreElement | null>(null);
+  const followsTail = useRef(true);
+  useLayoutEffect(() => {
+    const node = bodyRef.current;
+    if (node && followsTail.current) node.scrollTop = node.scrollHeight;
+  }, [previewText]);
   if (!lines.length) return null;
   return (
     <div
@@ -13677,7 +13685,14 @@ const StreamToolResultPreview = memo(function StreamToolResultPreview({
           {t("tools.resultPreviewCollapse")}
         </button>
       </div>
-      <pre className="stream-tool-result-preview-body">{previewText}</pre>
+      <pre
+        className="stream-tool-result-preview-body"
+        ref={bodyRef}
+        onScroll={event => {
+          const node = event.currentTarget;
+          followsTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 8;
+        }}
+      >{previewText}</pre>
     </div>
   );
 });

@@ -1495,6 +1495,11 @@ async function main() {
         for (const mode of ["following", "reading"]) {
           await setRound(finishedA, "");
           await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-result-preview-body')`), `${mode}: finished preview missing`);
+          // 限高后靠内部滚动：预览要停在最新几行，而不是最早几行。
+          const tail = await browser.evaluate(`(() => { const b = document.querySelector('.stream-tool-result-preview-body');
+            return {scrollTop: Math.round(b.scrollTop), gap: Math.round(b.scrollHeight - b.scrollTop - b.clientHeight)}; })()`);
+          assert(tail.scrollTop > 0 && tail.gap <= 2,
+            `${mode}: capped preview must stick to the newest line ${JSON.stringify(tail)}`);
           await browser.evaluate(`(() => { const v = document.querySelector('.chat-scroll');
             v.scrollTop = ${mode === "following" ? "v.scrollHeight" : "Math.max(0, v.scrollHeight - v.clientHeight - 220)"};
             v.dispatchEvent(new Event('scroll')); })()`);
@@ -1512,9 +1517,15 @@ async function main() {
             `${mode}: handoff did not absorb the finished preview ${JSON.stringify(probes)}`);
           assert(probes[`${mode}Counts`].runHeight < 40,
             `${mode}: absorbed run must stay one line tall ${JSON.stringify(probes)}`);
-          assert(probes[`${mode}Before`].previewHeight > 200,
-            `${mode}: fixture must start with an expanded preview ${JSON.stringify(probes)}`);
+          // 限高 4 行：预览块只剩 head + 4 行（约 100px），不再是 240px 级的一大块。
+          const before = probes[`${mode}Before`];
+          assert(before.previewHeight > 70 && before.previewHeight < 140,
+            `${mode}: result preview must stay about four lines ${JSON.stringify(probes)}`);
+          assert(before.runHeight - probes[`${mode}Counts`].runHeight <= 140,
+            `${mode}: handoff must not move more than a few lines ${JSON.stringify(probes)}`);
         }
+        // 量化的证据：预览限高后，交接只撤掉几行，而不是整块 240px。
+        console.log("PASS Chrome tool handoff sizing", JSON.stringify(probes));
         await browser.call("Emulation.clearDeviceMetricsOverride");
       }
       console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files, frameless diff card, handoff absorbs one row");
