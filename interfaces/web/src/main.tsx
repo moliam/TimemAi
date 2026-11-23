@@ -9707,31 +9707,31 @@ const MemoTooltip = memo(function MemoTooltip({
   onPointerEnter: () => void;
   onPointerLeave: () => void;
 }) {
-  const [placement, setPlacement] = useState<{ left: number; top: number } | null>(
-    null,
-  );
+  // 气泡固定贴着触发它的 memo 图标：优先向上展开（盖在对话区上方，绝不压在输入框
+  // 上），上方空间不够时翻到下方；左右对齐图标的左缘并按视口夹取，整体永远留在
+  // WebUI 视口内。高度按可用空间收缩，正文自己滚动。
+  const [placement, setPlacement] = useState<
+    | { left: number; above: boolean; offset: number; maxHeight: number }
+    | null
+  >(null);
   useEffect(() => {
     const GAP = 8;
     const MAX_WIDTH = 320;
+    const MIN_HEIGHT = 120;
+    const MIN_SPACE_ABOVE = 160;
     const update = () => {
       const rect = anchor.getBoundingClientRect();
       const viewportWidth = window.innerWidth;
-      const leftSpace = rect.left - GAP;
-      let left: number;
-      if (leftSpace >= MAX_WIDTH) {
-        // Open to the left: right edge of the tooltip at GAP from the button.
-        left = Math.max(GAP, rect.left - GAP - MAX_WIDTH);
-      } else if (viewportWidth - rect.right - GAP >= 120) {
-        // Not enough room on the left (sidebar): open to the right.
-        left = Math.min(rect.right + GAP, viewportWidth - MAX_WIDTH - GAP);
-      } else {
-        // Narrow viewport: clamp inside the viewport, still preferring left.
-        const width = Math.max(160, Math.min(MAX_WIDTH, viewportWidth - 2 * GAP));
-        left = Math.max(GAP, Math.min(rect.left - GAP - width, viewportWidth - GAP - width));
-      }
-      // Vertical: center on the button, clamped into the viewport.
-      const top = Math.max(GAP, Math.min(rect.top + rect.height / 2, window.innerHeight - GAP));
-      setPlacement({ left, top });
+      const viewportHeight = window.innerHeight;
+      const width = Math.max(180, Math.min(MAX_WIDTH, viewportWidth - 2 * GAP));
+      const left = Math.max(GAP, Math.min(rect.left, viewportWidth - GAP - width));
+      const spaceAbove = rect.top - GAP;
+      const spaceBelow = viewportHeight - rect.bottom - GAP;
+      const above = spaceAbove >= MIN_SPACE_ABOVE || spaceAbove >= spaceBelow;
+      const maxHeight = Math.max(MIN_HEIGHT, above ? spaceAbove : spaceBelow);
+      // `offset` is the distance from the viewport edge the bubble anchors to.
+      const offset = above ? viewportHeight - rect.top + GAP : rect.bottom + GAP;
+      setPlacement({ left, above, offset, maxHeight });
     };
     update();
     window.addEventListener("resize", update);
@@ -9743,14 +9743,21 @@ const MemoTooltip = memo(function MemoTooltip({
   }, [anchor]);
   return createPortal(
     <span
-      className="thread-working-memo-tooltip is-portal"
+      className={`thread-working-memo-tooltip is-portal${placement?.above ? " is-above" : " is-below"}${visible ? " is-visible" : ""}`}
       role="tooltip"
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
       style={
         placement && visible
-          ? { left: `${placement.left}px`, top: `${placement.top}px`, visibility: "visible" }
-          : { visibility: "hidden" }
+          ? {
+              left: `${placement.left}px`,
+              ...(placement.above
+                ? { bottom: `${placement.offset}px` }
+                : { top: `${placement.offset}px` }),
+              maxHeight: `${placement.maxHeight}px`,
+              visibility: "visible" as const,
+            }
+          : { visibility: "hidden" as const }
       }
     >
       <span className="thread-memo-caption-row">

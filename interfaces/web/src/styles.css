@@ -4113,28 +4113,45 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .thread-working-memo-tooltip.is-portal {
   position: fixed;
   z-index: 80;
-  transform: translateY(-50%);
+  transform: translateY(6px) scale(.985);
   display: grid;
-  gap: 3px;
+  gap: 6px;
   width: max-content;
   max-width: min(320px, calc(100vw - 16px));
-  /* 长 memo 也不能超出视口：内部滚动，气泡整体始终留在屏幕内。 */
+  /* 气泡整体（面板 + 标题行）留在视口内，正文自己滚动。 */
   max-height: min(48dvh, 320px);
-  overflow-y: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
-  padding: 8px 10px;
-  border: 1px solid #33473f99;
-  border-radius: 8px;
-  background: #1c2220f2;
+  padding: 9px 11px 10px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, #2b3a35);
+  border-radius: 11px;
+  background: linear-gradient(180deg, #212b28f7, #161d1bf7);
   color: #cfd6db;
   font-size: 11px;
   line-height: 1.5;
   text-align: left;
-  box-shadow: 0 2px 10px #00000052;
+  /* 卡片质感：顶部内高光 + 两层落地阴影，避免单层阴影的“贴纸”感。 */
+  box-shadow:
+    inset 0 1px 0 #ffffff12,
+    0 1px 2px #00000059,
+    0 14px 32px -10px #000000a6;
+  backdrop-filter: blur(18px) saturate(122%);
+  opacity: 0;
+  transition: opacity .14s ease, transform .14s ease;
   /* Interactive tooltip: it hosts the memo copy button, so it must receive
      the pointer (visibility:hidden keeps it hit-transparent while pinned
      but not shown). */
   pointer-events: auto;
+}
+.thread-working-memo-tooltip.is-portal.is-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+/* 向上展开时从图标上方“升起”，向下展开时从图标下方落下。 */
+.thread-working-memo-tooltip.is-portal.is-above:not(.is-visible) { transform: translateY(6px) scale(.985); }
+.thread-working-memo-tooltip.is-portal.is-below:not(.is-visible) { transform: translateY(-6px) scale(.985); }
+@media (prefers-reduced-motion: reduce) {
+  .thread-working-memo-tooltip.is-portal { transition: none; }
 }
 :root[data-theme="light"] .thread-working-memo-tooltip {
   background: #ffffffef;
@@ -5961,15 +5978,30 @@ body.workspace-modal-open .app-shell { user-select: none; }
    气泡改走 portal（position: fixed，见 .thread-working-memo-tooltip.is-portal），
    这里不再有绝对定位的内联气泡。 */
 .thread-memo-caption {
-  display: block;
-  color: #8db6d1;
-  font-weight: 600;
-  margin-bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #93c8bc;
+  font-weight: 650;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin-bottom: 0;
 }
 .thread-memo-text {
   display: block;
+  max-height: min(34dvh, 208px);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  font-size: 11.5px;
+  line-height: 1.62;
+  color: #c9d5d8;
   word-break: break-word;
   user-select: text;
+  /* 长 memo 滚到底时保留一点呼吸位，最后一行不贴边。 */
+  padding-right: 2px;
 }
 :root[data-theme="light"] .thread-memo-caption { color: #1f6f5f; }
 
@@ -6672,9 +6704,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .endpoint-context-window-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .endpoint-context-window-sum { color: #6f8491; font-size: 10px; white-space: nowrap; }
 .endpoint-window-badge { display: inline-grid; place-items: center; margin-left: 5px; color: #e4bd76; cursor: help; }
-.thread-memo-caption-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.thread-memo-copy { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #8fa3ad; cursor: pointer; }
-.thread-memo-copy:hover { border-color: #33505b; background: #18333a; color: #d5e5ea; }
+.thread-memo-caption-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 5px; border-bottom: 1px solid color-mix(in srgb, currentColor 13%, transparent); }
+.thread-memo-copy { flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin: -3px -3px -3px 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #8fa3ad; cursor: pointer; transition: background .14s, color .14s, border-color .14s; }
+.thread-memo-copy:hover { border-color: color-mix(in srgb, currentColor 24%, transparent); background: color-mix(in srgb, currentColor 12%, transparent); color: #d5e5ea; }
 .thread-memo-copy.copy-success { color: #76cfb8; }
 .thread-memo-copy.copy-failed { color: #e6aa87; }
 ::root[data-theme="light"] .endpoint-context-window-head > span { color: #526a75; }

@@ -89,5 +89,11 @@ describe("unified endpoint context window UI", () => {
     expect(styles).not.toContain(".thread-memo-tooltip {");
     expect(main).toContain("ref={setMemoIndicatorEl}");
     expect(main).toContain("anchor={memoIndicatorEl}");
+
+    // 气泡贴着图标：优先向上展开，空间不足才翻到下方，左右按视口夹取。
+    expect(main).toContain("const above = spaceAbove >= MIN_SPACE_ABOVE || spaceAbove >= spaceBelow;");
+    expect(main).toContain("{ bottom: `${placement.offset}px` }");
+    expect(main).toContain("maxHeight: `${placement.maxHeight}px`");
+    expect(styles).toContain(".thread-working-memo-tooltip.is-portal.is-above:not(.is-visible)");
   });
 });
