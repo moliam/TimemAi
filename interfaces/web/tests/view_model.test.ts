@@ -3279,6 +3279,80 @@ describe("web topic view model", () => {
     expect(activeModelRetryStatus(changingFailure)?.kind).toBe("retrying");
   });
 
+  it("clears the retry pill as soon as the model returns normally", () => {
+    // 用户反馈：模型正常返回后，服务异常胶囊还挂着不消失。旧逻辑只认
+    // model_request / model_response 两类活动，而压缩抑制轮不发光
+    // model_response，流式内容也先于它到达——胶囊一直挂到下一轮请求。
+    const retryEvent = {
+      event_id: "retry",
+      source: "worker_activity" as const,
+      created_at_ms: 2,
+      payload: {
+        kind: "model_retry",
+        attempt: 2,
+        max_attempts: 100,
+        delay_ms: 4_000,
+        error: "model_http_503: upstream unavailable",
+      },
+    };
+    const workerEvent = (
+      event_id: string,
+      payload: Record<string, unknown>,
+      created_at_ms = 3,
+    ) => ({ event_id, source: "worker_activity" as const, created_at_ms, payload });
+    const coreEvent = (
+      event_id: string,
+      payload: Record<string, unknown>,
+      created_at_ms = 3,
+    ) => ({ event_id, source: "core_topic" as const, created_at_ms, payload });
+
+    // 场景一：重试成功进入压缩抑制轮——没有 model_response 活动，只有
+    // 仅在 Ok 路径发射的 model_request_completed。
+    const suppressed = turn("suppressed", "working");
+    suppressed.events = [
+      retryEvent,
+      workerEvent("completed", {
+        kind: "model_request_completed",
+        round: 3,
+        latency_ms: 5_100,
+        ttft_ms: 800,
+      }),
+    ];
+    expect(activeModelRetryStatus(suppressed)).toBeNull();
+
+    // 场景二：流式返回——内容（core.model.response 主题）先于解析响应到达。
+    const streaming = turn("streaming", "working");
+    streaming.events = [
+      retryEvent,
+      coreEvent(
+        "response-topic",
+        topic("core.model.response", {
+          status: "intermediate",
+          free_talk: "正在继续输出",
+        }),
+        4,
+      ),
+    ];
+    expect(activeModelRetryStatus(streaming)).toBeNull();
+
+    // 场景三：新一轮请求开始照旧清除（原语义回归保护）。
+    const nextRound = turn("next-round", "working");
+    nextRound.events = [retryEvent, workerEvent("req", { kind: "model_request", round: 4 })];
+    expect(activeModelRetryStatus(nextRound)).toBeNull();
+
+    // 修复不回退：协议修复（retrying）在等待其请求期间仍保持显示。
+    const repairKept = turn("repair-kept", "working");
+    repairKept.events = [
+      coreEvent(
+        "repair",
+        topic("core.model.repair", { attempt: 2, max_attempts: 20, issue: "missing_response_root" }),
+        1,
+      ),
+      workerEvent("req", { kind: "model_request", round: 2 }, 2),
+    ];
+    expect(activeModelRetryStatus(repairKept)).toMatchObject({ kind: "retrying" });
+  });
+
   it("labels retryable model failures by their actual cause", () => {
     const statusFor = (error: string) => {
       const active = turn(`retry-${error}`, "working");

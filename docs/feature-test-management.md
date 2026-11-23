@@ -1205,6 +1205,13 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 可读性与色弱：白字对比度 6.2:1（新建）/ 5.1:1（修改）/ 8.3:1（删除），均高于 WCAG AA 4.5:1；Machado 2009 绿盲模拟后 Lab ΔE——新建 vs 修改 56、新建 vs 删除 77、修改 vs 删除 23，色相与明度双重分离，不依赖红绿单通道。
 - 测试看护：`file_edits.test.ts` 的胶囊契约改为断言新的一组实底色值（暗/明各三色）且单 op 不覆盖文字色。验证：`pnpm exec vitest run tests/file_edits.test.ts` 30 过。
 
+## 2026-11-23 模型正常返回后，重试错误胶囊立即消失
+
+- 用户反馈：有时模型已经正常返回了，「模型服务异常」的小胶囊还挂着，不及时消失。
+- 根因：胶囊显隐由 `activeModelRetryStatus` 按轮内事件推导，旧逻辑只认 `model_request` / `model_response` 两类 worker 活动作为清除信号。而（1）压缩轮的成功响应被 `should_suppress_model_response` 抑制，根本不发光 `model_response` 活动；（2）流式返回时内容（`core.model.response` 主题）早在解析响应之前就到达，用户已经「看见正常返回」了，胶囊却要等到整轮解析完成才清。两类间隙都会让胶囊挂到下一轮请求甚至轮末。
+- 修法：把两个「成功」信号纳入清除逻辑——`model_request_completed`（只在请求 Ok 路径发射，带 ttft，是重试等待结束的最早信号）与 `core.model.response` 主题（内容/答案到达即模型正常返回）。`model_request` 清除、协议修复（retrying）在其请求等待期间保持显示的原语义不变。
+- 测试看护：`view_model.test.ts` 新增四场景——压缩抑制轮经 `model_request_completed` 清除、流式主题先到即清除、新一轮请求照旧清除、repair 等待期间保持显示不回退。验证：view_model 205 过，web vitest 全量 1070、tsc 过；dist 重建（提交源码已引用未跟踪的 selection_gesture 模块，纯 HEAD 树无法通过 tsc，构建树按最小一致集包含该文件）。
+
 ## 2026-11-23 轮次文件总结改为「维护表」净结果，不再出现新建后删除的幻影
 
 - 用户反馈：用临时 worktree 构建 dist 后清理，轮次 diff 总结里却留下 `/tmp/timem-pill/...` 的「新建」——文件在轮内建了又删，前后都不存在，总结应反映「任务开始前 vs 结束时」的净状态，什么都不该显示。

@@ -2592,12 +2592,20 @@ export function activeModelRetryStatus(
   for (const event of turn.events) {
     if (event.source === "worker_activity") {
       const kind = event.payload.kind;
-      if (kind === "model_request" || kind === "model_response") {
+      if (kind === "model_response" || kind === "model_request_completed") {
+        // `model_request_completed` 只在请求成功（Ok）路径发射（带 ttft），
+        // 是「模型已正常返回」的最早信号；解析响应到达同理。两者都说明重试
+        // 等待已结束，必须立刻清掉胶囊——否则被压缩抑制的响应轮（不发光
+        // `model_response` 活动）会让错误胶囊一直挂到下一轮请求。
+        status = null;
+        continue;
+      }
+      if (kind === "model_request") {
         // A protocol-repair retry IS the following model request: keep the
         // repair status visible while that (often long) wait runs, and clear
         // it only when a response or a newer failure supersedes it. Transport
         // `model_retry` status still clears on the next request as before.
-        if (kind === "model_response" || status?.kind !== "retrying") {
+        if (status?.kind !== "retrying") {
           status = null;
         }
         continue;
@@ -2636,6 +2644,12 @@ export function activeModelRetryStatus(
 
     if (event.source !== "core_topic") continue;
     const topic = event.payload as unknown as CoreTopicEvent;
+    if (topic.topic?.name === "core.model.response") {
+      // 流式内容/最终答案开始到达：即使该轮解析响应被压缩抑制（不发光
+      // model_response 活动），这也是「模型已正常返回」的权威信号。
+      status = null;
+      continue;
+    }
     if (topic.topic?.name !== "core.model.repair") continue;
 
     const progress = retryProgress(topic.payload);
