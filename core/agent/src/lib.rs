@@ -56,6 +56,7 @@ pub mod memmgr;
 pub mod memo;
 pub mod model_api;
 pub mod model_catalog;
+pub mod model_error;
 mod model_payload;
 pub mod model_requirements;
 pub mod model_service_config;

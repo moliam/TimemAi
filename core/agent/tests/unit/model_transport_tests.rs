@@ -716,7 +716,7 @@ fn unrelated_client_error_does_not_retry_without_cache_control() {
         &audit_file,
     )
     .unwrap_err();
-    assert!(error.starts_with("model_http_401:"));
+    assert!(error.starts_with("model_http_401[authentication]:"));
 
     let request = server.join().unwrap();
     assert!(request.contains(r#""cache_control""#));

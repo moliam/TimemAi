@@ -37,6 +37,39 @@ Core 以 Host 稳定 endpoint ID、API 协议、去除凭据/查询/片段并规
 
 有序链表达用户优先级。运行期限流只把当前选择降级到链中的下一个可用项，不删除链项，因此高优恢复后仍可回切。每次可用性探测结果都在落地后立即重选受影响 Session：高优恢复即切回，不等待同一批中更慢的探测；传输类探测错误不改变原有可用性判断。自动扫描对持续限流超过阈值的接入点复探，恢复后同样按链回切；探测返回传输类错误时保持原判断，并按同一有界节奏复探，不在每次扫描时重试。刷新失败不得静默丢弃，需保留已脱敏诊断。
 
+## 错误分类与规范错误头
+
+模型请求失败按「HTTP 状态 + 供应商官方业务码」分类，不读供应商消息文本推断类别。分类器在
+`core/agent/src/model_error.rs`，Web 以 `interfaces/web/src/model_error.ts` 镜像同一张表。
+
+规范错误头是 Core 产出的唯一格式：
+
+- `model_http_<status>[<class>]`：只有状态可供分类；
+- `model_http_<status>[<class>,<provider>/<code>]`：响应体带已声明供应商的业务码；
+- 尾部 `: <reason>` 保留已脱敏原文，仅用于人读，不参与判定。
+
+`class` 取 authentication / permission / billing / subscription / quota / rate_limited /
+overloaded / timeout / server_error / transport / invalid_request / model_not_found /
+input_too_large / content_policy / unknown。类语义固化在 `ModelErrorClass`：`retryable` =
+{rate_limited, quota, overloaded, timeout, server_error, transport}；`endpoint_unavailable` =
+{authentication, billing, subscription}，permission 属于密钥/模型权限配置错误，不触发换端点；
+`quota_window` = {rate_limited, quota}，换端点前先累积 strikes；`terminal` = {authentication,
+permission, billing, subscription, invalid_request, model_not_found, input_too_large,
+content_policy}，不重试也不换端点。
+
+供应商身份只来自接入点显式 `requirements.provider`，缺失时用 `catalog_id` 反查内置目录，
+不按 URL 或模型名猜测。智谱按业务码表（用户区 1000-1321），OpenAI 按符号码表
+（`invalid_api_key`、`insufficient_quota` 归 quota 而非 billing、`rate_limit_exceeded`、
+`context_length_exceeded` 等），DeepSeek 与 Kimi 只发布 HTTP 状态，走状态表（400/422 请求非法、
+401 认证、402 欠费、403 权限、404 模型不存在、408/425/504 超时、413 输入超限、429 限流、
+500/502 服务错误、503 过载）。未声明供应商或未收录码只按状态分类，业务码仍保留在头里供诊断。
+Responses 流失败沿用 `model_responses_stream_failed: class=<class> event_type=... code=...
+message=...`，并从中还原同一套分类。
+
+消费点：Core 的 `retry_policy` 读取分类决定重试、换端点与限流窗口；Web 的
+`model_service_ui`/`view_model` 按分类给出「欠费 / 套餐 / 额度 / 权限 / 内容策略 / 模型不存在 /
+请求被拒 / 上下文超限」等文案，旧的无分类错误串按状态归类，仍兼容只发消息的供应商。
+
 ## 兼容与验证
 
 旧配置缺失新字段仍可读取；未知旧模板 ID 降级自定义；加载不改写历史。兼容协议路径与新需求路径显式区分。测试覆盖纯策略、描述加载、payload 映射/篡改拒绝、旧配置恢复、真实本地 HTTP 工具往返、Web 编辑与隔离宿主浏览器。不使用付费远端 API，不重启开发实例。

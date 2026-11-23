@@ -1533,7 +1533,11 @@ pub fn interpret_model_http_response(
         })
     });
     let result = if !(200..300).contains(&status) {
-        Err(model_http_error_message(status, &raw_json))
+        Err(model_http_error_message_for(
+            status,
+            model_error_provider(config).as_deref(),
+            &raw_json,
+        ))
     } else if !parsed_json {
         Ok(LlmResponse {
             tool_calls: Vec::new(),
@@ -1581,7 +1585,18 @@ fn openai_responses_stream_failure_summary(event: &Value) -> Value {
 }
 
 fn openai_responses_stream_failure_message(failure: &Value) -> String {
-    let mut details = Vec::new();
+    // Classify the documented stream failure code once; consumers read
+    // `class=` instead of matching the upstream message text.
+    let class = ["code", "type"]
+        .iter()
+        .find_map(|field| {
+            failure
+                .get(*field)
+                .and_then(Value::as_str)
+                .and_then(|code| crate::model_error::classify_stream_code(Some(code)))
+        })
+        .unwrap_or(crate::model_error::ModelErrorClass::Unknown);
+    let mut details = vec![format!("class={}", class.token())];
     for field in [
         "event_type",
         "response_id",
@@ -1959,6 +1974,13 @@ fn interpret_openai_compatible_sse(
 }
 
 pub fn model_http_error_message(status: u16, body: &Value) -> String {
+    model_http_error_message_for(status, None, body)
+}
+
+/// Canonical HTTP error string: `model_http_<status>[<class>]` plus
+/// `,<provider>/<code>` when the body carries a documented business code.
+/// Consumers read the class token instead of matching provider message text.
+pub fn model_http_error_message_for(status: u16, provider: Option<&str>, body: &Value) -> String {
     let reason = model_error_reason(body)
         .map(sanitize_model_error_reason)
         .filter(|text| !text.trim().is_empty());
@@ -1971,10 +1993,54 @@ pub fn model_http_error_message(status: u16, body: &Value) -> String {
             None => "model_network_error".to_string(),
         };
     }
-    match reason {
-        Some(reason) => format!("model_http_{status}: {reason}"),
-        None => format!("model_http_{status}"),
+    let code = provider_error_code(body);
+    let class = crate::model_error::classify_http(status, provider, code.as_deref());
+    crate::model_error::format_http_error(
+        status,
+        class,
+        provider,
+        code.as_deref(),
+        reason.as_deref(),
+    )
+}
+
+/// Provider identity for error-code interpretation. Explicit endpoint
+/// requirements win; otherwise the catalog id resolves through the admitted
+/// catalog. Unknown providers keep the provider-neutral status classes.
+fn model_error_provider(config: &ModelServiceConfig) -> Option<String> {
+    if let Some(provider) = config.openai_compatible.requirements.provider.as_deref() {
+        let provider = provider.trim();
+        if !provider.is_empty() {
+            return Some(provider.to_ascii_lowercase());
+        }
     }
+    let catalog_id = config.openai_compatible.catalog_id.as_deref()?;
+    crate::model_catalog::ensure_loaded().ok()?;
+    crate::model_catalog::models()
+        .iter()
+        .find(|model| model.id == catalog_id)
+        .map(|model| model.provider.clone())
+}
+
+/// Business error code carried by the provider body (`{"error":{"code":...}}`).
+/// Only short machine tokens are accepted; message-like strings are ignored so
+/// a provider cannot smuggle prose into the code slot.
+fn provider_error_code(body: &Value) -> Option<String> {
+    for pointer in ["/error/code", "/code"] {
+        let Some(value) = body.pointer(pointer) else {
+            continue;
+        };
+        let text = match value {
+            Value::String(text) => text.clone(),
+            Value::Number(number) => number.to_string(),
+            _ => continue,
+        };
+        let text = text.trim();
+        if !text.is_empty() && text.len() <= 40 && !text.contains(char::is_whitespace) {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 fn model_error_reason(body: &Value) -> Option<String> {

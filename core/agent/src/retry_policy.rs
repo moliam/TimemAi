@@ -139,40 +139,19 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     {
         return true;
     }
-    if let Some(details) = lower.strip_prefix("model_responses_stream_failed:") {
-        return [
-            "server_is_overloaded",
-            "server_error",
-            "internal_error",
-            "service_unavailable",
-            "temporarily_unavailable",
-            "rate_limit_exceeded",
-            "rate_limited",
-            "timeout",
-            "overloaded_error",
-            "api_error",
-        ]
-        .iter()
-        .any(|signal| details.contains(signal));
-    }
-    // A stream failure without extractable details, or a stream that ended
-    // without its terminal message, means the provider broke the stream:
-    // server-side, transient, and exactly what a fresh attempt is for.
-    if lower == "model_responses_stream_failed"
+    // Past the transport prefix checks the failure carries a provider status
+    // and (when documented) a business code. Retry decisions read the class
+    // written into the canonical header, never the provider message text.
+    let facts = crate::model_error::parse_model_error(error);
+    if lower.starts_with("model_responses_stream_failed")
         || lower == "model_responses_stream_missing_terminal"
     {
-        return true;
+        // A stream that failed, or ended without its terminal event, is a
+        // provider-side break: transient unless the classified cause is
+        // terminal (bad request, credentials, content policy, oversized input).
+        return !facts.class.terminal();
     }
-    if let Some(status_text) = lower.strip_prefix("model_http_") {
-        let status: u16 = status_text
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
-        return matches!(status, 408 | 409 | 425 | 429) || status >= 500;
-    }
-    false
+    facts.class.retryable()
 }
 
 /// Deterministic "this endpoint is currently unusable" failures: a missing
@@ -184,8 +163,9 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
 pub fn is_endpoint_unavailable_error(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.starts_with("missing_api_key")
-        || lower.starts_with("model_http_401")
-        || lower.starts_with("model_http_402")
+        || crate::model_error::parse_model_error(error)
+            .class
+            .endpoint_unavailable()
 }
 
 fn is_legacy_response_header_transport_error(lower_error: &str) -> bool {
@@ -333,6 +313,14 @@ pub fn is_invalid_native_tool_call_error(error: &str) -> bool {
 }
 
 pub fn is_model_input_too_large_error(error: &str) -> bool {
+    if crate::model_error::parse_model_error(error).class
+        == crate::model_error::ModelErrorClass::InputTooLarge
+    {
+        return true;
+    }
+    // Providers that publish no business codes (or a localized message only)
+    // still need the overflow path; this text fallback is the last resort and
+    // only runs when the class said nothing.
     let lower = error.to_ascii_lowercase();
     let input_subject =
         lower.contains("input") || lower.contains("prompt") || lower.contains("context");
@@ -363,16 +351,12 @@ pub fn is_model_input_too_large_error(error: &str) -> bool {
 /// trigger for endpoint-chain failover: the endpoint's quota is exhausted and
 /// in-place backoff retries would only burn wall-clock time.
 pub fn is_model_rate_limited_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    if lower.starts_with("model_http_429:") {
-        return true;
-    }
-    if let Some(details) = lower.strip_prefix("model_responses_stream_failed:") {
-        return ["rate_limit_exceeded", "rate_limited", "quota"]
-            .iter()
-            .any(|signal| details.contains(signal));
-    }
-    false
+    // Quota-window failures: rate limits and exhausted usage windows. Billing
+    // arrears (402 / zhipu 1113) are *not* in this family; they mark the
+    // endpoint unavailable so the chain switches instead of retrying.
+    crate::model_error::parse_model_error(error)
+        .class
+        .quota_window()
 }
 
 #[cfg(test)]

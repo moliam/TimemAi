@@ -320,3 +320,99 @@ fn reasoning_content_rejection_requires_exact_field_non_transient_4xx_and_reject
         );
     }
 }
+
+#[test]
+fn provider_business_codes_drive_retry_failover_and_overflow() {
+    // Zhipu 1113 (arrears) is a 429 status but not a rate limit: no retry,
+    // hand over to the failover chain immediately.
+    let arrears = "model_http_429[billing,zhipu/1113]: 您的账户已欠费，请充值后重试";
+    assert!(!is_retryable_model_system_error(arrears));
+    assert!(is_endpoint_unavailable_error(arrears));
+    assert!(!is_model_rate_limited_error(arrears));
+
+    // 1308 usage window: retryable with the tight quota-window failover.
+    let window = "model_http_429[quota,zhipu/1308]: 已达到 100 次的使用上限";
+    assert!(is_retryable_model_system_error(window));
+    assert!(!is_endpoint_unavailable_error(window));
+    assert!(is_model_rate_limited_error(window));
+    assert_eq!(
+        model_failover_failure_threshold(window),
+        MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES
+    );
+    assert_eq!(model_failover_strike_delay(window), Duration::ZERO);
+
+    // 1305 overload is transient but not a quota window.
+    let overloaded = "model_http_429[overloaded,zhipu/1305]: 该模型当前访问量过大，请您稍后再试";
+    assert!(is_retryable_model_system_error(overloaded));
+    assert!(!is_model_rate_limited_error(overloaded));
+    assert_eq!(
+        model_failover_failure_threshold(overloaded),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    );
+
+    // 1261 prompt too long routes to the context-overflow recovery, not retries.
+    let too_long = "model_http_400[input_too_large,zhipu/1261]: Prompt 超长";
+    assert!(is_model_input_too_large_error(too_long));
+    assert!(!is_retryable_model_system_error(too_long));
+
+    // 1211 missing model id is a configuration error: fail closed, do not
+    // silently rotate the failover chain.
+    let missing = "model_http_400[model_not_found,zhipu/1211]: 模型不存在，请检查模型代码";
+    assert!(!is_retryable_model_system_error(missing));
+    assert!(!is_endpoint_unavailable_error(missing));
+
+    // 1301 content policy is terminal for the turn.
+    let policy =
+        "model_http_400[content_policy,zhipu/1301]: 系统检测到输入或生成内容可能包含不安全或敏感内容";
+    assert!(!is_retryable_model_system_error(policy));
+
+    // 1000 and 1315 are credential problems: unusable endpoint, no retry.
+    for error in [
+        "model_http_401[authentication,zhipu/1000]: 身份验证失败",
+        "model_http_429[authentication,zhipu/1315]: 该 API Key 仅限企业编程套餐场景使用",
+    ] {
+        assert!(!is_retryable_model_system_error(error), "{error}");
+        assert!(is_endpoint_unavailable_error(error), "{error}");
+    }
+
+    // 1309/1314 expired plans cannot recover by waiting either.
+    for error in [
+        "model_http_429[subscription,zhipu/1309]: 您的 GLM Coding Plan 套餐已到期",
+        "model_http_429[subscription,zhipu/1314]: 您的企业套餐已失效，请联系企业管理员",
+    ] {
+        assert!(is_endpoint_unavailable_error(error), "{error}");
+        assert!(!is_retryable_model_system_error(error), "{error}");
+    }
+
+    // 1220 permission stays a configuration error: surfaced, never failed over.
+    let permission = "model_http_403[permission,zhipu/1220]: 您无权访问该 API";
+    assert!(!is_endpoint_unavailable_error(permission));
+    assert!(!is_retryable_model_system_error(permission));
+
+    // An undocumented provider keeps the provider-neutral status class.
+    let foreign = "model_http_429[rate_limited,acme/1113]: slow down";
+    assert!(is_retryable_model_system_error(foreign));
+    assert!(is_model_rate_limited_error(foreign));
+}
+
+#[test]
+fn zhipu_body_code_is_classified_end_to_end() {
+    let body =
+        serde_json::json!({"error":{"code":"1113","message":"您的账户已欠费，请充值后重试"}});
+    let configured = crate::model_api::model_http_error_message_for(429, Some("zhipu"), &body);
+    assert_eq!(
+        configured,
+        "model_http_429[billing,zhipu/1113]: 您的账户已欠费，请充值后重试"
+    );
+    assert!(is_endpoint_unavailable_error(&configured));
+    assert!(!is_retryable_model_system_error(&configured));
+
+    // Without a declared provider the code is kept for diagnostics but the
+    // HTTP status decides the class.
+    let unconfigured = crate::model_api::model_http_error_message_for(429, None, &body);
+    assert_eq!(
+        unconfigured,
+        "model_http_429[rate_limited,1113]: 您的账户已欠费，请充值后重试"
+    );
+    assert!(is_retryable_model_system_error(&unconfigured));
+}

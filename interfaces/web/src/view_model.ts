@@ -1,3 +1,4 @@
+import { parseModelError } from "./model_error";
 import { fileEditsPresentation, mailboxPresentation, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
 import type { MarkdownOutlineItem } from "./markdown_outline";
 import {
@@ -2494,6 +2495,37 @@ type ModelSystemRetryDisplay = Pick<
 
 function modelSystemRetryDisplay(error: string): ModelSystemRetryDisplay {
   const normalized = error.toLowerCase();
+  // Read the class Core wrote into the canonical error header first; the text
+  // fallbacks below only cover records written before the header existed.
+  const { class: errorClass } = parseModelError(error);
+  if (errorClass === "timeout") {
+    return {
+      kind: "response-timeout",
+      label: t("retry.responseTimeout"),
+      summary: t("retry.responseTimeoutSummary"),
+    };
+  }
+  if (errorClass === "rate_limited" || errorClass === "quota") {
+    return {
+      kind: "rate-limited",
+      label: t("retry.rateLimited"),
+      summary: t("retry.rateLimitedSummary"),
+    };
+  }
+  if (errorClass === "transport") {
+    return {
+      kind: "network-error",
+      label: t("retry.networkError"),
+      summary: t("retry.networkErrorSummary"),
+    };
+  }
+  if (errorClass === "overloaded" || errorClass === "server_error") {
+    return {
+      kind: "service-error",
+      label: t("retry.upstreamError"),
+      summary: t("retry.upstreamErrorSummary"),
+    };
+  }
   if (
     normalized.startsWith("model_timeout") ||
     normalized.includes("operation timed out") ||

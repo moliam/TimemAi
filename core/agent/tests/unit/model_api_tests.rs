@@ -1030,7 +1030,7 @@ fn model_http_error_includes_sanitized_service_reason() {
     });
     assert_eq!(
         model_http_error_message(400, &openai_like),
-        "model_http_400: The model `missing-model` does not exist or you do not have access to it."
+        "model_http_400[invalid_request]: The model `missing-model` does not exist or you do not have access to it."
     );
 
     let anthropic_like = json!({
@@ -1042,12 +1042,12 @@ fn model_http_error_includes_sanitized_service_reason() {
     });
     assert_eq!(
         model_http_error_message(404, &anthropic_like),
-        "model_http_404: model: claude-missing not found"
+        "model_http_404[model_not_found]: model: claude-missing not found"
     );
 
     let raw_text = json!({"raw_text":"invalid Authorization Bearer sk-secret-token"});
     let rendered = model_http_error_message(401, &raw_text);
-    assert!(rendered.starts_with("model_http_401:"));
+    assert!(rendered.starts_with("model_http_401[authentication]:"));
     assert!(rendered.contains("***REDACTED***"));
     assert!(!rendered.contains("sk-secret-token"));
 

@@ -84,6 +84,62 @@ describe("model service issue presentation", () => {
     expect(modelServiceIssue(error).title).toBe(title);
   });
 
+  it.each([
+    ["model_http_429[billing,zhipu/1113]: 您的账户已欠费，请充值后重试", zh.service.billingTitle],
+    [
+      "model_http_429[subscription,zhipu/1309]: 您的 GLM Coding Plan 套餐已到期",
+      zh.service.subscriptionTitle,
+    ],
+    ["model_http_429[quota,zhipu/1308]: 已达到 100 次的使用上限", zh.service.quotaTitle],
+    [
+      "model_http_429[rate_limited,zhipu/1302]: 您的账户已达到速率限制",
+      zh.service.rateLimitedTitle,
+    ],
+    ["model_http_429[overloaded,zhipu/1305]: 该模型当前访问量过大", zh.service.overloadedTitle],
+    ["model_http_401[authentication,zhipu/1000]: 身份验证失败", zh.service.authFailedTitle],
+    ["model_http_403[permission,zhipu/1220]: 您无权访问该 API", zh.service.permissionTitle],
+    [
+      "model_http_400[invalid_request,zhipu/1213]: 未正常接收到 messages 参数",
+      zh.service.invalidRequestTitle,
+    ],
+    ["model_http_400[model_not_found,zhipu/1211]: 模型不存在", zh.service.unavailableTitle],
+    ["model_http_400[input_too_large,zhipu/1261]: Prompt 超长", zh.service.inputTooLargeTitle],
+    [
+      "model_http_400[content_policy,zhipu/1301]: 系统检测到输入或生成内容可能包含不安全或敏感内容",
+      zh.service.contentPolicyTitle,
+    ],
+    ["model_http_503[overloaded]: Bad Gateway", zh.service.overloadedTitle],
+    ["model_http_504[timeout]: gateway timeout", zh.service.timeoutTitle],
+    ["model_http_500[server_error]: internal failure", zh.service.serverErrorTitle],
+  ])("maps the classified error %s to %s", (error, title) => {
+    expect(modelServiceIssue(error).title).toBe(title);
+  });
+
+  it("keeps the provider reason and the business code for a classified failure", () => {
+    const issue = modelServiceIssue(
+      "model_http_429[billing,zhipu/1113]: 您的账户已欠费，请充值后重试",
+    );
+    expect(issue.detail).toContain("您的账户已欠费，请充值后重试");
+    expect(issue.detail).toContain(zh.service.billingDetail);
+    expect(issue.detail).not.toContain("model_http_429");
+    expect(issue.diagnostic).toContain("zhipu/1113");
+  });
+
+  it("prefers the classified cause over the message text", () => {
+    // The same wording under a rate-limit status must stay a rate limit; the
+    // class comes from Core, not from "欠费" keywords in the message.
+    const issue = modelServiceIssue("model_http_429[rate_limited]: 您的账户已欠费，请充值后重试");
+    expect(issue.title).toBe(zh.service.rateLimitedTitle);
+  });
+
+  it("keeps actionable stream-failure classes instead of the generic copy", () => {
+    const issue = modelServiceIssue(
+      "model_responses_stream_failed: class=quota event_type=response.failed message=You've reached your 5-hour usage limit",
+    );
+    expect(issue.title).toBe(zh.service.quotaTitle);
+    expect(issue.detail).toContain("You've reached your 5-hour usage limit");
+  });
+
   it("shows the provider cache_control rejection instead of hiding it behind an HTTP status", () => {
     const cacheIssue = modelServiceIssue(
       "model_http_404: A maximum of 4 blocks with cache_control may be provided. Found 5.",
