@@ -3355,6 +3355,115 @@ describe("web topic view model", () => {
     expect(activeModelRetryStatus(repairKept)).toMatchObject({ kind: "retrying" });
   });
 
+  it("clears the retry pill once the streaming preview shows the model responding", () => {
+    // 用户反馈：thinking 先行的响应已在流式输出（thinking 指示器都亮了），
+    // 「模型服务异常 N/10」胶囊仍挂到整轮完成。core.model.preview 是流式
+    // 期间最早到达的信号，携带真实输出证据（流阶段/首 token/计词/正文）
+    // 即视为模型已在响应；失败尝试的尾部预览随后仍会被按时间序到达的
+    // model_retry 重新立起。
+    const retryEvent = {
+      event_id: "retry",
+      source: "worker_activity" as const,
+      created_at_ms: 2,
+      payload: {
+        kind: "model_retry",
+        attempt: 4,
+        max_attempts: 10,
+        delay_ms: 4_000,
+        error: "model_http_503: upstream unavailable",
+      },
+    };
+    const workerEvent = (
+      event_id: string,
+      payload: Record<string, unknown>,
+      created_at_ms = 3,
+    ) => ({ event_id, source: "worker_activity" as const, created_at_ms, payload });
+    const coreEvent = (
+      event_id: string,
+      payload: Record<string, unknown>,
+      created_at_ms = 3,
+    ) => ({ event_id, source: "core_topic" as const, created_at_ms, payload });
+    const previewTopic = (overrides: Record<string, unknown>) =>
+      topic("core.model.preview", {
+        attempt: 4,
+        revision: 1,
+        thinking_words: 0,
+        ttft_ms: null,
+        stream_phase: null,
+        response: null,
+        ...overrides,
+      });
+
+    // 场景一：thinking 先行——stream_phase 已进入 thinking（0 words 0s 状态）。
+    const thinkingFirst = turn("thinking-first", "working");
+    thinkingFirst.events = [
+      retryEvent,
+      coreEvent("preview", previewTopic({ stream_phase: "thinking" })),
+    ];
+    expect(activeModelRetryStatus(thinkingFirst)).toBeNull();
+
+    // 场景二：纯文本模型——首 token 计时到达（无流阶段标记，正文流式可见）。
+    const firstToken = turn("first-token", "working");
+    firstToken.events = [
+      retryEvent,
+      coreEvent(
+        "preview",
+        previewTopic({
+          ttft_ms: 900,
+          response: { attempt: 4, revision: 2, text: "Hel", status: "streaming" },
+        }),
+      ),
+    ];
+    expect(activeModelRetryStatus(firstToken)).toBeNull();
+
+    // 场景三：thinking 已计词同样成立。
+    const counted = turn("counted", "working");
+    counted.events = [
+      retryEvent,
+      coreEvent("preview", previewTopic({ thinking_words: 12 })),
+    ];
+    expect(activeModelRetryStatus(counted)).toBeNull();
+
+    // 场景四：协议修复（retrying）在其请求真正开始流式输出后同样清除。
+    const repaired = turn("repaired", "working");
+    repaired.events = [
+      coreEvent(
+        "repair",
+        topic("core.model.repair", { attempt: 2, max_attempts: 20, issue: "missing_response_root" }),
+        1,
+      ),
+      workerEvent("req", { kind: "model_request", round: 2 }, 2),
+      coreEvent("preview", previewTopic({ stream_phase: "responding" }), 4),
+    ];
+    expect(activeModelRetryStatus(repaired)).toBeNull();
+
+    // 场景五（回归保护）：无输出证据的预览不清除。
+    const noEvidence = turn("no-evidence", "working");
+    noEvidence.events = [retryEvent, coreEvent("preview", previewTopic({}))];
+    expect(activeModelRetryStatus(noEvidence)).toMatchObject({
+      kind: "service-error",
+      progress: "4/10",
+    });
+
+    // 场景六（回归保护）：带部分输出的失败尝试尾部预览清掉胶囊后，按时间
+    // 序到达的下一次 model_retry 重新立起（进度推进到 5/10）。
+    const reestablished = turn("reestablished", "working");
+    reestablished.events = [
+      retryEvent,
+      coreEvent("preview", previewTopic({ revision: 2, thinking_words: 3 })),
+      {
+        ...retryEvent,
+        event_id: "retry-2",
+        created_at_ms: 4,
+        payload: { ...retryEvent.payload, attempt: 5 },
+      },
+    ];
+    expect(activeModelRetryStatus(reestablished)).toMatchObject({
+      kind: "service-error",
+      progress: "5/10",
+    });
+  });
+
   it("labels retryable model failures by their actual cause", () => {
     const statusFor = (error: string) => {
       const active = turn(`retry-${error}`, "working");

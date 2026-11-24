@@ -2670,6 +2670,23 @@ export function activeModelRetryStatus(
       status = null;
       continue;
     }
+    if (topic.topic?.name === "core.model.preview") {
+      // 流式预览是「模型正在响应」的最早信号：thinking/responding 阶段、
+      // 首 token 计时、已计词或正文可见——重试与协议修复的等待此时都已
+      // 结束，胶囊必须立刻清掉（否则 thinking 先行的响应会挂着错误胶囊
+      // 直到整轮完成）。失败尝试的尾部预览也可能携带部分输出，但其后
+      // 的 model_retry 事件会按时间序重新立起胶囊。
+      const preview = topic.payload as Record<string, unknown>;
+      const previewResponse = preview.response as { text?: unknown } | undefined;
+      const responding =
+        preview.stream_phase === "thinking" ||
+        preview.stream_phase === "responding" ||
+        typeof preview.ttft_ms === "number" ||
+        (typeof preview.thinking_words === "number" && preview.thinking_words > 0) ||
+        (typeof previewResponse?.text === "string" && previewResponse.text.trim().length > 0);
+      if (responding) status = null;
+      continue;
+    }
     if (topic.topic?.name !== "core.model.repair") continue;
 
     const progress = retryProgress(topic.payload);
