@@ -3463,7 +3463,7 @@ fn last_turn_edits(runtime: &PreviewCaptureRuntime) -> Vec<serde_json::Value> {
         .events
         .iter()
         .filter_map(|event| event.payload.get("turn_edits").cloned())
-        .last()
+        .next_back()
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_else(|| panic!("no turn_edits payload captured"))
 }

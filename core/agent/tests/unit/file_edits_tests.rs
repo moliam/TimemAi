@@ -795,10 +795,10 @@ fn turn_ledger_drops_created_then_deleted_tmp_tree() {
     let file_declared = file.to_string_lossy().into_owned();
 
     let mut ledger = TurnFileEditsLedger::default();
-    ledger.register(&dir, "turn", &[root_declared.clone()]);
-    fs::create_dir_all(&file.parent().unwrap()).unwrap();
+    ledger.register(&dir, "turn", std::slice::from_ref(&root_declared));
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
     write_file(&file, "fn a() {}\nfn b() {}\n");
-    ledger.register(&dir, "turn", &[file_declared.clone()]);
+    ledger.register(&dir, "turn", std::slice::from_ref(&file_declared));
 
     let net = ledger.net_evidence_for_turn("turn").unwrap();
     let row = ledger_row(&net, &file_declared);
@@ -824,7 +824,7 @@ fn turn_ledger_folds_repeated_edits_into_one_baseline_diff() {
     let declared = file.to_string_lossy().into_owned();
     write_file(&file, "one\n");
     let mut ledger = TurnFileEditsLedger::default();
-    ledger.register(&dir, "turn", &[declared.clone()]);
+    ledger.register(&dir, "turn", std::slice::from_ref(&declared));
 
     write_file(&file, "one\ntwo\n");
     let net = ledger.net_evidence_for_turn("turn").unwrap();
@@ -849,7 +849,7 @@ fn turn_ledger_deleted_then_recreated_reads_modified() {
     let declared = file.to_string_lossy().into_owned();
     write_file(&file, "old\n");
     let mut ledger = TurnFileEditsLedger::default();
-    ledger.register(&dir, "turn", &[declared.clone()]);
+    ledger.register(&dir, "turn", std::slice::from_ref(&declared));
 
     fs::remove_file(&file).unwrap();
     let net = ledger.net_evidence_for_turn("turn").unwrap();
@@ -877,7 +877,7 @@ fn turn_ledger_non_text_paths_report_existence_only() {
             .as_str(),
     );
     let mut ledger = TurnFileEditsLedger::default();
-    ledger.register(&dir, "turn", &[declared.clone()]);
+    ledger.register(&dir, "turn", std::slice::from_ref(&declared));
 
     // 仍然存在：无基线可对比，不产生行。
     let net = ledger.net_evidence_for_turn("turn").unwrap();
@@ -899,10 +899,10 @@ fn turn_ledger_resets_between_turns_and_ignores_stale_refreshes() {
     let declared = file.to_string_lossy().into_owned();
     write_file(&file, "a\n");
     let mut ledger = TurnFileEditsLedger::default();
-    ledger.register(&dir, "turn-1", &[declared.clone()]);
+    ledger.register(&dir, "turn-1", std::slice::from_ref(&declared));
 
     // 新一轮重新登记基线；旧轮次的刷新请求不再产出（总结已随旧轮下发）。
-    ledger.register(&dir, "turn-2", &[declared.clone()]);
+    ledger.register(&dir, "turn-2", std::slice::from_ref(&declared));
     assert!(ledger.net_evidence_for_turn("turn-1").is_none());
 
     write_file(&file, "b\n");
