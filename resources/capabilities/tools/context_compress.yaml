@@ -26,7 +26,7 @@ description: |
   only for exact content still needed and `offload` only for bulky material that
   may need later retrieval.
   When combined with other capability calls, `context_compress` must be the first
-  call. Later calls run only after compression succeeds.
+  call. Later calls run only after compression succeeds. For exmaple, you can issue fileread call of important part of some file afterwards.
   After success, continue from the checkpoint you created. A successful call
   does not reinsert a verbose action result; when offload is used, it returns a
   scratch_id for later memmgr scratch read. Retrieve that material only when it
