@@ -2,6 +2,7 @@ import { useThrottledValue } from "./use_throttled_value";
 import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EMPTY_TURN_EDITS_SUMMARY, FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, turnFileChangesSummary } from "./file_edits_view";
+import { useSelectionGestureGuard } from "./selection_gesture";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -13731,9 +13732,10 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
   const open = expanded || interactionHeld;
   const editsAutoOpen = hasEdits && !manuallyToggled;
   const hasExpandableDetail = !!code || !!detail || !!activity.edits?.length;
-  const toggle = () => {
-    const selection = window.getSelection();
-    if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
+  // 用户反馈：选中 diff / 输出里的文字时，不要顺带展开命令（会导致页面跳动）。
+  const { onPointerDown: trackSelectionGesture, ignoreToggle } = useSelectionGestureGuard();
+  const toggle = (event?: { clientX: number; clientY: number }) => {
+    if (event && ignoreToggle(event)) return;
     if (editsAutoOpen) {
       // From the diff-only auto state, clicking the row expands the full
       // command view instead of collapsing the auto-opened evidence.
@@ -13757,7 +13759,8 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
         role={hasExpandableDetail ? "button" : undefined} tabIndex={hasExpandableDetail ? 0 : undefined}
         aria-expanded={hasExpandableDetail ? open : undefined}
         aria-label={hasExpandableDetail ? (open ? t("tools.collapseOutput") : t("tools.expandOutput")) : undefined}
-        onClick={hasExpandableDetail ? toggle : undefined}
+        onPointerDown={hasExpandableDetail ? trackSelectionGesture : undefined}
+        onClick={hasExpandableDetail ? event => toggle(event) : undefined}
         onKeyDown={hasExpandableDetail ? event => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault(); toggle();
@@ -15583,6 +15586,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const hasEdits = !!activity.edits?.length;
   const [open, setOpen] = useState(() => hasEdits);
   const [manuallyToggled, setManuallyToggled] = useState(false);
+  // 选中文字（diff、命令、输出）只做选择，不翻转命令的展开状态。
+  const { onPointerDown: trackSelectionGesture, ignoreToggle } = useSelectionGestureGuard();
   // 结果预览：运行中常驻实时 tail；结束自动收起（瞬时窗口），点击徽章可再次展开。
   const resultPreview = activity.result_preview;
   const [previewReopened, setPreviewReopened] = useState(false);
@@ -15724,9 +15729,11 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <summary
         title={open ? t("tools.detailCollapse") : t("tools.detailExpand")}
         aria-label={summaryLabel}
+        onPointerDown={trackSelectionGesture}
         onClick={event => {
-          const selection = window.getSelection();
-          if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode)) {
+          // 选中文字（拖拽、从文本区起手、或仍留选区）不是展开/收起命令的意图，
+          // 而且必须吞掉这次点击，否则 <details> 会按原生行为自己翻转。
+          if (ignoreToggle(event)) {
             event.preventDefault();
             return;
           }
