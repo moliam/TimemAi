@@ -60,7 +60,7 @@ description: |
   its pid info. You MUST manage/clean/check these still running PIDs,
   confirming the pid is still running and yours before killing it.
   3. YOU MUST DECLARE every file the command creates, modifies, or deletes
-  with the `edit` field !!! See the argument examples in this tool section.
+  with the `edit` field!!! See the argument examples in this tool section.
 input_schema: |
   {
     "type": "object",
