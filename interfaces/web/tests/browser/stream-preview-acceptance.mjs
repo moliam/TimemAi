@@ -1314,7 +1314,8 @@ async function main() {
       const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
       return [...document.fonts].some(font => font.family.includes('IBM Plex Mono') && font.status === 'loaded')
         && style.fontFamily.includes('IBM Plex Mono') && style.fontWeight === '300'
-        && Math.abs(parseFloat(style.fontSize) - contentSize * .85) < .1;
+        // 用户反馈：折叠徽章的字要更小一点（.85 → .78），仍随聊天字号缩放。
+        && Math.abs(parseFloat(style.fontSize) - contentSize * .78) < .1;
     })()`), "tool count must load local IBM Plex Mono 300 and scale with chat text");
     assert(await browser.evaluate(`(() => {
       const root = document.documentElement;
@@ -1373,7 +1374,7 @@ async function main() {
       const sign = toggle.querySelector('.stream-tool-run-sign');
       const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
       const font = parseFloat(getComputedStyle(toggle).fontSize);
-      return getComputedStyle(sign).backgroundColor === 'rgba(0, 0, 0, 0)' && Math.abs(font - contentSize * .85) < .1;
+      return getComputedStyle(sign).backgroundColor === 'rgba(0, 0, 0, 0)' && Math.abs(font - contentSize * .78) < .1;
     })()`), "badge must use the smaller type size with the +/- merged into the pill background");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");

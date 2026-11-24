@@ -10283,7 +10283,8 @@ function TimemThread({
     const previous = pinnedScrollTopRef.current;
     const clamped = previous - viewport.scrollTop;
     if (clamped > 1) {
-      // 补偿同样走 applyStreamScrollGap 的总量夹取，不会随提交次数累加。
+      // 用户反馈：空槽不能越滚越大——补偿同样走 applyStreamScrollGap 的上限夹取，
+      // 不随提交次数累加成整屏空白。
       applyStreamScrollGap(streamScrollGap + clamped);
       viewport.scrollTop = previous;
     }
@@ -13609,7 +13610,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}`}>
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={10} strokeWidth={1.65} /> : <Minus size={10} strokeWidth={1.65} />}</span><Wrench size={12} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={9} strokeWidth={1.5} /> : <Minus size={9} strokeWidth={1.5} />}</span><Wrench size={10.5} strokeWidth={1.45} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map((activity, index) => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
