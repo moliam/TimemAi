@@ -3081,6 +3081,41 @@ fn run_bash_validation_failure_does_not_attach_edit_evidence() {
     assert!(outcome.edits.is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn run_bash_empty_stringified_edit_array_is_not_a_path() {
+    // edit: "[]" means "no edits". The e2e wiring must not turn the
+    // stringified empty array into a path named "[]": no edited_files
+    // line, no edit evidence, no ledger registration.
+    let memory_dir = tmp_memory_dir("run_bash_empty_edit_array");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        crate::CoreProfile {
+            model: "test".to_string(),
+        },
+        memory_dir,
+    );
+    core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: "empty_edit_array".to_string(),
+        raw_input: serde_json::json!({"command": "printf empty_edit_guard", "edit": "[]"}),
+    };
+    let ActionExecution::Completed(outcome) =
+        execute_run_bash_action(&mut core, &action, &mut NeverCancelRuntime)
+    else {
+        panic!("approve mode should execute directly");
+    };
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    assert!(outcome.edits.is_none());
+    assert!(!outcome.text.contains("edited_files"), "{}", outcome.text);
+    assert!(!outcome.text.contains("[]"), "{}", outcome.text);
+}
+
 // ---------- 结果预览（仅观察瞬时窗口）：预算与发射契约 ----------
 
 #[derive(Default)]
