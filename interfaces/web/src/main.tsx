@@ -20,7 +20,6 @@ import { formatUserEntryTime } from "./user_entry_time";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
-  ThreadPrimitive,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import {
@@ -270,7 +269,9 @@ import {
   toolActivityDisplayName,
   toolDisplayName,
   turnElapsedMs,
+  turnDefaultsToArchived,
   turnHistoryHydrationOrder,
+  turnsToAutoHydrate,
   turnWorkPhaseBoundary,
   turnLiveUsage,
   timelineEventsSignature,
@@ -9833,6 +9834,7 @@ const VisibleTurnList = memo(function VisibleTurnList({
   onRequestToolGen?: (turnId: string) => void;
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
+  const newestTurnId = turns[turns.length - 1]?.turn_id;
   const timeline = [
     ...turns.map((turn) => {
       const placement = turnTimelinePlacement(turn, restartMarkers);
@@ -9863,6 +9865,7 @@ const VisibleTurnList = memo(function VisibleTurnList({
         sessionId={sessionId}
         turn={turn}
         turnProjection={turnProjection}
+        defaultArchived={turnDefaultsToArchived(turn, turn.turn_id === newestTurnId)}
         isCancelling={isCancelling && turn.state === "working"}
         decisions={
           decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ??
@@ -9955,7 +9958,7 @@ const SessionTimelinePane = memo(function SessionTimelinePane({
     // belong to the newest turn, and each request chains further pages on
     // the Host; oldest-first order made the directory the user is looking
     // at wait behind every older turn's chained history pages.
-    for (const turn of turnHistoryHydrationOrder(visibleTurns, { streamUiMode, streamArchive, timelineActive: true })) {
+    for (const turn of turnsToAutoHydrate(visibleTurns, { streamUiMode, streamArchive, timelineActive: true })) {
       requestTurnHistoryRef.current(sessionId, turn.turn_id);
     }
   }, [streamUiMode, streamArchive, active, visibleTurns, sessionId]);
@@ -11497,8 +11500,8 @@ function TimemThread({
   };
 
   return (
-    <ThreadPrimitive.Root className="aui-thread">
-      <ThreadPrimitive.Viewport
+    <div className="aui-thread">
+      <div
         ref={viewportRef}
         className="chat-scroll aui-thread-viewport"
         onCopy={(event) => {
@@ -11508,10 +11511,6 @@ function TimemThread({
           event.clipboardData.setData("text/plain", text);
           event.preventDefault();
         }}
-        autoScroll={false}
-        scrollToBottomOnInitialize={false}
-        scrollToBottomOnRunStart={false}
-        scrollToBottomOnThreadSwitch={false}
         onScroll={(event) => {
           const nearBottom = isNearScrollBottom({
             scrollTop: event.currentTarget.scrollTop,
@@ -11599,7 +11598,7 @@ function TimemThread({
           ref={scrollGapHostRef}
           aria-hidden="true"
         />
-      </ThreadPrimitive.Viewport>
+      </div>
 
       <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
@@ -12425,7 +12424,7 @@ function TimemThread({
       </nav>
           </div>
       </div>
-    </ThreadPrimitive.Root>
+    </div>
   );
 }
 
@@ -12446,6 +12445,9 @@ function countTurnModelRequests(turn: WebTurn): number {
 type TurnInteractionProps = {
   sessionId: string;
   turn: WebTurn;
+  /// Restored historical turns start in the compact process frame; the newest
+  /// turn keeps its inline stream so the landing view is unchanged.
+  defaultArchived: boolean;
   turnProjection: VersionedTurnProjection | null | undefined;
   isCancelling: boolean;
   decisions: Decision[];
@@ -12517,6 +12519,7 @@ const TurnInteraction = memo(function TurnInteraction({
   sessionId,
   turn,
   turnProjection,
+  defaultArchived,
   isCancelling,
   decisions,
   sessionInteractionLocked,
@@ -12677,7 +12680,9 @@ const TurnInteraction = memo(function TurnInteraction({
   // 必须在新逻辑时序进入时逐项收起旧工具。不可把单项折叠也绑定到 streamArchived，
   // 否则重新出现工具平铺积高、最终一次性大幅收起的问题。
   // Archive only after the authoritative working state ends, never at a round boundary.
-  const [streamArchived, setStreamArchived] = useState(turn.state !== "working" && streamArchive);
+  const [streamArchived, setStreamArchived] = useState(
+    (turn.state !== "working" && streamArchive) || defaultArchived,
+  );
   const archiveStream = useCallback(() => setStreamArchived(true), []);
   useEffect(() => { if (turn.state === "working") setStreamArchived(false); }, [turn.state]);
   // 偏好切换必须双向生效且与重载一致：重新打开时由 StreamProcess 的
@@ -12687,8 +12692,8 @@ const TurnInteraction = memo(function TurnInteraction({
   useEffect(() => {
     if (previousStreamArchiveRef.current === streamArchive) return;
     previousStreamArchiveRef.current = streamArchive;
-    if (!streamArchive) setStreamArchived(false);
-  }, [streamArchive]);
+    if (!streamArchive) setStreamArchived(defaultArchived);
+  }, [defaultArchived, streamArchive]);
   const streamRetentionActive = streamUiMode && !streamArchived;
   const latestThoughtTime = lifecycleItems.reduce((time, item) => item.activity?.kind === "free_talk" ? Math.max(time, item.createdAt) : time, -1);
   const streamRetention = useMemo(

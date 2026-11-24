@@ -154,6 +154,35 @@ export function turnHistoryHydrationOrder(
 }
 
 /**
+ * Auto-hydration budget: only the newest visible turn streams its full process
+ * on open. Older restored turns stay in their compact Thought/Action frame and
+ * hydrate on demand when the reader expands them, so opening a long session
+ * never chains full-history pages (and full DOM) for every historical turn.
+ */
+export function turnsToAutoHydrate(
+  turns: readonly WebTurn[],
+  options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
+): WebTurn[] {
+  const newest = turns[turns.length - 1];
+  return newest ? turnHistoryHydrationOrder([newest], options) : [];
+}
+
+/**
+ * Restored history defaults to the compact process frame. The newest turn
+ * keeps its inline stream (the landing view), live turns always expand, and a
+ * restored turn the user explicitly expanded stays expanded in TurnInteraction
+ * state. `history_event_count` is only populated for restored turns.
+ */
+export function turnDefaultsToArchived(
+  turn: WebTurn,
+  isNewestTurn: boolean,
+): boolean {
+  if (isNewestTurn) return false;
+  if (turn.state === "working") return false;
+  return (turn.history_event_count ?? 0) > 0;
+}
+
+/**
  * Stream retention process chapters for the reading outline: only retained
  * free_talk blocks that carry a model-written markdown heading produce an
  * entry (titled and leveled by that heading); plain narrative blocks produce

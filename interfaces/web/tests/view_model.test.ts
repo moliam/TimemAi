@@ -53,8 +53,10 @@ import {
   MAX_CLIENT_TURNS,
   timelineEventsSignature,
   timelineOutlineShapeKey,
+  turnDefaultsToArchived,
   turnNeedsFullEventFetch,
   turnHistoryHydrationOrder,
+  turnsToAutoHydrate,
   streamProcessOutlineSections,
   messagesFromHistoryRecords,
   MAX_RENDERED_MESSAGES,
@@ -5354,6 +5356,32 @@ describe("turnNeedsFullEventFetch", () => {
     } as unknown as WebTurn;
     expect(turnNeedsFullEventFetch(long, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
     expect(turnNeedsFullEventFetch(atLimit, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(true);
+  });
+});
+
+describe("restored history lightweight default", () => {
+  const restored = (turnId: string, count = 120) =>
+    ({
+      turn_id: turnId,
+      state: "completed",
+      events_slimmed: true,
+      history_event_count: count,
+    }) as unknown as WebTurn;
+  const live = { turn_id: "live", state: "completed", events_slimmed: false } as unknown as WebTurn;
+  const working = { turn_id: "working", state: "working", events_slimmed: true } as unknown as WebTurn;
+
+  it("keeps only the newest turn inline; older restored turns start compact", () => {
+    expect(turnDefaultsToArchived(restored("old"), false)).toBe(true);
+    expect(turnDefaultsToArchived(restored("new"), true)).toBe(false);
+    expect(turnDefaultsToArchived(live, false)).toBe(false);
+    expect(turnDefaultsToArchived(working, false)).toBe(false);
+  });
+
+  it("auto-hydrates only the newest turn so history never chains full pages", () => {
+    const options = { streamUiMode: true, streamArchive: false, timelineActive: true };
+    const ids = turnsToAutoHydrate([restored("old"), restored("middle"), restored("new")], options).map((turn) => turn.turn_id);
+    expect(ids).toEqual(["new"]);
+    expect(turnsToAutoHydrate([restored("old"), working], options)).toEqual([]);
   });
 });
 

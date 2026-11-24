@@ -6,10 +6,13 @@ const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8
 
 describe("fixed composer scroll ownership", () => {
   it("keeps the complete input surface outside the scrolling message viewport", () => {
+    expect(source).toContain('className="chat-scroll aui-thread-viewport"');
+    // The composer must stay a sibling after the scrolling viewport: the gap
+    // anchor is the viewport's last child, and the composer follows its close.
     expect(source).toMatch(
-      /<ThreadPrimitive\.Viewport[\s\S]*<\/ThreadPrimitive\.Viewport>\s*<div className="composer-wrap aui-thread-footer">/,
+      /<div\s+className="chat-scroll-shrink-gap"[\s\S]*?\/>\s*<\/div>\s*<div className="composer-wrap aui-thread-footer">/,
     );
-    const viewportEnd = source.indexOf("</ThreadPrimitive.Viewport>");
+    const viewportEnd = source.indexOf('className="chat-scroll aui-thread-viewport"');
     const composerStart = source.indexOf(
       '<div className="composer-wrap aui-thread-footer">',
     );
