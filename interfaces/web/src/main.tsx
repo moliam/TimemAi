@@ -2,7 +2,7 @@ import { useThrottledValue } from "./use_throttled_value";
 import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EMPTY_TURN_EDITS_SUMMARY, FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, turnFileChangesSummary } from "./file_edits_view";
-import { useSelectionGestureGuard } from "./selection_gesture";
+import { insideMergeableStreamRow, useSelectionGestureGuard } from "./selection_gesture";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -13629,11 +13629,19 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   useEffect(() => {
     const update = () => {
       const run = runRef.current;
+      if (!run) {
+        setInteractionHeld(false);
+        return;
+      }
       const selection = window.getSelection();
-      setInteractionHeld(!!run && (
-        (!!selection && !selection.isCollapsed && !!selection.anchorNode && run.contains(selection.anchorNode)) ||
-        (!!document.activeElement?.closest(".stream-tool-merged-item") && run.contains(document.activeElement))
-      ));
+      const anchor = selection?.anchorNode;
+      const anchorElement = anchor instanceof Element ? anchor : anchor?.parentElement ?? null;
+      const focused = document.activeElement;
+      setInteractionHeld(
+        (!!selection && !selection.isCollapsed && !!anchorElement &&
+          run.contains(anchorElement) && insideMergeableStreamRow(anchorElement)) ||
+        (!!focused && run.contains(focused) && insideMergeableStreamRow(focused)),
+      );
     };
     return subscribeStreamInteraction(update);
   }, []);
@@ -13680,12 +13688,15 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
     {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
       <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={9} strokeWidth={1.5} /> : <Minus size={9} strokeWidth={1.5} />}</span><Wrench size={10.5} strokeWidth={1.45} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
-    {activities.map((activity, index) => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
-      {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
-      {/* 用户反馈：多条命令的结果框同时展开再一起收起，是收拢幅度和跳动的大头。
-          只让最下面一条自动展开结果预览；上面几条保留行尾眼睛徽章可手动展开。 */}
-      <div><StreamToolRow activity={activity} previewLead={index === activities.length - 1} absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))} /></div>
-    </div>)}
+    {activities.map((activity, index) => {
+      const mergeable = completedIds.has(activity.id);
+      return <div key={activity.id} className={`stream-tool-merged-item${mergeable ? " stream-tool-mergeable" : ""}${merged && mergeable ? " merged" : ""}`} inert={merged && mergeable}>
+        {/* 一次性收缩：行一旦被收纳（完成且 handoff/superseded），命令预览永久单行 */}
+        {/* 用户反馈：多条命令的结果框同时展开再一起收起，是收拢幅度和跳动的大头。
+            只让最下面一条自动展开结果预览；上面几条保留行尾眼睛徽章可手动展开。 */}
+        <div><StreamToolRow activity={activity} previewLead={index === activities.length - 1} absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))} /></div>
+      </div>;
+    })}
   </div>;
 
 }

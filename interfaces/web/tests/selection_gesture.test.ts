@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SELECTION_DRAG_TOLERANCE_PX,
+  insideMergeableStreamRow,
   isTextSelectionGesture,
   startedInTextRegion,
   toggleGestureFromPointer,
@@ -45,6 +46,14 @@ describe("text selection gesture guard", () => {
       ),
     ).toBe(false);
     expect(isTextSelectionGesture(null, 40, 40, collapsed)).toBe(false);
+  });
+
+  it("holds a folded tool group open only for mergeable rows", () => {
+    const mergeable = { closest: (selector: string) => (selector.includes(".stream-tool-mergeable") ? {} : null) };
+    const visibleDiffRow = { closest: () => null };
+    expect(insideMergeableStreamRow(mergeable)).toBe(true);
+    expect(insideMergeableStreamRow(visibleDiffRow)).toBe(false);
+    expect(insideMergeableStreamRow(null)).toBe(false);
   });
 
   it("detects selectable text regions from the pointer-down target", () => {

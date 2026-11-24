@@ -9,7 +9,7 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 
 describe("selection gesture guard wiring", () => {
   it("guards both tool row and tool activity toggles through the shared hook", () => {
-    expect(source).toMatch(/import \{ useSelectionGestureGuard \} from "\.\/selection_gesture";/);
+    expect(source).toMatch(/import \{ insideMergeableStreamRow, useSelectionGestureGuard \} from "\.\/selection_gesture";/);
     expect((source.match(/useSelectionGestureGuard\(\)/g) ?? []).length).toBe(2);
     expect(source).toMatch(
       /\{ onPointerDown: trackSelectionGesture, ignoreToggle \} = useSelectionGestureGuard\(\);/,
@@ -22,6 +22,12 @@ describe("selection gesture guard wiring", () => {
     );
     expect(source).toMatch(/onPointerDown=\{hasExpandableDetail \? trackSelectionGesture : undefined\}/);
     expect(source).toMatch(/onClick=\{hasExpandableDetail \? event => toggle\(event\) : undefined\}/);
+  });
+
+  it("keeps selections in visible diff rows from expanding a folded tool group", () => {
+    expect(source).toMatch(/stream-tool-mergeable/);
+    expect(source).toMatch(/insideMergeableStreamRow\(anchorElement\)/);
+    expect(source).toMatch(/insideMergeableStreamRow\(focused\)/);
   });
 
   it("swallows the click so details does not flip natively while selecting", () => {

@@ -24,6 +24,12 @@ export function startedInTextRegion(element: ClosestCapable | null | undefined):
   return !!element?.closest(TEXT_REGION_SELECTOR);
 }
 
+/// 折叠组只收纳可合并的行；diff、运行中行等始终可见，选中它们不应触发组的
+/// 展开/收起。这个标记让交互保护只作用于真正会被收起的行。
+export function insideMergeableStreamRow(element: ClosestCapable | null | undefined): boolean {
+  return !!element?.closest(".stream-tool-mergeable");
+}
+
 export type ToggleGesture = {
   downX: number;
   downY: number;
