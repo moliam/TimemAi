@@ -91,7 +91,8 @@ describe("settings category regroup", () => {
 
   it("folds file edit sections by default and wraps diffs when enabled", () => {
     expect(editsView).toContain('const autoCollapse = useBetaPreference("autoCollapse");');
-    expect(editsView).toContain("useState(() => !!edit.diff && (!autoCollapse || expandDuringWork))");
+    expect(editsView).toContain("const autoExpand = shouldAutoExpandDiff(edit.diff, { autoCollapse, expandDuringWork });");
+    expect(editsView).toContain("const [expanded, setExpanded] = useState(autoExpand);");
     expect(editsView).toContain('useBetaPreference("fileEditsWrap")');
     expect(editsView).toContain('`file-edits-panel${wrap ? " edits-wrap" : ""}`');
     expect(styles).toContain(".file-edits-panel.edits-wrap .file-edit-diff-table { width: 100%; }");

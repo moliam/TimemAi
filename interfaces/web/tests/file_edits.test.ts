@@ -101,6 +101,38 @@ describe("parseDiffRows", () => {
   });
 });
 
+describe("file diff expansion budget", () => {
+  it("auto-expands small diffs during work or when auto-collapse is off", () => {
+    const small = "x".repeat(100);
+    expect(shouldAutoExpandDiff(small, { autoCollapse: true, expandDuringWork: true })).toBe(true);
+    expect(shouldAutoExpandDiff(small, { autoCollapse: false, expandDuringWork: false })).toBe(true);
+    expect(shouldAutoExpandDiff(small, { autoCollapse: true, expandDuringWork: false })).toBe(false);
+  });
+
+  it("keeps large diffs folded even when auto-expansion would otherwise apply", () => {
+    const huge = "x".repeat(MAX_AUTO_EXPAND_DIFF_CHARS + 1);
+    expect(shouldAutoExpandDiff(huge, { autoCollapse: true, expandDuringWork: true })).toBe(false);
+    expect(shouldAutoExpandDiff(huge, { autoCollapse: false, expandDuringWork: false })).toBe(false);
+  });
+
+  it("never auto-expands header-only entries", () => {
+    expect(shouldAutoExpandDiff(null, { autoCollapse: false, expandDuringWork: true })).toBe(false);
+  });
+});
+
+describe("off-screen diff retention", () => {
+  it("collapses only expanded sections that left the viewport", () => {
+    expect(shouldCollapseOffscreenDiff({ expanded: true, intersecting: false, focusInside: false, selectionInside: false })).toBe(true);
+    expect(shouldCollapseOffscreenDiff({ expanded: true, intersecting: true, focusInside: false, selectionInside: false })).toBe(false);
+    expect(shouldCollapseOffscreenDiff({ expanded: false, intersecting: false, focusInside: false, selectionInside: false })).toBe(false);
+  });
+
+  it("keeps focused and selected sections mounted", () => {
+    expect(shouldCollapseOffscreenDiff({ expanded: true, intersecting: false, focusInside: true, selectionInside: false })).toBe(false);
+    expect(shouldCollapseOffscreenDiff({ expanded: true, intersecting: false, focusInside: false, selectionInside: true })).toBe(false);
+  });
+});
+
 describe("file edits surfaces", () => {
   it("renders the panel and chip in both tool card variants", () => {
     expect(main.match(/<FileEditsPanel edits=\{activity\.edits\} \/>/g)).toHaveLength(2);
@@ -258,7 +290,15 @@ describe("file edits surfaces", () => {
 
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { FileEditsChip, FileEditsPanel, TurnEditsSummaryBox, turnFileChangesSummary } from "../src/file_edits_view";
+import {
+  FileEditsChip,
+  FileEditsPanel,
+  MAX_AUTO_EXPAND_DIFF_CHARS,
+  TurnEditsSummaryBox,
+  shouldAutoExpandDiff,
+  shouldCollapseOffscreenDiff,
+  turnFileChangesSummary,
+} from "../src/file_edits_view";
 
 describe("file edits components render server-side", () => {
   it("chip summarizes count and stats", () => {
@@ -381,7 +421,8 @@ describe("file edits components render server-side", () => {
 
 describe("file edits auto-expand contract", () => {
   it("folds diff sections under auto-collapse while tool cards still auto-open", () => {
-    expect(component).toContain("useState(() => !!edit.diff && (!autoCollapse || expandDuringWork))");
+    expect(component).toContain("const autoExpand = shouldAutoExpandDiff(edit.diff, { autoCollapse, expandDuringWork });");
+    expect(component).toContain("const [expanded, setExpanded] = useState(autoExpand);");
     expect(main).toContain("const hasEdits = !!activity.edits?.length;");
     expect(main).toContain("const [expanded, setExpanded] = useState(() => hasEdits)");
     expect(main).toContain("if (hasEdits) setExpanded(true);");
