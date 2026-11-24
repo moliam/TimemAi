@@ -6,6 +6,7 @@ import { insideMergeableStreamRow, useSelectionGestureGuard } from "./selection_
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
+import { SESSION_CREATE_CONFIRM_TIMEOUT_MS, sessionCreateFailure, sessionCreateUnconfirmed } from "./session_create_guard";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault, setBetaPreference, useBetaPreference } from "./beta_preferences";
@@ -898,6 +899,7 @@ function TimemApp() {
   const eventCursorRef = useRef(0);
   const semanticDeliveryRef = useRef(false);
   const creatingSessionRef = useRef(false);
+  const sessionCreateTimerRef = useRef<number | undefined>(undefined);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
   const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
@@ -2182,6 +2184,14 @@ function TimemApp() {
           );
         }
         if (event.status === "rejected") {
+          if (completed?.type === "session_create") {
+            window.clearTimeout(sessionCreateTimerRef.current);
+            sessionCreateTimerRef.current = undefined;
+            creatingSessionRef.current = false;
+            setCreatingSession(false);
+            const failure = sessionCreateFailure(event.error);
+            reportUiError(failure.title, failure.detail, "system");
+          }
           if (completed?.type === "turn_submit") {
             setRejectedSubmitCommandIds((current) => {
               const next = new Set(current);
@@ -2454,6 +2464,8 @@ function TimemApp() {
         // A user-initiated creation takes over the view; background restore
         // publications only fill the list progressively without stealing
         // the user's current selection.
+        window.clearTimeout(sessionCreateTimerRef.current);
+        sessionCreateTimerRef.current = undefined;
         const userInitiated = creatingSessionRef.current;
         creatingSessionRef.current = false;
         setCreatingSession(false);
@@ -6234,6 +6246,18 @@ function TimemApp() {
               setCreatingSession(true);
               if (sendCommand(command)) {
                 closeNewSessionDialog();
+                // Fault tolerance: a create command that never gets confirmed
+                // (host rejection lost, transport died) must not leave the
+                // dialog locked in `creating`; the close button is disabled
+                // while it is set.
+                window.clearTimeout(sessionCreateTimerRef.current);
+                sessionCreateTimerRef.current = window.setTimeout(() => {
+                  if (!creatingSessionRef.current) return;
+                  creatingSessionRef.current = false;
+                  setCreatingSession(false);
+                  const failure = sessionCreateUnconfirmed();
+                  reportUiError(failure.title, failure.detail, "system");
+                }, SESSION_CREATE_CONFIRM_TIMEOUT_MS);
               } else {
                 creatingSessionRef.current = false;
                 setCreatingSession(false);
