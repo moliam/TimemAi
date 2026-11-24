@@ -18,6 +18,10 @@ fn json_string_list_parses_stringified_arrays_and_trims_brackets() {
         super::json_string_list(&json!("[\"/a/b.py\", \"/c/d.rs\"]")),
         vec!["/a/b.py", "/c/d.rs"]
     );
+    // A stringified EMPTY array is authoritative: zero real files means no
+    // edits at all, never a path literally named "[]".
+    assert_eq!(super::json_string_list(&json!("[]")), Vec::<String>::new());
+    assert_eq!(super::json_string_list(&json!("")), Vec::<String>::new());
     // Plain comma lists keep working, with stray brackets/quotes trimmed.
     assert_eq!(
         super::json_string_list(&json!("/a/b.py, /c/d.rs")),

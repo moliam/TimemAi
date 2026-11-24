@@ -54,14 +54,50 @@ export function runBashEditPresentation(
   input: unknown,
 ): RunBashEditPresentation | undefined {
   if (action !== "run_bash" || !record(input)) return;
-  const edit = input.edit;
-  const paths = typeof edit === "string"
-    ? [edit]
-    : Array.isArray(edit) && edit.every(path => typeof path === "string")
-      ? edit
-      : undefined;
+  const paths = normalizeEditPaths(input.edit);
   if (!paths || paths.length === 0 || paths.some(path => !path.trim())) return;
   return { paths: paths.map(path => path.trim()) };
+}
+
+// The model sometimes stringify-declares the whole array (edit: "[]") or
+// passes a single bare path. Parse the same shapes the runtime's
+// json_string_list accepts, so a degenerate empty form never renders the call
+// as an edit command with a path literally named "[]".
+function normalizeEditPaths(edit: unknown): string[] | undefined {
+  const raw = typeof edit === "string"
+    ? parseStringifiedEditPaths(edit)
+    : Array.isArray(edit) && edit.every((item) => typeof item === "string")
+      ? edit.map((item) => item.trim())
+      : undefined;
+  if (!raw) return undefined;
+  // 用户反馈：遍历下来没有真实、可定位的文件，就当作空——不渲染 edit、
+  // 不把调用当成 edit 命令。展示层无法访问文件系统，用可定位形态近似：
+  // 绝对路径、~、./ ../、含分隔符，或带扩展名的相对路径。
+  const locatable = raw.filter(isLocatablePathShape);
+  return locatable.length > 0 ? locatable : undefined;
+}
+
+function parseStringifiedEditPaths(text: string): string[] | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      if (!parsed.every((item) => typeof item === "string")) return undefined;
+      return parsed.map((item) => item.trim());
+    }
+  } catch {
+    // Plain path text, not JSON.
+  }
+  return [trimmed];
+}
+
+function isLocatablePathShape(path: string): boolean {
+  if (!path) return false;
+  return /^(?:[A-Za-z]:[\\/]|~(?:\/|\b)|\.{1,2}\/)/.test(path)
+    || path.includes("/")
+    || path.includes("\\")
+    || /\.[^./\\]+(?:$|[\\/])/.test(path);
 }
 
 

@@ -158,11 +158,21 @@ describe("structured run_bash edit presentation", () => {
     ["run_bash", {}],
     ["run_bash", { edit: "" }],
     ["run_bash", { edit: [] }],
-    ["run_bash", { edit: ["a.txt", ""] }],
     ["run_bash", { edit: ["a.txt", 1] }],
     ["run_bash", { cmd: "touch inferred.txt" }],
+    // 用户反馈：模型可能发任何奇怪的 edit 值；按正确语法提取后真实文件为 0
+    // 就当空——字符串化的 "[]"、裸垃圾 token 都不算文件。
+    ["run_bash", { edit: "[]" }],
+    ["run_bash", { edit: "j" }],
+    ["run_bash", { edit: ["j", "[]"] }],
   ])("falls back instead of guessing for %s %j", (action, value) => {
     expect(runBashEditPresentation(action as string, value)).toBeUndefined();
+  });
+
+  it("keeps the real files after extracting, dropping only non-path entries", () => {
+    // 空白项不是文件：提取出 1 个真实文件就渲染它，而不是整体回退。
+    expect(runBashEditPresentation("run_bash", { cmd: "true", edit: ["a.txt", ""] }))
+      .toEqual({ paths: ["a.txt"] });
   });
 
   it("renders PenLine followed by the declared comma-separated paths", () => {

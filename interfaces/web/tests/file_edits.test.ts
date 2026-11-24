@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { fileEditsPresentation, parseDiffRows } from "../src/tool_presentation";
+import {
+  fileEditsPresentation,
+  parseDiffRows,
+  runBashEditPresentation,
+} from "../src/tool_presentation";
 
 const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -391,6 +395,34 @@ describe("file edits auto-expand contract", () => {
     // 带修改证据的行豁免折叠组合并，diff 卡片始终完整可见。
     expect(main).toContain("const mergeableCount = completed.filter(activity => !activity.edits?.length).length;");
     expect(main).toContain("const merged = mergeableCount > 0 && !expanded && !interactionHeld;");
+  });
+});
+
+describe("runBashEditPresentation", () => {
+  // 用户反馈：模型经常发奇形怪状的 edit 声明（字符串化的 "[]" 等）。按正确
+  // 语法提取后，真实可定位文件为 0 就当作空——不渲染 edit、不当成 edit 命令。
+  const presentation = (edit: unknown) =>
+    runBashEditPresentation("run_bash", { cmd: "true", edit });
+
+  it("treats degenerate or unlocatable declarations as empty", () => {
+    expect(presentation(undefined)).toBeUndefined();
+    expect(presentation([])).toBeUndefined();
+    expect(presentation("")).toBeUndefined();
+    expect(presentation("[]")).toBeUndefined();
+    expect(presentation('["", " "]')).toBeUndefined();
+    expect(presentation("j")).toBeUndefined();
+    expect(presentation(["j", "[]"])).toBeUndefined();
+    expect(runBashEditPresentation("readfile", { edit: ["a.rs"] })).toBeUndefined();
+  });
+
+  it("renders locatable declarations, tolerating stringified arrays", () => {
+    expect(presentation("src/main.rs")).toMatchObject({ paths: ["src/main.rs"] });
+    expect(presentation('["/abs/f.txt","b.py"]')).toMatchObject({
+      paths: ["/abs/f.txt", "b.py"],
+    });
+    expect(presentation(["~/x.md", "./rel.c", "..\\up.h", "pkg/v.ts", "Makefile.tar"])).toMatchObject({
+      paths: ["~/x.md", "./rel.c", "..\\up.h", "pkg/v.ts", "Makefile.tar"],
+    });
   });
 });
 

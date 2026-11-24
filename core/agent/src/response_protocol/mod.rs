@@ -559,9 +559,9 @@ pub fn json_string_list(value: &Value) -> Vec<String> {
             // Models sometimes stringify the whole array (edit: "[\"/a/b.py\"]");
             // parse it as JSON first so brackets never leak into item text.
             if let Ok(items) = serde_json::from_str::<Vec<String>>(text) {
-                if !items.is_empty() {
-                    return items;
-                }
+                // A parsed JSON array is authoritative even when empty:
+                // edit: "[]" means "no edits", never a path named "[]".
+                return items;
             }
             text.split(',')
                 .map(str::trim)
