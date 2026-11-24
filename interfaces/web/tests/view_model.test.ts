@@ -48,6 +48,8 @@ import {
   groupDecisionsBySessionTurn,
   hasOnlyFreeTalkActivity,
   manualToolGenCommand,
+  MAX_AUTO_HYDRATE_EVENTS,
+  MAX_CLIENT_TURN_EVENTS,
   MAX_CLIENT_TURNS,
   timelineEventsSignature,
   timelineOutlineShapeKey,
@@ -5228,6 +5230,39 @@ describe("turnNeedsFullEventFetch", () => {
     expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: false, timelineActive: false })).toBe(false);
     expect(turnNeedsFullEventFetch(full, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
     expect(turnNeedsFullEventFetch(unflagged, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+  });
+
+  it("keeps very long restored turns on their bounded preview", () => {
+    const long = {
+      state: "completed",
+      events_slimmed: true,
+      history_event_count: MAX_AUTO_HYDRATE_EVENTS + 1,
+    } as unknown as WebTurn;
+    const atLimit = {
+      state: "completed",
+      events_slimmed: true,
+      history_event_count: MAX_AUTO_HYDRATE_EVENTS,
+    } as unknown as WebTurn;
+    expect(turnNeedsFullEventFetch(long, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(atLimit, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(true);
+  });
+});
+
+describe("long-turn client retention", () => {
+  it("keeps only the newest events per turn so per-event work stays bounded", () => {
+    let current = upsertTurn(session("session_1"), turn("turn_1"));
+    for (let index = 0; index < MAX_CLIENT_TURN_EVENTS + 5; index += 1) {
+      current = appendTurnEvent(current, "turn_1", {
+        event_id: `event_${index}`,
+        source: "worker_activity",
+        payload: {},
+        created_at_ms: index + 1,
+      });
+    }
+    const events = current.turns[0].events;
+    expect(events.length).toBe(MAX_CLIENT_TURN_EVENTS);
+    expect(events[0]?.event_id).toBe("event_5");
+    expect(events.at(-1)?.event_id).toBe(`event_${MAX_CLIENT_TURN_EVENTS + 4}`);
   });
 });
 

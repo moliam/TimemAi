@@ -370,6 +370,8 @@ export type WebTurn = {
    * action skeletons, snapshot tail). Clients fetch full detail via
    * turn_history_page instead of rendering `…[truncated]` previews. */
   events_slimmed?: boolean;
+  /** Pre-trim event count for restored turns; absent/0 on live turns. */
+  history_event_count?: number;
   /** Host-folded begin-to-end file changes of this turn. Authoritative: the
    * event list is a trimmed transport window and must not be re-aggregated. */
   file_changes?: WebTurnFileChanges | null;

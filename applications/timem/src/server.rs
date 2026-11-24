@@ -916,6 +916,10 @@ struct WebTurn {
     /// instead of rendering `…[truncated]` previews.
     #[serde(skip_serializing_if = "is_false")]
     events_slimmed: bool,
+    /// Total events this turn recorded before transport trimming. Lets clients
+    /// decide whether a restored turn is cheap enough to hydrate in full; 0
+    /// for live turns, whose projected events are already complete.
+    history_event_count: usize,
     /// Authoritative begin-to-end file-change summary of the turn. The host
     /// folds it as events arrive (and once from the full raw history when a
     /// turn is restored), so the client renders it instead of re-deriving the
@@ -8378,6 +8382,7 @@ fn interrupted_turn_from_queued_message(
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -9053,6 +9058,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     final_answer: None,
                     completion: None,
                     events_slimmed: false,
+                    history_event_count: 0,
 
                     file_changes: None,
                     file_change_state: TurnFileChangeAccumulator::default(),
@@ -9178,6 +9184,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     final_answer: None,
                     completion: None,
                     events_slimmed: false,
+                    history_event_count: 0,
 
                     file_changes: None,
                     file_change_state: TurnFileChangeAccumulator::default(),
@@ -9209,6 +9216,10 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
         }
     }
     for turn in turns.values_mut() {
+        // Record the pre-trim size first: clients use it to avoid eagerly
+        // hydrating a turn whose full process would be tens of thousands of
+        // rows. The transport window below stays bounded either way.
+        turn.history_event_count = turn.events.len();
         // The summary is folded from the complete history above, so trimming
         // the transport window can never shrink the reported file set.
         turn.file_changes = turn.file_change_state.summary_if_any();
@@ -16654,6 +16665,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -16829,6 +16841,7 @@ fn start_web_toolgen_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -18278,6 +18291,7 @@ fn activate_core_started_turn(
                 final_answer: None,
                 completion: None,
                 events_slimmed: false,
+                history_event_count: 0,
 
                 file_changes: None,
                 file_change_state: TurnFileChangeAccumulator::default(),
@@ -19492,6 +19506,7 @@ fn submit_unconsumed_supplement_handoff(
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),

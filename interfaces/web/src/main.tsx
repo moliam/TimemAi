@@ -237,6 +237,7 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  MAX_CLIENT_TURN_EVENTS,
   parseMailboxEntryText,
   parseTimerEntryText,
   prependHistoryRecords,
@@ -3124,7 +3125,7 @@ function TimemApp() {
           turnHistoryPagesRef.current.delete(key);
           if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
             ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
-              ? { ...turn, events: restored.events, events_slimmed: false, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
+              ? { ...turn, events: restored.events.length > MAX_CLIENT_TURN_EVENTS ? restored.events.slice(-MAX_CLIENT_TURN_EVENTS) : restored.events, events_slimmed: false, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
           }));
           else {
             // No stored records survived retention rotation for this turn; it
@@ -10692,14 +10693,21 @@ function TimemThread({
     const viewport = viewportRef.current;
     const navigation = userMessageNavigationRef.current;
     if (!viewport || !navigation) return;
-    const viewportRect = viewport.getBoundingClientRect();
-    const navigationRect = navigation.getBoundingClientRect();
-    const navigationCenter = navigationRect.top + navigationRect.height / 2;
+    // Fast path: without an expanded reading outline there is nothing to
+    // position. Bail out before any rect read, otherwise every resize/mutation
+    // forces a full layout of a possibly very large timeline.
     const expandedOutlines = Array.from(
       viewport.querySelectorAll<HTMLElement>(
         '[data-session-timeline-active="true"] .final-answer-outline.expanded',
       ),
     );
+    if (expandedOutlines.length === 0) {
+      applyUserMessageNavigationLayout({ overlap: "none" });
+      return;
+    }
+    const viewportRect = viewport.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    const navigationCenter = navigationRect.top + navigationRect.height / 2;
     const activeOutline = expandedOutlines.find((candidate) => {
       const rect = candidate.getBoundingClientRect();
       return rect.top <= navigationCenter && rect.bottom >= navigationCenter;
@@ -10800,9 +10808,15 @@ function TimemThread({
       updateUserMessageNavigation();
       return;
     }
+    const anchors = userMessageAnchors();
+    if (anchors.length === 0) {
+      userMessageAnchorOffsetsRef.current = [];
+      updateUserMessageNavigation();
+      return;
+    }
     const viewportTop = viewport.getBoundingClientRect().top;
     const scrollTop = viewport.scrollTop;
-    userMessageAnchorOffsetsRef.current = userMessageAnchors().map(
+    userMessageAnchorOffsetsRef.current = anchors.map(
       (anchor) => scrollTop + anchor.getBoundingClientRect().top - viewportTop,
     );
     updateUserMessageNavigation();
@@ -12496,6 +12510,9 @@ const WorkingElapsed = memo(function WorkingElapsed({
   );
 });
 
+/// Maximum process rows rendered per turn before the reader asks for more.
+const TURN_WORK_RENDER_LIMIT = 240;
+
 const TurnInteraction = memo(function TurnInteraction({
   sessionId,
   turn,
@@ -12678,10 +12695,20 @@ const TurnInteraction = memo(function TurnInteraction({
     () => streamRetentionActive ? computeStreamRetention(scrollItems.map(({ activity }) => activity)) : null,
     [streamRetentionActive, scrollItems],
   );
-  const workItems = useMemo(
+  const workItemsAll = useMemo(
     () => streamRetention ? scrollItems.filter(item => streamRetention.isFramed(item.activity)) : scrollItems,
     [scrollItems, streamRetention],
   );
+  // A single turn can legitimately contain thousands of steps. Render a fixed
+  // sliding window instead of growing the list: paging back moves the window
+  // without adding DOM, so browsing older steps can never recreate the slow
+  // state, and "newer" always brings the reader back to the live tail.
+  const [workItemOffset, setWorkItemOffset] = useState(0);
+  const workItemEnd = Math.max(0, workItemsAll.length - workItemOffset);
+  const workItemStart = Math.max(0, workItemEnd - TURN_WORK_RENDER_LIMIT);
+  const workItems = workItemsAll.slice(workItemStart, workItemEnd);
+  const olderWorkItemCount = workItemStart;
+  const newerWorkItemCount = workItemsAll.length - workItemEnd;
   const toolActivityRuns = useMemo(
     () =>
       summarizeConsecutiveToolActivities(
@@ -13081,6 +13108,24 @@ const TurnInteraction = memo(function TurnInteraction({
               >
                 <div className="turn-work-content" ref={workContentRef}>
                   {" "}
+                  {olderWorkItemCount > 0 && (
+                    <button
+                      type="button"
+                      className="turn-work-load-earlier"
+                      onClick={() =>
+                        setWorkItemOffset(
+                          (current) => current + TURN_WORK_RENDER_LIMIT,
+                        )
+                      }
+                    >
+                      {t("turn.loadEarlierWork", {
+                        count: Math.min(
+                          olderWorkItemCount,
+                          TURN_WORK_RENDER_LIMIT,
+                        ),
+                      })}
+                    </button>
+                  )}
                   {workItems.map((item, index) => {
                     const { activity } = item;
                     if (activity?.tone === "action") {
@@ -13110,6 +13155,24 @@ const TurnInteraction = memo(function TurnInteraction({
                       />
                     ) : null;
                   })}{" "}
+                  {newerWorkItemCount > 0 && (
+                    <button
+                      type="button"
+                      className="turn-work-load-earlier turn-work-load-newer"
+                      onClick={() =>
+                        setWorkItemOffset((current) =>
+                          Math.max(0, current - TURN_WORK_RENDER_LIMIT),
+                        )
+                      }
+                    >
+                      {t("turn.loadNewerWork", {
+                        count: Math.min(
+                          newerWorkItemCount,
+                          TURN_WORK_RENDER_LIMIT,
+                        ),
+                      })}
+                    </button>
+                  )}
                   {decisions.map((decision, index) => (
                     <InlineDecision
                       key={decisionKey(decision)}

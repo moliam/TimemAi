@@ -646,6 +646,7 @@ fn snapshot_trimming_keeps_the_turn_file_change_summary() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
         file_changes: state.summary_if_any(),
         file_change_state: state,
     };
@@ -2077,6 +2078,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -2092,6 +2094,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -2122,6 +2125,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -2137,6 +2141,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -2159,6 +2164,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -2237,6 +2243,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -2271,6 +2278,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -2345,6 +2353,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -5042,6 +5051,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -5110,6 +5120,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         final_answer: None,
         completion: None,
         events_slimmed: false,
+        history_event_count: 0,
 
         file_changes: None,
         file_change_state: TurnFileChangeAccumulator::default(),
@@ -13584,6 +13595,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             final_answer: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -18410,6 +18422,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             preview: None,
             completion: None,
             events_slimmed: false,
+            history_event_count: 0,
 
             file_changes: None,
             file_change_state: TurnFileChangeAccumulator::default(),
@@ -19366,6 +19379,39 @@ fn restored_history_events_mark_events_slimmed_only_when_slimmed() {
     assert!(
         !short.events_slimmed,
         "turns whose restored events fit the preview budget must stay unflagged"
+    );
+}
+
+#[test]
+fn restored_turns_report_the_pre_trim_event_count() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "long turn").unwrap();
+    for index in 0..60 {
+        append_turn_event(
+            &state,
+            "session_a",
+            Some(&turn.turn_id),
+            "core_topic",
+            json!({"payload": {"free_talk": format!("step-{index}")}}),
+        )
+        .unwrap();
+    }
+    let store = current_session_store(&state).unwrap();
+    let restored = restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_a")).unwrap(),
+    );
+    let restored_turn = restored
+        .iter()
+        .find(|item| item.turn_id == turn.turn_id)
+        .unwrap();
+    assert_eq!(
+        restored_turn.events.len(),
+        40,
+        "transport window stays bounded"
+    );
+    assert_eq!(
+        restored_turn.history_event_count, 60,
+        "clients need the untrimmed size to decide whether to hydrate"
     );
 }
 
@@ -26211,6 +26257,7 @@ mod session_work_file_update_persistence_tests {
                 final_answer: Some("done".to_string()),
                 completion: Some(serde_json::json!({ "stop_reason": "Completed" })),
                 events_slimmed: false,
+                history_event_count: 0,
 
                 file_changes: None,
                 file_change_state: TurnFileChangeAccumulator::default(),

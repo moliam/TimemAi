@@ -832,6 +832,8 @@ export const zh = {
   },
   turn: {
     cancelled: "已取消",
+    loadEarlierWork: "加载更早的 {count} 条过程",
+    loadNewerWork: "回到较新 {count} 条过程",
     interrupted: "已中断",
     workNotesUpdated: "更新当前对话工作笔记",
   },

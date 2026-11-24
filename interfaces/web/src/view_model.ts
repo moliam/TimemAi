@@ -107,6 +107,23 @@ export type TurnTimelinePlacement = {
  * turn_history_page. Classic folded mode keeps previews until the user
  * expands, and hidden timeline panes wait until they become active.
  */
+/// Restored turns above this pre-trim event count keep their bounded preview
+/// instead of auto-hydrating: a genuinely long turn (thousands of steps) must
+/// not stall the UI by pulling and rendering tens of megabytes on open.
+export const MAX_AUTO_HYDRATE_EVENTS = 2000;
+
+/// Client-side retention window for one turn's live event list. The complete
+/// history stays on the Host; keeping only the tail bounds the per-event array
+/// copy and derived projections, so a long-running Turn cannot slow down
+/// quadratically as its event list grows.
+export const MAX_CLIENT_TURN_EVENTS = 2000;
+
+function boundedTurnEvents(events: WebTurnEvent[]): WebTurnEvent[] {
+  return events.length > MAX_CLIENT_TURN_EVENTS
+    ? events.slice(-MAX_CLIENT_TURN_EVENTS)
+    : events;
+}
+
 export function turnNeedsFullEventFetch(
   turn: WebTurn,
   options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
@@ -114,6 +131,7 @@ export function turnNeedsFullEventFetch(
   if (!options.streamUiMode || options.streamArchive) return false;
   if (!options.timelineActive) return false;
   if (turn.state === "working") return false;
+  if ((turn.history_event_count ?? 0) > MAX_AUTO_HYDRATE_EVENTS) return false;
   return turn.events_slimmed === true;
 }
 
@@ -1151,7 +1169,9 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
     incoming.state === "completed" ||
     !!incoming.completion;
   const boundedIncoming =
-    previousIsTerminal && !incomingIsTerminal ? previous : incoming;
+    previousIsTerminal && !incomingIsTerminal
+      ? previous
+      : { ...incoming, events: boundedTurnEvents(incoming.events) };
   const turns = trimTurns(
     previous
       ? session.turns.map((turn) =>
@@ -1446,7 +1466,7 @@ export function appendTurnEvent(
     ...target,
     final_answer:
       finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
-    events: [...target.events, event],
+    events: boundedTurnEvents([...target.events, event]),
   };
   return {
     ...session,

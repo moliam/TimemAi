@@ -835,6 +835,8 @@ export const en: Strings = {
   },
   turn: {
     cancelled: "Cancelled",
+    loadEarlierWork: "Load {count} earlier steps",
+    loadNewerWork: "Back to {count} newer steps",
     interrupted: "Interrupted",
     workNotesUpdated: "Updated the current conversation's work notes",
   },
