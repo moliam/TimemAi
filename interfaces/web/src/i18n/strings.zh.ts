@@ -321,7 +321,7 @@ export const zh = {
     fileOpDeleted: "删除",
     fileOpUnchanged: "无变化",
     fileOpSkipped: "跳过",
-    fileDiffOmitted: "【已省略】差异超出限制，已截断",
+    fileDiffTooLarge: "【diff过大】",
     copyDiff: "复制差异",
     diffCopied: "已复制",
     copyFailed: "复制失败",

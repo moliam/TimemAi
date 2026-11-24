@@ -324,7 +324,7 @@ export const en: Strings = {
     fileOpDeleted: "Deleted",
     fileOpUnchanged: "Unchanged",
     fileOpSkipped: "Skipped",
-    fileDiffOmitted: "[Omitted] Diff truncated by runtime limits",
+    fileDiffTooLarge: "Diff too large",
     copyDiff: "Copy diff",
     diffCopied: "Copied",
     copyFailed: "Copy failed",

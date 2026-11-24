@@ -266,7 +266,7 @@ describe("file edits surfaces", () => {
       "fileOpDeleted",
       "fileOpUnchanged",
       "fileOpSkipped",
-      "fileDiffOmitted",
+      "fileDiffTooLarge",
       "copyDiff",
       "diffCopied",
       "copyFailed",
@@ -295,6 +295,7 @@ import {
   FileEditsPanel,
   MAX_AUTO_EXPAND_DIFF_CHARS,
   TurnEditsSummaryBox,
+  fileEditSectionExpandable,
   shouldAutoExpandDiff,
   shouldCollapseOffscreenDiff,
   turnFileChangesSummary,
@@ -365,17 +366,25 @@ describe("file edits components render server-side", () => {
     expect(html.match(/file-edit-gutter">2<\/span>/g)).toHaveLength(1);
   });
 
-  it("renders all captured diff rows and marks runtime truncation as omitted", () => {
+  it("renders truncated diffs as a static summary row without any expansion", () => {
+    // 用户反馈：超大 diff 直接给摘要行（动作/文件/+行数/【diff过大】），
+    // 不再展开——展开只能看到被截断的半截 diff 和一行「已省略」提示。
     const rows = Array.from({ length: 24 }, (_, index) => ` kept-${index}`);
     const diff = `--- a/long.txt\n+++ b/long.txt\n@@ -1,24 +1,24 @@\n${rows.join("\n")}\n`;
     const html = renderToString(createElement(FileEditsPanel, {
       edits: [{ ...validEntry, path: "long.txt", diff, truncated: true }],
-    }));
-    expect(html).toContain("file-edit-row-ctx");
-    expect(html).toContain("kept-0");
-    expect(html).toContain("kept-23");
-    expect(html).toContain("file-edit-notice");
-    expect(html).toContain("\u3010\u5df2\u7701\u7565\u3011");
+    })).replace(/<!-- -->/g, "");
+    expect(html).not.toContain("file-edit-row-ctx");
+    expect(html).not.toContain("kept-0");
+    expect(html).not.toContain("aria-expanded");
+    expect(html).not.toContain("file-edit-chevron");
+    expect(html).not.toContain("file-edit-copy");
+    expect(html).not.toContain("file-edit-notice");
+    expect(html).toContain("\u3010diff\u8fc7\u5927\u3011");
+    // 行头仍保留动作、路径与行数统计，信息密度不变。
+    expect(html).toContain("file-edit-op-modified");
+    expect(html).toContain("long.txt");
+    expect(html).toContain("+1");
   });
 
   it("labels payload-slimmed edits with the omitted tag, not a truncation notice", () => {
@@ -394,6 +403,8 @@ describe("file edits components render server-side", () => {
     // 用户反馈：只删一行却写「超出限制、已截断」自相矛盾——预算省略只用类型标签说明。
     expect(html).toContain("file-edit-kind");
     expect(html).not.toContain("file-edit-notice");
+    // 预算省略已有「差异已省略」类型标签，不再叠加【diff过大】。
+    expect(html).not.toContain("\u3010diff\u8fc7\u5927\u3011");
   });
 
   it("panel default-expands diff sections and tags non-text sections", () => {
@@ -595,5 +606,18 @@ describe("file edits panel numbering", () => {
     expect(headIndex).toBeLessThan(opIndex);
     expect(styles).toContain(".file-edit-index { flex: none; min-width: 1.2em; text-align: right;");
     expect(styles).toContain(':root[data-theme="light"] .file-edit-index');
+  });
+});
+
+describe("file edit section expandability", () => {
+  it("treats truncated diffs as non-expandable static rows", () => {
+    expect(fileEditSectionExpandable(validEntry)).toBe(true);
+    expect(fileEditSectionExpandable(entry({ truncated: true }))).toBe(false);
+    expect(fileEditSectionExpandable(entry({ diff: null }))).toBe(false);
+    expect(component).toContain("const expandable = fileEditSectionExpandable(edit);");
+    expect(component).toContain("{edit.truncated && !edit.skip_reason && (");
+    expect(component).toContain('t("tools.fileDiffTooLarge")');
+    // 旧提示彻底移除：截断不再是「可展开面板 + 尾部说明」。
+    expect(component).not.toContain('t("tools.fileDiffOmitted")');
   });
 });

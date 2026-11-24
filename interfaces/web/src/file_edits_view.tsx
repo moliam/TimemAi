@@ -182,6 +182,12 @@ export function shouldAutoExpandDiff(
   return options.expandDuringWork || !options.autoCollapse;
 }
 
+/// A diff the runtime had to truncate is a static summary row: expanding a
+/// partial diff behind a "truncated" notice only showed an incomplete body.
+export function fileEditSectionExpandable(edit: FileEditPresentation): boolean {
+  return !!edit.diff && !edit.truncated;
+}
+
 /// A diff body only stays mounted while it is on screen. Collapsing an
 /// off-screen section keeps historical diffs from accumulating DOM; focus and
 /// text selection win over the automatic cleanup.
@@ -230,7 +236,7 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
     [edit.diff, expanded],
   );
   const { directory, name } = splitEditPath(edit.path);
-  const expandable = !!edit.diff;
+  const expandable = fileEditSectionExpandable(edit);
   // Non-text edits carry no diff; the capture size rides in the tag tooltip.
   const kindLabel = !expandable && edit.skip_reason
     ? t(KIND_LABEL_KEYS[edit.skip_reason] ?? ("tools.fileKindUnreadable" as StringKey))
@@ -359,6 +365,9 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
             {edit.removed_lines > 0 && <span className="file-edit-deletions">&minus;{edit.removed_lines}</span>}
           </span>
         )}
+        {edit.truncated && !edit.skip_reason && (
+          <span className="file-edit-kind">{t("tools.fileDiffTooLarge")}</span>
+        )}
         {expandable && (
           <span
             className={`file-edit-copy ${copyClass}`}
@@ -399,14 +408,7 @@ function FileEditSection({ edit, index, showIndex }: { edit: TurnEditEntry; inde
               <DiffRowView key={index} row={row} />
             ))}
           </div>
-          {edit.truncated && <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>}
         </div>
-      )}
-      {/* Budget trimming already shows the "diff omitted" kind tag; repeating a
-          truncation notice there read as a contradiction (1 line yet "over the
-          limit"), because that limit is the turn payload, not this file. */}
-      {!expandable && edit.truncated && !edit.skip_reason && (
-        <div className="file-edit-notice">{t("tools.fileDiffOmitted")}</div>
       )}
     </div>
   );
