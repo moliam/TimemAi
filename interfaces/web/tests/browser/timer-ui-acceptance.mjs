@@ -519,6 +519,13 @@ async function main() {
       (await browser.evaluate(`document.querySelector('.timer-create-form label')?.textContent`)).includes("工作内容"),
       "work assignment label missing",
     );
+    assert(
+      await browser.evaluate(`(() => {
+        const box = document.querySelector('.timer-create-form input[type=checkbox]');
+        return Boolean(box) && box.checked === true;
+      })()`),
+      "agent-change permission must default to checked",
+    );
 
     // Create form validation: prompt required, delay required.
     assert(
