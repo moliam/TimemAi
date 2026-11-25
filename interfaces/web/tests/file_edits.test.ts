@@ -479,7 +479,7 @@ describe("runBashEditPresentation", () => {
 });
 
 describe("turnFileChangesSummary", () => {
-  // 净变化（首触 op vs 末态 op、中途创建又删除丢弃、按首触顺序、64 个上限）现在由
+  // 净变化（首触 op vs 末态 op、中途创建又删除丢弃、按首触顺序、128 个上限）现在由
   // Host 折叠并随 turn 下发，Rust 侧 server::tests 覆盖；这里只校验客户端如何接受
   // 并渲染这份权威投影。
   it("parses the host summary as-is; rows carry no capture count", () => {
@@ -505,9 +505,9 @@ describe("turnFileChangesSummary", () => {
     expect(turnFileChangesSummary({ edits: [{ ...validEntry, extra_key: 1 }] })).toBeUndefined();
   });
 
-  it("accepts the host's 64 path budget but not more", () => {
-    const edits = Array.from({ length: 64 }, (_, index) => ({ ...validEntry, path: `f${index}.txt` }));
-    expect(turnFileChangesSummary({ edits })?.edits).toHaveLength(64);
+  it("accepts the host's 128 path budget but not more", () => {
+    const edits = Array.from({ length: 128 }, (_, index) => ({ ...validEntry, path: `f${index}.txt` }));
+    expect(turnFileChangesSummary({ edits })?.edits).toHaveLength(128);
     expect(turnFileChangesSummary({ edits: [...edits, validEntry] })).toBeUndefined();
   });
 

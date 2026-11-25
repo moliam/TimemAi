@@ -980,7 +980,7 @@ struct TurnFileChangeAccumulator {
     net: Option<WebTurnFileChanges>,
 }
 
-const TURN_FILE_CHANGES_LIMIT: usize = 64;
+const TURN_FILE_CHANGES_LIMIT: usize = 128;
 const TURN_FILE_CHANGE_DIFF_BYTES: usize = 1024 * 1024;
 
 /// The `edits` array of a `core.action` topic payload, if it carries one.

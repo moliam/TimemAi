@@ -922,47 +922,85 @@ fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
     apply_payload_budget_with_limit(entries, MAX_EDITS_PAYLOAD_BYTES)
 }
 
+fn slim_budget_entry(entry: &FileEditEntry) -> FileEditEntry {
+    if entry.diff.is_none() {
+        return entry.clone();
+    }
+    let mut slim = entry.clone();
+    slim.diff = None;
+    slim.truncated = true;
+    slim.skip_reason = Some(SKIP_BUDGET);
+    slim
+}
+
+fn minimal_budget_entry(entry: &FileEditEntry) -> FileEditEntry {
+    let mut minimal = entry.clone();
+    minimal.path = clamp_chars(&entry.path, 128);
+    // Keep the real op: budget pressure drops the diff, not the edit.
+    minimal.diff = None;
+    minimal.added_lines = 0;
+    minimal.removed_lines = 0;
+    minimal.truncated = false;
+    if minimal.skip_reason.is_none() {
+        minimal.skip_reason = Some(SKIP_BUDGET);
+    }
+    minimal
+}
+
+fn budget_entry_len(entry: &FileEditEntry) -> usize {
+    entry_json(entry).to_string().len() + 1
+}
+
+/// Bound the serialized edits array. All paths get metadata first, then the
+/// remaining budget is spent on diffs from smallest to largest. This keeps a
+/// large file from consuming the budget before smaller useful diffs are kept.
+/// Entries whose diff does not fit stay visible with `budget_exhausted`.
 fn apply_payload_budget_with_limit(
     entries: Vec<FileEditEntry>,
     max_bytes: usize,
 ) -> Vec<FileEditEntry> {
-    let mut kept: Vec<FileEditEntry> = Vec::new();
+    let mut bounded: Vec<FileEditEntry> = entries.iter().map(slim_budget_entry).collect();
     let mut used = 2usize; // "[]"
-    for entry in entries {
-        let full_len = entry_json(&entry).to_string().len() + 1;
-        if used + full_len <= max_bytes {
-            used += full_len;
-            kept.push(entry);
-            continue;
-        }
-        let mut slim = entry.clone();
-        slim.diff = None;
-        slim.truncated = true;
-        let slim_len = entry_json(&slim).to_string().len() + 1;
-        if used + slim_len <= max_bytes {
-            used += slim_len;
-            kept.push(slim);
-            continue;
-        }
-        let minimal = FileEditEntry {
-            path: clamp_chars(&entry.path, 128),
-            // Keep the real op: budget pressure drops the diff, not the edit.
-            op: entry.op,
-            diff: None,
-            added_lines: 0,
-            removed_lines: 0,
-            truncated: false,
-            skip_reason: Some(SKIP_BUDGET),
-            size_bytes: entry.size_bytes,
-        };
-        let minimal_len = entry_json(&minimal).to_string().len() + 1;
-        if used + minimal_len > max_bytes {
-            break;
-        }
-        used += minimal_len;
-        kept.push(minimal);
+    for entry in &bounded {
+        used = used.saturating_add(budget_entry_len(entry));
     }
-    kept
+    if used > max_bytes {
+        // Even metadata exceeds the budget (pathological input): keep as many
+        // minimal rows as fit in declaration order instead of emitting an
+        // oversized payload.
+        let mut minimal_rows = Vec::new();
+        let mut minimal_used = 2usize;
+        for entry in entries {
+            let minimal = minimal_budget_entry(&entry);
+            let minimal_len = budget_entry_len(&minimal);
+            if minimal_used + minimal_len > max_bytes {
+                break;
+            }
+            minimal_used += minimal_len;
+            minimal_rows.push(minimal);
+        }
+        return minimal_rows;
+    }
+
+    // Spend the remaining budget on the smallest diffs first. Ties keep the
+    // declaration order. The output vector itself stays in declaration order.
+    let mut candidates: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.diff.as_ref().map(|_| index))
+        .collect();
+    candidates.sort_by_key(|&index| (entries[index].diff.as_ref().map_or(0, String::len), index));
+    for index in candidates {
+        let slim_len = budget_entry_len(&bounded[index]);
+        let full_len = budget_entry_len(&entries[index]);
+        let next_used = used.saturating_sub(slim_len).saturating_add(full_len);
+        if next_used > max_bytes {
+            continue;
+        }
+        used = next_used;
+        bounded[index] = entries[index].clone();
+    }
+    bounded
 }
 
 fn clamp_chars(text: &str, max: usize) -> String {

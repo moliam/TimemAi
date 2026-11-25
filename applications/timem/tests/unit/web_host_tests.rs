@@ -479,12 +479,12 @@ fn turn_file_change_summary_folds_net_begin_to_end_change() {
     assert_eq!(modified_then_untouched.edits[0].op, "modified");
     assert!(modified_then_untouched.edits[0].diff.is_some());
 
-    // 上限 64 个文件，其余计入 overflow。
-    let many: Vec<Value> = (0..66)
+    // 上限 128 个文件，其余计入 overflow。
+    let many: Vec<Value> = (0..130)
         .map(|index| edit(&format!("f{index}.txt"), "modified", Some("--- a\n+x\n"), 0))
         .collect();
     let capped = fold(&many);
-    assert_eq!(capped.edits.len(), 64);
+    assert_eq!(capped.edits.len(), 128);
     assert_eq!(capped.overflow_count, 2);
 }
 
@@ -562,8 +562,8 @@ fn ledger_turn_edits_rows_carry_net_ops_with_kind_tags() {
     assert_eq!(summary.edits[1].skip_reason.as_deref(), Some("binary"));
     assert_eq!(summary.edits[1].size_bytes, Some(4096));
 
-    // 行数上限与折叠路径一致：64 行进总结，其余计 overflow。
-    let many: Vec<Value> = (0..66)
+    // 行数上限与折叠路径一致：128 行进总结，其余计 overflow。
+    let many: Vec<Value> = (0..130)
         .map(|index| {
             json!({
                 "path": format!("f{index}.txt"),
@@ -578,7 +578,7 @@ fn ledger_turn_edits_rows_carry_net_ops_with_kind_tags() {
         })
         .collect();
     let capped = web_turn_file_changes_from_rows(&many);
-    assert_eq!(capped.edits.len(), 64);
+    assert_eq!(capped.edits.len(), 128);
     assert_eq!(capped.overflow_count, 2);
 }
 

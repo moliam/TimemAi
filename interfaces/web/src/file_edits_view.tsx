@@ -115,8 +115,8 @@ export function turnFileChangesSummary(value: unknown): TurnEditsSummary | undef
   if (!value || typeof value !== "object") return undefined;
   const summary = value as { edits?: unknown; overflow_count?: unknown };
   // The host already folded the turn, so the entry budget is the host's own
-  // (64 paths) rather than the per-tool-call card budget.
-  const edits = fileEditsPresentation(summary.edits, { maxEntries: 64 });
+  // (128 paths) rather than the per-tool-call card budget.
+  const edits = fileEditsPresentation(summary.edits, { maxEntries: 128 });
   if (!edits) return undefined;
   const overflow = summary.overflow_count;
   return {

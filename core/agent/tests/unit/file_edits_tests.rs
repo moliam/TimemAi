@@ -583,6 +583,55 @@ fn payload_budget_degrades_large_sets_without_losing_paths() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+fn budget_entry(path: &str, diff_len: usize) -> FileEditEntry {
+    FileEditEntry {
+        path: path.to_string(),
+        op: FileEditOp::Modified,
+        diff: Some("x".repeat(diff_len)),
+        added_lines: 1,
+        removed_lines: 1,
+        truncated: false,
+        skip_reason: None,
+        size_bytes: None,
+    }
+}
+
+fn slim_budget_len(entry: &FileEditEntry) -> usize {
+    let mut slim = entry.clone();
+    slim.diff = None;
+    slim.truncated = true;
+    slim.skip_reason = Some(SKIP_BUDGET);
+    entry_json(&slim).to_string().len() + 1
+}
+
+#[test]
+fn payload_budget_spends_on_smallest_diffs_first() {
+    let large = budget_entry("large.txt", 60_000);
+    let small = budget_entry("small.txt", 10_000);
+    let medium = budget_entry("medium.txt", 30_000);
+    let base = 2 + slim_budget_len(&large) + slim_budget_len(&small) + slim_budget_len(&medium);
+    let small_extra = entry_json(&small).to_string().len() + 1 - slim_budget_len(&small);
+    let medium_extra = entry_json(&medium).to_string().len() + 1 - slim_budget_len(&medium);
+    let budget = base + small_extra + medium_extra;
+
+    let bounded = apply_payload_budget_with_limit(vec![large, small, medium], budget);
+    let paths: Vec<&str> = bounded.iter().map(|entry| entry.path.as_str()).collect();
+    assert_eq!(paths, vec!["large.txt", "small.txt", "medium.txt"]);
+    let row = |path: &str| {
+        bounded
+            .iter()
+            .find(|entry| entry.path == path)
+            .unwrap_or_else(|| panic!("missing {path}"))
+    };
+    assert!(row("small.txt").diff.is_some());
+    assert!(row("medium.txt").diff.is_some());
+    let large = row("large.txt");
+    assert!(large.diff.is_none());
+    assert_eq!(large.skip_reason.as_deref(), Some(SKIP_BUDGET));
+    let serialized = edits_payload(&FileEditsEvidence { edits: bounded }).to_string();
+    assert!(serialized.len() <= budget);
+}
+
 #[test]
 fn edits_payload_shape_is_stable_for_interfaces() {
     let entry = FileEditEntry {

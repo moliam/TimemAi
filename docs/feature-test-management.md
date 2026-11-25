@@ -1284,3 +1284,4 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 存储语义：最终模型响应事件是 `Progress`，action 事件是 `Action`，均归入 Process tier；`conversation_tier_usage` 按整个 JSONL 行计费，容量回收 `prune_process_records_oldest` 会优先清理这些 Process 记录。没有另建旁路缓存或独立文件。
 - Web：`MAX_FILE_EDIT_DIFF_CHARS` 从 40,000 提升到 1,100,000，允许 1 MiB diff 及截断标记；过期大 diff 仍会被白名单校验拒绝。
 - 测试看护：`file_edits_tests` 覆盖 1 MiB 截断、metadata 无 diff、payload 预算降级；`web_host_tests` 覆盖 final response 只带一次 full net、metadata 借用 per-call diff、恢复时不误标 slimmed；`file_edits.test.ts` 覆盖 1.1M 字符边界。验证：core `file_edits` 39、core lib 1052、timem lib 547、web 1100、tsc/build 通过。
+- 预算分配（2026-11-25 追加）：17 MiB 不再按声明顺序先到先得；Core 先为所有路径保留 metadata，再把剩余额度按 diff 文本字节从小到大分配给完整 diff。放不下的路径仍保留在总结里，只是 `diff=null`、`skip_reason=budget_exhausted`；输出顺序仍按原声明顺序。Host 总结仍保留 128 条路径硬上限，超过部分计入 overflow。测试 `payload_budget_spends_on_smallest_diffs_first` 把大文件放在数组最前，断言小/中 diff 仍先被保留、大 diff 被省略，防止大文件抢占额度。
