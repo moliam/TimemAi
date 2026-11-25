@@ -1275,3 +1275,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 修法：`ModelRetryStatusPill` 在 `toggle` 时量剩余空间——`above` = 胶囊顶到阅读区顶，`below` = 胶囊底到阅读区底；`below < 面板需要高度` 且 `below < above` 时加 `.is-above`，CSS 改为 `top: auto; bottom: calc(100% + 7px)` 向上展开，并把面板 `max-height` 收进上方余量（至少 96px、至多 240px，超出仍可内部滚动）。打开状态下监听阅读区滚动与窗口缩放，用 rAF 重新判定，避免胶囊滚到底部后仍向下展开。
 - 语义边界：只在空间不足时翻转；向下放得下时保持原行为，胶囊在回合标题处仍向下展开。
 - 测试看护：新增 `model_retry_status.test.ts` 两例（空间测量与 `.is-above` 契约、剩余空间高度与滚动重判）。验证：web `pnpm test` 1069（84 文件）、tsc 过。
+
+## 2026-11-25 轮次 diff 总结保留 1 MiB/文件并计入会话存储
+
+- 用户诉求：任务结束后的「本轮文件修改」总结卡需要保留更大的文本文件 diff，每个文件最多 1 MiB；这部分开销必须写入 session 日志，并遵守会话存储容量与回收限制。
+- 核心实现：`file_edits.rs` 的 `MAX_DIFF_FILE_BYTES` 从 32 KiB 提升到 1 MiB，总 payload 预算提升到 16 个文件 + 1 MiB 余量；per-action 的 `turn_edits` 只携带 metadata（路径、op、行数、truncated、size），不再把完整 net diff 写进每个 action 事件；最终 `core.model.response`（`continue_work=false`）才附加一次完整 net diff。metadata 路径只计算行数，不渲染大 diff。
+- Host 恢复与传输：`TurnFileChangeAccumulator` 用 per-call `edits` 的 diff 补齐 metadata 行；restore 从 raw history 折叠 `file_changes`，但发给浏览器的 event payload 去掉冗余 `turn_edits`；`events_slimmed` 不再把这次去重误判为截断，避免无意义的全量历史回载。
+- 存储语义：最终模型响应事件是 `Progress`，action 事件是 `Action`，均归入 Process tier；`conversation_tier_usage` 按整个 JSONL 行计费，容量回收 `prune_process_records_oldest` 会优先清理这些 Process 记录。没有另建旁路缓存或独立文件。
+- Web：`MAX_FILE_EDIT_DIFF_CHARS` 从 40,000 提升到 1,100,000，允许 1 MiB diff 及截断标记；过期大 diff 仍会被白名单校验拒绝。
+- 测试看护：`file_edits_tests` 覆盖 1 MiB 截断、metadata 无 diff、payload 预算降级；`web_host_tests` 覆盖 final response 只带一次 full net、metadata 借用 per-call diff、恢复时不误标 slimmed；`file_edits.test.ts` 覆盖 1.1M 字符边界。验证：core `file_edits` 39、core lib 1052、timem lib 547、web 1100、tsc/build 通过。

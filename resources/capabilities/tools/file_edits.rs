@@ -28,10 +28,13 @@ const SNAPSHOT_BINARY_PROBE_BYTES: usize = 8 * 1024;
 const SNAPSHOT_COPY_CHUNK_BYTES: usize = 64 * 1024;
 /// Sequential counter disambiguating concurrent snapshot directories.
 static SNAPSHOT_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
-/// Serialized diff text cap per file.
-const MAX_DIFF_FILE_BYTES: usize = 32 * 1024;
-/// Serialized total payload budget across all entries.
-const MAX_EDITS_PAYLOAD_BYTES: usize = 96 * 1024;
+/// Serialized diff text cap per file. The turn summary keeps at most this
+/// much per text file; the same text is persisted in the session log and
+/// therefore counts toward conversation capacity.
+const MAX_DIFF_FILE_BYTES: usize = 1024 * 1024;
+/// Serialized total payload budget across all entries. Sized to carry one
+/// full per-file diff for every entry before falling back to slim rows.
+const MAX_EDITS_PAYLOAD_BYTES: usize = MAX_EDIT_FILES * MAX_DIFF_FILE_BYTES + 1024 * 1024;
 /// Unified-diff context lines around each change region.
 const DIFF_CONTEXT_LINES: usize = 3;
 /// Anchor-less middle-section line cap before falling back to a whole-file
@@ -484,10 +487,20 @@ impl TurnFileEditsLedger {
     /// its turn closed and a later turn re-registered the ledger): the
     /// summary already shipped for that turn stays untouched.
     pub(crate) fn net_evidence_for_turn(&self, turn_id: &str) -> Option<FileEditsEvidence> {
-        (self.turn_id == turn_id).then(|| self.net_evidence())
+        (self.turn_id == turn_id).then(|| self.net_evidence(true))
     }
 
-    fn net_evidence(&self) -> FileEditsEvidence {
+    /// Metadata-only net rows for per-action summaries. The same large diff
+    /// must not be rewritten into every action event; the final model response
+    /// ships the full net evidence once.
+    pub(crate) fn net_evidence_for_turn_metadata(
+        &self,
+        turn_id: &str,
+    ) -> Option<FileEditsEvidence> {
+        (self.turn_id == turn_id).then(|| self.net_evidence(false))
+    }
+
+    fn net_evidence(&self, include_diff: bool) -> FileEditsEvidence {
         let mut entries = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             let (after, after_size) = read_snapshot(&entry.resolved);
@@ -502,23 +515,31 @@ impl TurnFileEditsLedger {
                         FileContentSnapshot::OnDisk { path } => read_snapshot(path),
                         other => (other.clone(), 0),
                     };
-                    net_row(build_entry(&entry.path, &before, &after, size_bytes))
+                    net_row(build_entry_with_diff(
+                        &entry.path,
+                        &before,
+                        &after,
+                        size_bytes,
+                        include_diff,
+                    ))
                 }
-                LedgerBaseline::Absent => net_row(build_entry(
+                LedgerBaseline::Absent => net_row(build_entry_with_diff(
                     &entry.path,
                     &FileContentSnapshot::Missing,
                     &after,
                     size_bytes,
+                    include_diff,
                 )),
                 LedgerBaseline::Existed { reason } => {
                     // Without a baseline, a path that still exists carries no
                     // net information; only a disappearance is reportable.
                     matches!(after, FileContentSnapshot::Missing).then(|| {
-                        let mut row = build_entry(
+                        let mut row = build_entry_with_diff(
                             &entry.path,
                             &FileContentSnapshot::Unreadable,
                             &after,
                             size_bytes,
+                            include_diff,
                         );
                         row.skip_reason = Some(reason);
                         row
@@ -660,7 +681,7 @@ fn read_snapshot(path: &Path) -> (FileContentSnapshot, usize) {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (FileContentSnapshot::Missing, 0)
+            return (FileContentSnapshot::Missing, 0);
         }
         Err(_) => return (FileContentSnapshot::Unreadable, 0),
     };
@@ -733,6 +754,16 @@ fn build_entry(
     after: &FileContentSnapshot,
     size_bytes: Option<u64>,
 ) -> FileEditEntry {
+    build_entry_with_diff(declared, before, after, size_bytes, true)
+}
+
+fn build_entry_with_diff(
+    declared: &str,
+    before: &FileContentSnapshot,
+    after: &FileContentSnapshot,
+    size_bytes: Option<u64>,
+    include_diff: bool,
+) -> FileEditEntry {
     let base = FileEditEntry {
         path: declared.to_string(),
         op: FileEditOp::Unchanged,
@@ -756,11 +787,13 @@ fn build_entry(
                     // Byte content changed while the line view did not (final
                     // newline or CRLF/LF rewrite). Expose a meta note instead
                     // of a false "unchanged" card; hunks would be empty.
-                    entry.diff = Some(format!(
-                        "--- a/{declared}\n+++ b/{declared}\n{WHITESPACE_ONLY_NOTE}\n"
-                    ));
+                    if include_diff {
+                        entry.diff = Some(format!(
+                            "--- a/{declared}\n+++ b/{declared}\n{WHITESPACE_ONLY_NOTE}\n"
+                        ));
+                    }
                 } else {
-                    entry.extend_from_diff(declared, &old, &new);
+                    entry.extend_from_diff_with_text(declared, &old, &new, include_diff);
                 }
                 entry
             }
@@ -769,14 +802,14 @@ fn build_entry(
             let mut entry = base;
             entry.op = FileEditOp::Created;
             let new = split_diff_lines(new_text);
-            entry.extend_from_diff(declared, &[], &new);
+            entry.extend_from_diff_with_text(declared, &[], &new, include_diff);
             entry
         }
         (FileContentSnapshot::Lines(old_text), FileContentSnapshot::Missing) => {
             let mut entry = base;
             entry.op = FileEditOp::Deleted;
             let old = split_diff_lines(old_text);
-            entry.extend_from_diff(declared, &old, &[]);
+            entry.extend_from_diff_with_text(declared, &old, &[], include_diff);
             entry
         }
         (FileContentSnapshot::Missing, FileContentSnapshot::Missing) => {
@@ -814,7 +847,22 @@ fn build_entry(
 
 impl FileEditEntry {
     /// Fill diff fields for a created/modified/deleted file.
+    #[cfg(test)]
     fn extend_from_diff(&mut self, declared: &str, old: &[String], new: &[String]) {
+        self.extend_from_diff_with_text(declared, old, new, true);
+    }
+
+    /// Fill line counts and diff metadata. When `include_text` is false only
+    /// the line counts are computed: the metadata form must not render a 1 MiB
+    /// diff for every action, and the final full net row computes the exact
+    /// truncated flag once.
+    fn extend_from_diff_with_text(
+        &mut self,
+        declared: &str,
+        old: &[String],
+        new: &[String],
+        include_text: bool,
+    ) {
         let ops = diff_lines(old, new);
         self.added_lines = ops
             .iter()
@@ -824,6 +872,9 @@ impl FileEditEntry {
             .iter()
             .filter(|op| matches!(op, DiffOp::Delete(_)))
             .count() as u32;
+        if !include_text {
+            return;
+        }
         let mut text = String::new();
         if self.op == FileEditOp::Created {
             text.push_str("--- /dev/null\n");
@@ -834,12 +885,14 @@ impl FileEditEntry {
         } else {
             text.push_str(&format!("--- a/{declared}\n+++ b/{declared}\n"));
         }
+        let mut text_bytes = text.len();
         for hunk in group_hunks(old, new, &ops) {
             let rendered = render_hunk(&hunk);
-            if text.len() + rendered.len() > MAX_DIFF_FILE_BYTES {
+            if text_bytes + rendered.len() > MAX_DIFF_FILE_BYTES {
                 self.truncated = true;
                 break;
             }
+            text_bytes += rendered.len();
             text.push_str(&rendered);
         }
         self.diff = Some(text);
@@ -866,11 +919,18 @@ pub(crate) fn edits_payload(evidence: &FileEditsEvidence) -> Value {
 }
 
 fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
+    apply_payload_budget_with_limit(entries, MAX_EDITS_PAYLOAD_BYTES)
+}
+
+fn apply_payload_budget_with_limit(
+    entries: Vec<FileEditEntry>,
+    max_bytes: usize,
+) -> Vec<FileEditEntry> {
     let mut kept: Vec<FileEditEntry> = Vec::new();
     let mut used = 2usize; // "[]"
     for entry in entries {
         let full_len = entry_json(&entry).to_string().len() + 1;
-        if used + full_len <= MAX_EDITS_PAYLOAD_BYTES {
+        if used + full_len <= max_bytes {
             used += full_len;
             kept.push(entry);
             continue;
@@ -879,7 +939,7 @@ fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
         slim.diff = None;
         slim.truncated = true;
         let slim_len = entry_json(&slim).to_string().len() + 1;
-        if used + slim_len <= MAX_EDITS_PAYLOAD_BYTES {
+        if used + slim_len <= max_bytes {
             used += slim_len;
             kept.push(slim);
             continue;
@@ -896,7 +956,7 @@ fn apply_payload_budget(entries: Vec<FileEditEntry>) -> Vec<FileEditEntry> {
             size_bytes: entry.size_bytes,
         };
         let minimal_len = entry_json(&minimal).to_string().len() + 1;
-        if used + minimal_len > MAX_EDITS_PAYLOAD_BYTES {
+        if used + minimal_len > max_bytes {
             break;
         }
         used += minimal_len;

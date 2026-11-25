@@ -2842,7 +2842,7 @@ impl AgentCore {
                     if update.edits.is_some() {
                         if let Some(net) = self
                             .file_edits_ledger
-                            .net_evidence_for_turn(&update.turn_id)
+                            .net_evidence_for_turn_metadata(&update.turn_id)
                         {
                             event.payload["turn_edits"] = crate::file_edits::edits_payload(&net);
                         }
@@ -3140,7 +3140,7 @@ impl AgentCore {
                     if update.edits.is_some() {
                         if let Some(net) = self
                             .file_edits_ledger
-                            .net_evidence_for_turn(&update.turn_id)
+                            .net_evidence_for_turn_metadata(&update.turn_id)
                         {
                             event.payload["turn_edits"] = crate::file_edits::edits_payload(&net);
                         }
@@ -4862,10 +4862,26 @@ impl AgentCore {
         }
         self.last_notifications = notification::notifications_from_envelope(&parsed);
         if !self.last_notifications.is_empty() {
-            let events = host::notification_topic_events(
+            let mut events = host::notification_topic_events(
                 &self.current_session_id(),
                 &self.last_notifications,
             );
+            // The final response carries the turn's net file-change summary
+            // once. Per-action events only carry metadata rows, so a large diff
+            // is not rewritten into every action record in the session log.
+            if !parsed.continue_work {
+                if let Some(net) = self
+                    .file_edits_ledger
+                    .net_evidence_for_turn(&self.current_action_turn_id())
+                {
+                    let turn_edits = file_edits::edits_payload(&net);
+                    for event in &mut events {
+                        if event.topic.name == CORE_TOPIC_MODEL_RESPONSE {
+                            event.payload["turn_edits"] = turn_edits.clone();
+                        }
+                    }
+                }
+            }
             runtime.on_core_topic_events(&events);
         }
         let deferred_compact_replay = parsed.continue_work
@@ -8576,7 +8592,10 @@ Runtime tool_call ids:",
             // rows alongside the per-call evidence so hosts render the
             // authoritative fold instead of re-deriving one.
             let turn_id = self.current_action_turn_id();
-            if let Some(net) = self.file_edits_ledger.net_evidence_for_turn(&turn_id) {
+            if let Some(net) = self
+                .file_edits_ledger
+                .net_evidence_for_turn_metadata(&turn_id)
+            {
                 event.payload["turn_edits"] = file_edits::edits_payload(&net);
             }
         }

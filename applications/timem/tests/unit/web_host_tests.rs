@@ -583,19 +583,102 @@ fn ledger_turn_edits_rows_carry_net_ops_with_kind_tags() {
 }
 
 #[test]
-fn action_event_turn_edits_requires_the_action_topic() {
+fn action_event_turn_edits_accepts_action_and_final_model_response_topics() {
     let missing = json!({"topic": {"name": CORE_TOPIC_ACTION}, "payload": {"edits": []}});
     assert!(action_event_turn_edits(&missing).is_none());
     let wrong_topic = json!({
-        "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+        "topic": {"name": CORE_TOPIC_MODEL_REPAIR},
         "payload": {"turn_edits": []},
     });
     assert!(action_event_turn_edits(&wrong_topic).is_none());
-    let present = json!({
+    let action = json!({
         "topic": {"name": CORE_TOPIC_ACTION},
         "payload": {"turn_edits": []},
     });
-    assert!(action_event_turn_edits(&present).unwrap().is_empty());
+    assert!(action_event_turn_edits(&action).unwrap().is_empty());
+    let final_response = json!({
+        "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+        "payload": {"turn_edits": []},
+    });
+    assert!(action_event_turn_edits(&final_response).unwrap().is_empty());
+}
+
+#[test]
+fn net_metadata_rows_borrow_the_per_call_diff_evidence() {
+    let mut state = TurnFileChangeAccumulator::default();
+    state.observe(
+        json!([{
+            "path": "src/main.rs",
+            "op": "modified",
+            "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n",
+            "added_lines": 1,
+            "removed_lines": 1,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": 12,
+        }])
+        .as_array()
+        .unwrap(),
+    );
+    state.observe_net(&[json!({
+        "path": "src/main.rs",
+        "op": "modified",
+        "diff": Value::Null,
+        "added_lines": 1,
+        "removed_lines": 1,
+        "truncated": false,
+        "skip_reason": Value::Null,
+        "size_bytes": 12,
+    })]);
+    let summary = state.summary_if_any().unwrap();
+    assert_eq!(summary.edits.len(), 1);
+    assert!(summary.edits[0]
+        .diff
+        .as_deref()
+        .is_some_and(|diff| diff.contains("+new")));
+}
+
+#[test]
+fn final_model_response_turn_edits_ship_the_net_diff_once() {
+    let mut state = TurnFileChangeAccumulator::default();
+    state.observe(
+        json!([{
+            "path": "src/lib.rs",
+            "op": "modified",
+            "diff": "last-hop-only",
+            "added_lines": 1,
+            "removed_lines": 0,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": 10,
+        }])
+        .as_array()
+        .unwrap(),
+    );
+    let payload = json!({
+        "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+        "payload": {"turn_edits": [{
+            "path": "src/lib.rs",
+            "op": "modified",
+            "diff": "full-baseline-to-final",
+            "added_lines": 3,
+            "removed_lines": 2,
+            "truncated": false,
+            "skip_reason": Value::Null,
+            "size_bytes": 10,
+        }]},
+    });
+    let rows = action_event_turn_edits(&payload).unwrap();
+    state.observe_net(&rows);
+    let summary = state.summary_if_any().unwrap();
+    assert_eq!(
+        summary.edits[0].diff.as_deref(),
+        Some("full-baseline-to-final")
+    );
+    assert_eq!(
+        (summary.edits[0].added_lines, summary.edits[0].removed_lines),
+        (3, 2)
+    );
 }
 
 #[test]
@@ -19380,6 +19463,56 @@ fn restored_history_events_mark_events_slimmed_only_when_slimmed() {
         !short.events_slimmed,
         "turns whose restored events fit the preview budget must stay unflagged"
     );
+}
+
+#[test]
+fn restored_final_response_turn_edits_do_not_mark_events_slimmed() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "edit one file").unwrap();
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name": "core.model.response"},
+            "payload": {
+                "free_talk": "done",
+                "final_answer": "done",
+                "turn_edits": [{
+                    "path": "src/main.rs",
+                    "op": "modified",
+                    "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n",
+                    "added_lines": 1,
+                    "removed_lines": 1,
+                    "truncated": false,
+                    "skip_reason": null,
+                    "size_bytes": 12
+                }]
+            }
+        }),
+    )
+    .unwrap();
+    let store = current_session_store(&state).unwrap();
+    let restored = restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_a")).unwrap(),
+    );
+    let restored_turn = restored
+        .iter()
+        .find(|item| item.turn_id == turn.turn_id)
+        .unwrap();
+    assert!(
+        !restored_turn.events_slimmed,
+        "stripping the redundant turn_edits is not a lossy event trim"
+    );
+    let summary = restored_turn
+        .file_changes
+        .as_ref()
+        .expect("restored summary");
+    assert!(summary.edits[0]
+        .diff
+        .as_deref()
+        .is_some_and(|diff| diff.contains("+new")));
 }
 
 #[test]

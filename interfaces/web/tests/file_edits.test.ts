@@ -75,7 +75,7 @@ describe("fileEditsPresentation", () => {
     expect(fileEditsPresentation([{ ...validEntry, op: "renamed" }])).toBeUndefined();
     expect(fileEditsPresentation([{ ...validEntry, skip_reason: "suspicious" }])).toBeUndefined();
     expect(fileEditsPresentation([{ ...validEntry, added_lines: -1 }])).toBeUndefined();
-    expect(fileEditsPresentation([{ ...validEntry, diff: "x".repeat(40_001) }])).toBeUndefined();
+    expect(fileEditsPresentation([{ ...validEntry, diff: "x".repeat(1_100_001) }])).toBeUndefined();
     expect(fileEditsPresentation([{ ...validEntry, extra: true }])).toBeUndefined();
     expect(fileEditsPresentation(Array.from({ length: 17 }, () => validEntry))).toBeUndefined();
   });

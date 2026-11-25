@@ -330,13 +330,13 @@ fn deleted_file_uses_dev_null_target() {
 
 #[test]
 fn oversized_diff_text_is_truncated_but_stats_stay_full() {
-    let old: Vec<String> = (0..300)
-        .map(|index| format!("{:0>3} {}", index, "x".repeat(200)))
+    let old: Vec<String> = (0..6000)
+        .map(|index| format!("{:0>4} {}", index, "x".repeat(200)))
         .collect();
-    let mut new = old.clone();
-    for index in (0..300).step_by(10) {
-        new[index] = format!("changed {index}");
-    }
+    // Replace every line so the hunk itself exceeds the 1 MiB per-file cap.
+    let new: Vec<String> = (0..6000)
+        .map(|index| format!("changed {index} {}", "y".repeat(200)))
+        .collect();
     let mut entry = FileEditEntry {
         path: "big.txt".to_string(),
         op: FileEditOp::Modified,
@@ -350,9 +350,9 @@ fn oversized_diff_text_is_truncated_but_stats_stay_full() {
     };
     entry.extend_from_diff("big.txt", &old, &new);
     assert!(entry.truncated);
-    assert_eq!((entry.added_lines, entry.removed_lines), (30, 30));
+    assert_eq!((entry.added_lines, entry.removed_lines), (6000, 6000));
     let diff = entry.diff.expect("diff");
-    assert!(diff.len() <= 32 * 1024 + 4096);
+    assert!(diff.len() <= 1024 * 1024 + 4096);
 }
 
 #[test]
@@ -573,7 +573,7 @@ fn payload_budget_degrades_large_sets_without_losing_paths() {
         entry.extend_from_diff(name, &old, &new);
         entries.push(entry);
     }
-    let bounded = apply_payload_budget(entries);
+    let bounded = apply_payload_budget_with_limit(entries, 96 * 1024);
     let payload = edits_payload(&FileEditsEvidence { edits: bounded });
     let serialized = payload.to_string();
     assert!(serialized.len() <= 96 * 1024);
@@ -839,6 +839,36 @@ fn turn_ledger_folds_repeated_edits_into_one_baseline_diff() {
     assert_eq!(row.added_lines, 2);
     assert!(row.diff.as_deref().unwrap().contains("+three"));
     assert_eq!(net.edits.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_ledger_metadata_rows_omit_diff_text() {
+    let dir = temp_dir("ledger_metadata");
+    let file = dir.join("notes.txt");
+    let declared = file.to_string_lossy().into_owned();
+    write_file(&file, "one\n");
+    let mut ledger = TurnFileEditsLedger::default();
+    ledger.register(&dir, "turn", std::slice::from_ref(&declared));
+    write_file(&file, "one\ntwo\n");
+
+    let full = ledger.net_evidence_for_turn("turn").unwrap();
+    let full_row = ledger_row(&full, &declared);
+    assert!(full_row
+        .diff
+        .as_deref()
+        .is_some_and(|diff| diff.contains("+two")));
+
+    let metadata = ledger
+        .net_evidence_for_turn_metadata("turn")
+        .expect("metadata evidence");
+    let metadata_row = ledger_row(&metadata, &declared);
+    assert!(metadata_row.diff.is_none());
+    assert_eq!(
+        (metadata_row.added_lines, metadata_row.removed_lines),
+        (1, 0)
+    );
+    assert!(ledger.net_evidence_for_turn_metadata("other").is_none());
     let _ = fs::remove_dir_all(&dir);
 }
 

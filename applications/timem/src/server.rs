@@ -981,7 +981,7 @@ struct TurnFileChangeAccumulator {
 }
 
 const TURN_FILE_CHANGES_LIMIT: usize = 64;
-const TURN_FILE_CHANGE_DIFF_BYTES: usize = 8 * 1024;
+const TURN_FILE_CHANGE_DIFF_BYTES: usize = 1024 * 1024;
 
 /// The `edits` array of a `core.action` topic payload, if it carries one.
 fn action_event_edits(payload: &Value) -> Vec<Value> {
@@ -1055,7 +1055,36 @@ impl TurnFileChangeAccumulator {
     }
 
     fn observe_net(&mut self, rows: &[Value]) {
-        self.net = Some(web_turn_file_changes_from_rows(rows));
+        let mut summary = web_turn_file_changes_from_rows(rows);
+        self.merge_net_diffs_into(&mut summary);
+        self.net = Some(summary);
+    }
+
+    /// Net ledger rows deliberately carry no diff text: the same large diff
+    /// would otherwise be persisted on every action event. Attach the evidence
+    /// collected from per-call `edits` so the summary card still shows it.
+    fn merge_net_diffs_into(&self, summary: &mut WebTurnFileChanges) {
+        for change in &mut summary.edits {
+            if change.diff.is_some() {
+                continue;
+            }
+            let Some(slot) = self.index.get(&change.path).copied() else {
+                continue;
+            };
+            let state = &self.states[slot];
+            let source = if change.op == "created" {
+                state.opening.as_ref().or(state.display.as_ref())
+            } else {
+                state.display.as_ref().or(state.opening.as_ref())
+            };
+            let Some(source) = source else {
+                continue;
+            };
+            if let Some(diff) = source.diff.as_ref() {
+                change.diff = Some(diff.clone());
+                change.truncated = source.truncated;
+            }
+        }
     }
 
     fn summary_if_any(&self) -> Option<WebTurnFileChanges> {
@@ -1070,12 +1099,13 @@ impl TurnFileChangeAccumulator {
 /// carries ledger rows. Presence (even empty) marks authoritative net
 /// evidence: a created-then-deleted file legitimately yields no row.
 fn action_event_turn_edits(payload: &Value) -> Option<Vec<Value>> {
-    if payload
+    let topic = payload
         .get("topic")
         .and_then(|topic| topic.get("name"))
-        .and_then(Value::as_str)
-        != Some(CORE_TOPIC_ACTION)
-    {
+        .and_then(Value::as_str)?;
+    // Mid-turn action events carry metadata rows; the final model response
+    // carries the same net rows with the retained diff text exactly once.
+    if topic != CORE_TOPIC_ACTION && topic != CORE_TOPIC_MODEL_RESPONSE {
         return None;
     }
     payload
@@ -9161,13 +9191,19 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 let completion = (kind == ChatHistoryEventKind::Stats)
                     .then(|| extra.get("completion").cloned())
                     .flatten();
-                let raw_payload = extra
+                let mut raw_payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
-                let payload = slim_restored_action_event(
-                    truncate_restored_event_value(raw_payload.clone(), 0),
-                    &raw_payload,
-                );
+                let folded_edits = action_event_edits(&raw_payload);
+                let net_edits = action_event_turn_edits(&raw_payload);
+                let mut transport_payload = truncate_restored_event_value(raw_payload.clone(), 0);
+                strip_model_response_turn_edits_for_transport(&mut transport_payload);
+                let payload = slim_restored_action_event(transport_payload, &raw_payload);
+                // Removing the redundant `turn_edits` from transport is not a
+                // lossy trim: the full summary lives in `file_changes`. Compare
+                // against the raw event with that same field removed so a large
+                // final diff does not falsely trigger full-history hydration.
+                strip_model_response_turn_edits_for_transport(&mut raw_payload);
                 let events_slimmed = payload != raw_payload;
                 let source = extra
                     .remove("source")
@@ -9195,12 +9231,11 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn.completion = Some(completion);
                 }
                 turn.events_slimmed = turn.events_slimmed || events_slimmed;
-                if let Some(rows) = action_event_turn_edits(&payload) {
-                    turn.file_change_state.observe_net(&rows);
-                }
-                let folded_edits = action_event_edits(&payload);
                 if !folded_edits.is_empty() {
                     turn.file_change_state.observe(&folded_edits);
+                }
+                if let Some(rows) = net_edits {
+                    turn.file_change_state.observe_net(&rows);
                 }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
@@ -17165,28 +17200,30 @@ fn append_turn_event(
     // the client renders an authoritative summary instead of re-deriving it.
     let folded_edits = action_event_edits(&payload);
     let net_edits = action_event_turn_edits(&payload);
+    let is_transient_action_output = is_transient_action_output_event(&payload);
+    let history_event =
+        (!is_transient_action_output).then(|| (created_at_ms as i64, payload.clone()));
+    let mut event_payload = payload;
+    strip_model_response_turn_edits_for_transport(&mut event_payload);
     turn.events.push(WebTurnEvent {
         event_id: event_id.clone(),
         source: source.to_string(),
-        payload,
+        payload: event_payload,
         created_at_ms,
         timeline_seq: Some(timeline_seq),
     });
+    if !folded_edits.is_empty() {
+        turn.file_change_state.observe(&folded_edits);
+    }
     if let Some(rows) = net_edits {
         turn.file_change_state.observe_net(&rows);
         turn.file_changes = turn.file_change_state.summary_if_any();
     } else if !folded_edits.is_empty() {
-        turn.file_change_state.observe(&folded_edits);
         turn.file_changes = turn.file_change_state.summary_if_any();
     }
     // Mid-run `core.action` "output" snapshots are live-only projection
     // events (capped per action): the authoritative finish event carries the
     // final bounded preview into history, so streaming updates stay transient.
-    let history_event = turn
-        .events
-        .last()
-        .map(|event| (event.created_at_ms as i64, event.payload.clone()))
-        .filter(|(_, payload)| !is_transient_action_output_event(payload));
     let turn_id = active_turn_id.clone();
     drop(sessions);
     if let Some((created_at_ms, payload)) = history_event {
@@ -17206,6 +17243,22 @@ fn append_turn_event(
         timeline_seq,
         created_at_ms,
     })
+}
+
+/// The one-time net diff on the final model response is stored in the session
+/// log for restore, but the live event only needs the `file_changes` summary.
+fn strip_model_response_turn_edits_for_transport(payload: &mut Value) {
+    if payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str)
+        != Some(CORE_TOPIC_MODEL_RESPONSE)
+    {
+        return;
+    }
+    if let Some(inner) = payload.get_mut("payload").and_then(Value::as_object_mut) {
+        inner.remove("turn_edits");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

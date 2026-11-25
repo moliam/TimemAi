@@ -328,7 +328,9 @@ const FILE_EDIT_SKIP_REASONS = new Set([
 // longer emits (every real capture now carries created/modified/deleted plus a
 // kind tag such as Binary or 文件夹).
 const MAX_FILE_EDIT_ENTRIES = 16;
-const MAX_FILE_EDIT_DIFF_CHARS = 40_000;
+// The runtime clamps each file diff to 1 MiB; allow the truncation marker and
+// UTF-16 length rounding without rejecting the whole edit list.
+const MAX_FILE_EDIT_DIFF_CHARS = 1_100_000;
 
 // Parses the runtime-provided `edits` array from the core.action finish
 // payload. Strict all-or-nothing: any malformed entry rejects the whole
