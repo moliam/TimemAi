@@ -7,7 +7,8 @@ import { useTimedClipboardCopy } from "./clipboard_copy";
 import { normalizeMarkdownMath } from "./markdown_math";
 import { markdownNeedsHeavyEnhancement } from "./markdown_heavy";
 import { extractMarkdownOutline, markdownHeadingId } from "./markdown_outline";
-import { safeMarkdownImageUrl, safeMarkdownLinkUrl } from "./markdown_security";
+import { safeMarkdownImageUrl } from "./markdown_security";
+import { MarkdownLink } from "./file_links";
 
 // Heavy rehype plugins (highlight.js, KaTeX) load progressively: markdown
 // text renders synchronously first, math highlighting/code colors enhance
@@ -70,15 +71,15 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
   const rehypePlugins = ((needsHeavy ? heavyPlugins : null) ?? []) as never[];
   return <div className="markdown-body"><ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
+    urlTransform={(url) => url}
     rehypePlugins={rehypePlugins}
     components={{
       h1: heading(1),
       h2: heading(2),
       h3: heading(3),
-      a: ({ node: _node, href, ...props }) => {
-        const safeHref = safeMarkdownLinkUrl(href);
-        return safeHref ? <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer"/> : <span {...props}/>;
-      },
+      a: ({ node: _node, href, ...props }) => (
+        <MarkdownLink href={href} {...props} />
+      ),
       img: ({ node: _node, src, alt, ...props }) => {
         const safeSrc = safeMarkdownImageUrl(src);
         return safeSrc ? <img {...props} src={safeSrc} alt={alt ?? ""}/> : null;

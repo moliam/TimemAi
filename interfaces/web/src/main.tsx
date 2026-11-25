@@ -384,6 +384,7 @@ import {
   formatLiveElapsed,
 } from "./tool_status";
 import { MarkdownContent } from "./markdown_render";
+import { FileLinkProvider } from "./file_links";
 import { BrowserPerformanceTrace } from "./performance_trace";
 import { createFrameTask, FrameTask } from "./frame_task";
 import { reconcileSessionTimelineCache } from "./session_timeline_cache";
@@ -5815,6 +5816,11 @@ function TimemApp() {
               onClose={() => closeRuntimePanel()}
             />
           )}
+          <FileLinkProvider
+            sessionId={activeSession?.session_id ?? ""}
+            cwd={activeSession?.current_dir}
+            token={queryToken()}
+          >
           <TimemThread
             activeSession={activeSession}
             sessions={sessions}
@@ -5925,6 +5931,7 @@ function TimemApp() {
             }}
             onDecisionReply={replyToDecision}
           />
+          </FileLinkProvider>
         </main>
         {!showToolRepo && showRoles && (
           <button

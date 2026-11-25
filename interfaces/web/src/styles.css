@@ -272,6 +272,7 @@ button:disabled { cursor: not-allowed; }
 .markdown-body li::marker { color: #65bfae; }
 .markdown-body a { color: #75cbbb; text-decoration-color: #75cbbb66; text-underline-offset: 3px; }
 .markdown-body a:hover { color: #9be0d2; text-decoration-color: currentColor; }
+.markdown-body a.markdown-local-file-link { text-decoration-style: dotted; }
 .markdown-body blockquote { margin: .68em 0; padding: .15em .75em; border-left: 3px solid #4e9f91; color: #aebfc8; background: #142028; }
 .markdown-body blockquote > :first-child { margin-top: .34em; }
 .markdown-body blockquote > :last-child { margin-bottom: .34em; }

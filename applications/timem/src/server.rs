@@ -1,6 +1,7 @@
 mod command_dedup;
 mod command_lane;
 mod desktop_launch;
+mod file_preview;
 mod mem_maintenance;
 mod model_endpoint_import;
 mod model_endpoint_share;
@@ -252,6 +253,8 @@ struct AppState {
     /// browser tabs (Insights panel, header chip) read one kernel-level
     /// sample per 2s sweep instead of each re-reading cgroupfs and /proc.
     resource_samples: Arc<session_resource_monitor::ResourceSampleCache>,
+    /// Short-lived capability links for read-only local-file previews.
+    file_previews: Arc<file_preview::FilePreviewLinks>,
 }
 
 #[derive(Default)]
@@ -2538,6 +2541,7 @@ pub async fn run(
         mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
         resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
+        file_previews: Arc::new(file_preview::FilePreviewLinks::default()),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -3665,6 +3669,8 @@ fn build_router(state: AppState, port: u16) -> Router {
             upload: post(upload_file),
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
+            file_preview_link: post(file_preview::create_file_preview_link),
+            file_preview: get(file_preview::serve_file_preview),
             debug_reset_statistics: post(debug_reset_statistics),
             debug_stats_version: get(debug_stats_version),
             upgrade_status: get(upgrade_status),

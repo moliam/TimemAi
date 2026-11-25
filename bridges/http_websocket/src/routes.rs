@@ -22,6 +22,8 @@ pub struct BrowserRouteHandlers<S> {
     pub upload: MethodRouter<S>,
     pub performance_trace: MethodRouter<S>,
     pub debug_browse: MethodRouter<S>,
+    pub file_preview_link: MethodRouter<S>,
+    pub file_preview: MethodRouter<S>,
     pub debug_reset_statistics: MethodRouter<S>,
     pub debug_stats_version: MethodRouter<S>,
     pub upgrade_status: MethodRouter<S>,
@@ -51,6 +53,8 @@ where
         .route("/api/attach/sessions", handlers.attach_sessions)
         .route("/api/upload", handlers.upload)
         .route("/api/debug-browse", handlers.debug_browse)
+        .route("/api/file-preview-links", handlers.file_preview_link)
+        .route("/api/file-preview/:ticket", handlers.file_preview)
         .route("/api/debug/reset", handlers.debug_reset_statistics)
         .route("/api/debug/stats-version", handlers.debug_stats_version)
         .route("/api/upgrade/status", handlers.upgrade_status)
@@ -95,6 +99,8 @@ mod tests {
             upload: post(|_: Bytes| async { "upload" }),
             performance_trace: post(|| async { StatusCode::NO_CONTENT }),
             debug_browse: get(|| async { "debug_browse" }),
+            file_preview_link: post(|| async { "file_preview_link" }),
+            file_preview: get(|| async { "file_preview" }),
             debug_reset_statistics: post(|| async { "debug_reset_statistics" }),
             debug_stats_version: get(|| async { "debug_stats_version" }),
             upgrade_status: get(|| async { "upgrade_status" }),
@@ -127,6 +133,7 @@ mod tests {
             ("/api/attach/sessions", "attach_sessions"),
             ("/api/snapshot", "snapshot"),
             ("/api/upgrade/status", "upgrade_status"),
+            ("/api/file-preview/ticket_1", "file_preview"),
             ("/ws", "websocket"),
             ("/unknown", "asset:/unknown"),
         ] {
@@ -142,6 +149,39 @@ mod tests {
         let response = router
             .clone()
             .oneshot(Request::post("/api/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // Preview tickets are GET-only; issuing a ticket is POST-only.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/file-preview/issued")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/file-preview-links")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await, "file_preview_link");
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/file-preview-links")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);

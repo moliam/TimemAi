@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { MarkdownContentFull as MarkdownContent } from "../src/markdown_pipeline";
 import { extractMarkdownOutline } from "../src/markdown_outline";
+import { FileLinkProvider } from "../src/file_links";
 
 function render(markdown: string, headingIdPrefix?: string) {
   return renderToStaticMarkup(createElement(MarkdownContent, { text: markdown, headingIdPrefix }));
@@ -159,5 +160,21 @@ Inline \\(2P\\) and \\(P_{\\text{decode,active}}\\).
     expect(render("")).toBe('<div class="markdown-body"></div>');
     expect(() => render("a".repeat(200_000))).not.toThrow();
     expect(() => render("[broken](\n```unterminated\n<not-html")).not.toThrow();
+  });
+
+  it("turns local file links into host-preview links inside a session provider", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        FileLinkProvider,
+        { sessionId: "session_1", cwd: "/home/alice/project" },
+        createElement(MarkdownContent, {
+          text: "[local](file:///home/alice/project/notes/a.md) and [route](/docs)",
+        }),
+      ),
+    );
+    expect(html).toContain('data-local-file="/home/alice/project/notes/a.md"');
+    expect(html).toContain('class="markdown-local-file-link"');
+    expect(html).toContain('href="/docs"');
+    expect(html).not.toContain("file:///home/alice/project/notes/a.md");
   });
 });

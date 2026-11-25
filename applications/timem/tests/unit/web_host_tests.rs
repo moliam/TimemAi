@@ -9061,7 +9061,88 @@ fn routing_test_state() -> AppState {
         mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
         resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
+        file_previews: Arc::new(file_preview::FilePreviewLinks::default()),
     }
+}
+
+#[tokio::test]
+async fn file_preview_link_endpoint_is_session_scoped_and_serves_text() {
+    let mut state = routing_test_state();
+    let dir = std::env::temp_dir().join(unique_web_id("file_preview_endpoint_test"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("note.txt"),
+        "hello from preview <script>alert(1)</script>\n",
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.current_dir = dir.display().to_string();
+    }
+
+    let issued = file_preview::create_file_preview_link(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        HeaderMap::new(),
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))),
+        Json(file_preview::FilePreviewLinkRequest {
+            session_id: "session_a".to_string(),
+            path: "note.txt".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued_body = axum::body::to_bytes(issued.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let issued_json: Value = serde_json::from_slice(&issued_body).unwrap();
+    let url = issued_json["url"].as_str().unwrap();
+    let token = url.strip_prefix("/api/file-preview/").unwrap().to_string();
+
+    let preview = file_preview::serve_file_preview(
+        State((state.clone(), TEST_PORT)),
+        axum::extract::Path(token),
+        Query(file_preview::FilePreviewQuery::default()),
+    )
+    .await;
+    assert_eq!(preview.status(), StatusCode::OK);
+    let preview_body = axum::body::to_bytes(preview.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let preview_html = String::from_utf8(preview_body.to_vec()).unwrap();
+    assert!(preview_html.contains("hello from preview"));
+    assert!(!preview_html.contains("<script>alert(1)</script>"));
+    assert!(preview_html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(preview_html.contains("note.txt"));
+
+    let escaped = file_preview::create_file_preview_link(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        HeaderMap::new(),
+        ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))),
+        Json(file_preview::FilePreviewLinkRequest {
+            session_id: "session_a".to_string(),
+            path: "../outside.txt".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(escaped.status(), StatusCode::BAD_REQUEST);
+
+    state.public_access = true;
+    let unauthorized = file_preview::create_file_preview_link(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        HeaderMap::new(),
+        ConnectInfo(SocketAddr::from(([192, 168, 0, 10], 41000))),
+        Json(file_preview::FilePreviewLinkRequest {
+            session_id: "session_a".to_string(),
+            path: "note.txt".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

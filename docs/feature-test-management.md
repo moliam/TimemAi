@@ -1285,3 +1285,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Web：`MAX_FILE_EDIT_DIFF_CHARS` 从 40,000 提升到 1,100,000，允许 1 MiB diff 及截断标记；过期大 diff 仍会被白名单校验拒绝。
 - 测试看护：`file_edits_tests` 覆盖 1 MiB 截断、metadata 无 diff、payload 预算降级；`web_host_tests` 覆盖 final response 只带一次 full net、metadata 借用 per-call diff、恢复时不误标 slimmed；`file_edits.test.ts` 覆盖 1.1M 字符边界。验证：core `file_edits` 39、core lib 1052、timem lib 547、web 1100、tsc/build 通过。
 - 预算分配（2026-11-25 追加）：17 MiB 不再按声明顺序先到先得；Core 先为所有路径保留 metadata，再把剩余额度按 diff 文本字节从小到大分配给完整 diff。放不下的路径仍保留在总结里，只是 `diff=null`、`skip_reason=budget_exhausted`；输出顺序仍按原声明顺序。Host 总结仍保留 128 条路径硬上限，超过部分计入 overflow。测试 `payload_budget_spends_on_smallest_diffs_first` 把大文件放在数组最前，断言小/中 diff 仍先被保留、大 diff 被省略，防止大文件抢占额度。
+
+## 2026-11-25 WebUI 本地文件链接临时预览
+
+- 行为：模型输出中的 `file:///...`、Session CWD 绝对路径和可解析相对文件路径会在点击时换取短期票据，在新标签页打开只读预览；普通站内路由和外部 URL 不受影响。
+- 安全：票据 10 分钟 TTL、最多 128 个、仅内存；只允许 Session CWD/配置 workspace 内的常规文件，签发与访问均 canonicalize 防 `..` 与 symlink 逃逸；HTML/SVG 按文本转义，严格 CSP，不把长期 access token 放进预览 URL。
+- 预览：文本最多 1 MiB、图片 16 MiB、下载 64 MiB；位图可内嵌显示，二进制/超限内容提供受控下载或明确拒绝。
+- 测试看护：Rust `file_preview` 单测（边界/TTL/类型/文件名）、`web_host_tests` 的票据签发与 401 集成测试、bridge 方法约束测试、Web `file_links` 与 Markdown provider 单测。
