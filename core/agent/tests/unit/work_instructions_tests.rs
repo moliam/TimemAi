@@ -53,6 +53,55 @@ fn discovers_and_formats_agents_and_claude_context() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// Builds one already-loaded instruction file, so the header rules can be
+/// checked without touching the filesystem.
+fn instruction_file(filename: &str, source: WorkInstructionSource) -> WorkInstructionFile {
+    WorkInstructionFile {
+        path: PathBuf::from(format!("/tmp/{filename}")),
+        directory: PathBuf::from("/tmp"),
+        filename: filename.to_string(),
+        content: "Body".to_string(),
+        source,
+    }
+}
+
+#[test]
+fn header_names_the_claude_md_scope_that_was_loaded() {
+    let project = format_work_instruction_context(&[instruction_file(
+        "CLAUDE.md",
+        WorkInstructionSource::Project,
+    )])
+    .unwrap();
+    assert!(project.contains("CLAUDE.md guidance (project-level) is injected below."));
+    assert!(project.contains("also follow that CLAUDE.md guidance"));
+
+    let user = format_work_instruction_context(&[instruction_file(
+        "CLAUDE.md",
+        WorkInstructionSource::Global,
+    )])
+    .unwrap();
+    assert!(user.contains("CLAUDE.md guidance (user-level) is injected below."));
+
+    let both = format_work_instruction_context(&[
+        instruction_file("AGENTS.md", WorkInstructionSource::Project),
+        instruction_file("CLAUDE.md", WorkInstructionSource::Project),
+        instruction_file("CLAUDE.md", WorkInstructionSource::Global),
+    ])
+    .unwrap();
+    assert!(both.contains("CLAUDE.md guidance (project-level and user-level) is injected below."));
+}
+
+#[test]
+fn header_stays_silent_when_only_agents_md_was_loaded() {
+    let context = format_work_instruction_context(&[instruction_file(
+        "AGENTS.md",
+        WorkInstructionSource::Project,
+    )])
+    .unwrap();
+    assert!(context.contains("work_directory_instructions"));
+    assert!(!context.contains("CLAUDE.md guidance"));
+}
+
 #[test]
 fn load_report_is_structured_for_host_rendering() {
     let dir = tmp_dir("report");

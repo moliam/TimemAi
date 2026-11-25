@@ -1334,3 +1334,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试看护：`response_preview.rs` 内 6 例——首帧基准与后续纯增量、256 KiB 下 wire 体积低于全量语义的 1/10、CJK/emoji 的 UTF-16 偏移不漂移、settled/新 attempt 重新取基准、撤回清水位、漏帧客户端在 `MAX_DELTA_RUN` 内自愈并追平文本；`interfaces/web/tests/preview_delta.test.ts` 6 例覆盖基准帧、正常增量、空增量、基准不匹配、跨 attempt、空帧丢弃。
 - 验证：`cargo test -p timem --lib response_preview` 7 通过；`cargo fmt -p timem -- --check`、`git diff --check` 通过；Web `preview_delta.test.ts` 6 通过、`tsc --noEmit` 与 `pnpm build` 通过。
 
+## 2026-11-25 注入 CLAUDE.md 时在 prompt 头部点名并要求遵守
+
+- 背景：生态兼容的 instruction 注入此前只有一句 "Follow them while working in that directory"，项目级 / 用户级 `CLAUDE.md` 与 `AGENTS.md` 混在同一个块里，模型容易只当成"仓库文档"读，用户希望明确说明发现了 CLAUDE.md 时要在 Timem 工作指引之外也尽量遵守它。
+- 行为：`format_work_instruction_context` 在注入文件里出现 `CLAUDE.md` 时，于头部追加一句 `CLAUDE.md guidance (project-level | user-level | project-level and user-level) is injected below. Keep following the Timem working guidance and also follow that CLAUDE.md guidance as far as it does not conflict with Timem's own instructions.`；只选中 `AGENTS.md` 时保持原头部不变，不凭空声称存在 CLAUDE.md。
+- 归属：判定只看已加载文件的 `filename == "CLAUDE.md"` 与 `WorkInstructionSource`，不改发现顺序、选择校验、64 KiB 单文件上限或 runtime note 通道。
+- 测试看护：`work_instructions_tests.rs` 新增 2 例——项目级 / 用户级 / 两者同时三种 scope 文案，以及仅 AGENTS.md 时头部不出现 CLAUDE.md 句子；`cargo test -p agent_core --lib work_instruction` 17 通过。
+

@@ -417,6 +417,12 @@ as a dedicated runtime note and deliberately bypasses the per-tool-output byte
 budget, so selected files keep reaching the model in full; the per-file cap and
 context dedupe are its only bounds.
 
+When a `CLAUDE.md` is among the injected files, the prompt header names the scope
+it was found at (`project-level`, `user-level`, or both) and tells the model to
+keep following the Timem working guidance while also following that `CLAUDE.md`
+guidance as far as it does not conflict with it. Only `AGENTS.md` selections keep
+the plain header.
+
 `TIMEM_BASH_APPROVAL` controls model-requested command approval:
 
 - `ask`: prompt before risky/local command execution

@@ -504,6 +504,26 @@ pub fn work_instruction_load_request(dir: &Path) -> Option<WorkInstructionLoadRe
     }
 }
 
+/// A CLAUDE.md is the user's own standing guidance, not a Timem contract file.
+/// The header names the scope it was found at, so the model treats the block as
+/// "follow this too" instead of ordinary repository documentation.
+fn claude_guidance_scope(files: &[WorkInstructionFile]) -> Option<&'static str> {
+    let mut project = false;
+    let mut global = false;
+    for file in files.iter().filter(|file| file.filename == "CLAUDE.md") {
+        match file.source {
+            WorkInstructionSource::Project => project = true,
+            WorkInstructionSource::Global => global = true,
+        }
+    }
+    match (project, global) {
+        (true, true) => Some("project-level and user-level"),
+        (true, false) => Some("project-level"),
+        (false, true) => Some("user-level"),
+        (false, false) => None,
+    }
+}
+
 pub fn format_work_instruction_context(files: &[WorkInstructionFile]) -> Option<String> {
     if files.is_empty() {
         return None;
@@ -512,6 +532,11 @@ pub fn format_work_instruction_context(files: &[WorkInstructionFile]) -> Option<
     let mut out = String::from(
         "work_directory_instructions:\nThese instructions were loaded from Claude/Codex-compatible instruction files for the current working directory. Follow them while working in that directory.\n",
     );
+    if let Some(scope) = claude_guidance_scope(files) {
+        out.push_str(&format!(
+            "CLAUDE.md guidance ({scope}) is injected below. Keep following the Timem working guidance and also follow that CLAUDE.md guidance as far as it does not conflict with Timem's own instructions.\n"
+        ));
+    }
     for file in files {
         out.push_str(&format!(
             "\n[BEGIN PROJECT INSTRUCTION file=\"{}\" directory=\"{}\" source=\"{}\"]\n",
