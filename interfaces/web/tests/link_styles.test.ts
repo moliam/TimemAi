@@ -83,22 +83,35 @@ describe("link affordance styling", () => {
     const underline = token(block, "--link-underline");
     expect(underline).toHaveLength(9);
     expect(underline.slice(1, 7)).toBe(token(block, "--link-ink").slice(1));
-    expect(Number.parseInt(underline.slice(7, 9), 16) / 255).toBeGreaterThanOrEqual(0.5);
+    expect(Number.parseInt(underline.slice(7, 9), 16) / 255).toBeGreaterThanOrEqual(0.7);
+    const wash = token(block, "--link-rest-wash");
+    expect(wash).toHaveLength(9);
+    expect(wash.slice(1, 7)).toBe(token(block, "--link-ink").slice(1));
   });
 
   it("marks every anchor with an always-on underline", () => {
     const body = ruleBody("a");
     expect(body).toContain("color: var(--link-ink);");
     expect(body).toContain("text-decoration: underline;");
-    expect(body).toContain("text-decoration-thickness: 1px;");
+    expect(body).toContain("text-decoration-thickness: 2px;");
     expect(body).toContain("text-decoration-color: var(--link-underline);");
-    expect(body).toContain("text-underline-offset: 3px;");
+    expect(body).toContain("text-underline-offset: 2px;");
   });
 
-  it("adds a second, non-color cue on hover", () => {
+  it("tints reply prose so a link separates from body copy at rest", () => {
+    const body = ruleBody(".markdown-body a");
+    expect(body).toContain("background-color: var(--link-rest-wash);");
+    // A wrapped URL must stay one continuous band instead of one box per line.
+    expect(body).toContain("box-decoration-break: clone;");
+    expect(body).toContain("-webkit-box-decoration-break: clone;");
+    // Backgrounds never affect layout, so the tint cannot reflow reply text.
+    expect(body).not.toContain("padding");
+    expect(body).not.toContain("margin");
+  });
+
+  it("steps the link up again on hover", () => {
     const body = ruleBody("a:hover");
     expect(body).toContain("color: var(--link-hover-ink);");
-    expect(body).toContain("text-decoration-thickness: 2px;");
     expect(body).toContain("text-decoration-color: currentColor;");
     expect(body).toContain("background-color: var(--link-hover-wash);");
   });
@@ -107,6 +120,7 @@ describe("link affordance styling", () => {
     const body = ruleBody("a:focus-visible");
     expect(body).toContain("outline: 2px solid var(--link-ink);");
     expect(body).toContain("outline-offset: 2px;");
+    expect(body).toContain("text-decoration-color: currentColor;");
   });
 
   it("marks outbound links and keeps the marker out of copied text", () => {

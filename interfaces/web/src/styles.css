@@ -1744,9 +1744,10 @@ button:disabled { cursor: not-allowed; }
   --markdown-code-params: #f0c6a8;
   --markdown-code-deletion: #ff9b9b;
   --link-ink: #6fe0cb;
-  --link-underline: #6fe0cb80;
+  --link-underline: #6fe0cbcc;
+  --link-rest-wash: #6fe0cb2e;
   --link-hover-ink: #b9f7ea;
-  --link-hover-wash: #6fe0cb1f;
+  --link-hover-wash: #6fe0cb38;
 }
 
 :root[data-theme="light"] {
@@ -1765,29 +1766,40 @@ button:disabled { cursor: not-allowed; }
   --markdown-code-meta: #953800;
   --markdown-code-params: #6e4c1e;
   --markdown-code-deletion: #a40e26;
-  --link-ink: #0f6b5e;
-  --link-underline: #0f6b5eb3;
-  --link-hover-ink: #0a4f45;
-  --link-hover-wash: #0f6b5e14;
+  --link-ink: #08695b;
+  --link-underline: #08695bcc;
+  --link-rest-wash: #08695b24;
+  --link-hover-ink: #04463d;
+  --link-hover-wash: #08695b38;
 }
 
 /* Link affordance. A link never relies on color alone: the underline is
-   always on, hover thickens it and adds a wash, and keyboard focus draws a
-   ring. Dotted underlines mark destinations the interface handles itself
-   (workspace file preview, debug browser); solid underlines leave the page. */
+   always on, hover brightens the ink and lands a stronger wash, and keyboard
+   focus draws a ring. Dotted underlines mark destinations the interface
+   handles itself (workspace file preview, debug browser); solid underlines
+   leave the page. */
 a {
   border-radius: 3px;
   color: var(--link-ink);
   text-decoration: underline;
-  text-decoration-thickness: 1px;
+  text-decoration-thickness: 2px;
   text-decoration-color: var(--link-underline);
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
   transition: color .15s ease, background-color .15s ease, text-decoration-color .15s ease;
+}
+
+/* Reply prose gets the loudest treatment: a tint band behind the text, so a
+   long URL inside a paragraph separates from body copy before the reader has
+   to compare hues. The tint is a background only, so it never affects layout
+   or line breaking, and `clone` keeps a wrapped URL one continuous band. */
+.markdown-body a {
+  background-color: var(--link-rest-wash);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 a:hover {
   color: var(--link-hover-ink);
-  text-decoration-thickness: 2px;
   text-decoration-color: currentColor;
   background-color: var(--link-hover-wash);
 }
@@ -1795,7 +1807,6 @@ a:hover {
 a:focus-visible {
   outline: 2px solid var(--link-ink);
   outline-offset: 2px;
-  text-decoration-thickness: 2px;
   text-decoration-color: currentColor;
 }
 

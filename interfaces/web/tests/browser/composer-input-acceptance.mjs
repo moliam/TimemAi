@@ -516,7 +516,8 @@ async function main() {
       const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
       if (!anchor) return null;
       const style = getComputedStyle(anchor);
-      let node = anchor;
+      // The link paints its own tint band, so the page surface starts above it.
+      let node = anchor.parentElement;
       let surface = "rgba(0, 0, 0, 0)";
       while (node) {
         const background = getComputedStyle(node).backgroundColor;
@@ -536,6 +537,7 @@ async function main() {
       selection.removeAllRanges();
       return {
         color: style.color,
+        wash: style.backgroundColor,
         surface,
         line: style.textDecorationLine,
         thickness: style.textDecorationThickness,
@@ -557,9 +559,17 @@ async function main() {
     await setTheme("dark");
     const links = { dark: darkLink, light: lightLink };
     assert(links.dark && links.light, "no outbound link rendered inside a model reply");
-    const channels = (value) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
-    const luminance = (value) => {
-      const [red, green, blue] = channels(value).map((channel) => {
+    const parseColor = (value) => {
+      const parts = (value.match(/[\d.]+/g) ?? []).map(Number);
+      return { r: parts[0] ?? 0, g: parts[1] ?? 0, b: parts[2] ?? 0, a: parts[3] ?? 1 };
+    };
+    const over = (top, bottom) => ({
+      r: top.r * top.a + bottom.r * (1 - top.a),
+      g: top.g * top.a + bottom.g * (1 - top.a),
+      b: top.b * top.a + bottom.b * (1 - top.a),
+    });
+    const luminance = ({ r, g, b }) => {
+      const [red, green, blue] = [r, g, b].map((channel) => {
         const scaled = channel / 255;
         return scaled <= 0.04045 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
       });
@@ -575,19 +585,29 @@ async function main() {
         `${theme} reply link is not underlined: ${link.line}`);
       assert(link.offset !== "auto" && parseFloat(link.offset) >= 2,
         `${theme} reply underline offset is ${link.offset}`);
-      assert(link.thickness !== "auto" && parseFloat(link.thickness) >= 1,
+      assert(link.thickness !== "auto" && parseFloat(link.thickness) >= 2,
         `${theme} reply underline thickness is ${link.thickness}`);
+      // At rest the link must already carry a tint band; a reader should not
+      // have to hover or compare hues to notice it.
+      assert(link.wash && link.wash !== "rgba(0, 0, 0, 0)",
+        `${theme} reply link has no resting tint: ${link.wash}`);
       assert(link.marker.includes("\u2197"),
         `${theme} outbound link marker is ${JSON.stringify(link.marker)}`);
-      const contrast = ratio(link.color, link.surface);
-      assert(contrast >= 4.5,
-        `${theme} reply link contrast is ${contrast.toFixed(2)}:1 on ${link.surface}`);
-      console.log(`reply link ${theme}: ${link.color} on ${link.surface}, contrast ${contrast.toFixed(2)}:1`);
-    }
-    for (const theme of ["dark", "light"]) {
-      const [red, green, blue] = channels(links[theme].color);
-      assert(Math.max(red, green, blue) - Math.min(red, green, blue) >= 48,
-        `${theme} reply link ink is not a distinct hue: ${links[theme].color}`);
+      const ink = parseColor(link.color);
+      const surface = parseColor(link.surface);
+      // The link sits on its own band, so the text has to stay legible against
+      // the composited band too, not only against the page surface.
+      const band = over(parseColor(link.wash), surface);
+      const onSurface = ratio(ink, surface);
+      const onBand = ratio(ink, band);
+      assert(onSurface >= 4.5,
+        `${theme} reply link contrast is ${onSurface.toFixed(2)}:1 on ${link.surface}`);
+      assert(onBand >= 4.5,
+        `${theme} reply link contrast is ${onBand.toFixed(2)}:1 on its tint band`);
+      const spread = Math.max(ink.r, ink.g, ink.b) - Math.min(ink.r, ink.g, ink.b);
+      assert(spread >= 48,
+        `${theme} reply link ink is not a distinct hue: ${link.color}`);
+      console.log(`reply link ${theme}: ${link.color} on ${link.surface} (${onSurface.toFixed(2)}:1), on band ${onBand.toFixed(2)}:1`);
     }
     for (const theme of ["dark", "light"]) {
       assert(links[theme].copied.trim() === links[theme].text.trim(),
@@ -645,10 +665,10 @@ async function main() {
     assert(hovered.color !== idle.color,
       `reply link color does not react to hover: ${idle.color}`);
     assert(hovered.background !== idle.background,
-      `reply link has no hover wash: ${idle.background}`);
-    assert(parseFloat(hovered.thickness) > parseFloat(idle.thickness),
-      `reply link underline does not thicken on hover: ${idle.thickness} -> ${hovered.thickness}`);
-    console.log(`reply link hover: ${idle.color} -> ${hovered.color}, underline ${idle.thickness} -> ${hovered.thickness}`);
+      `reply link has no hover wash: ${idle.background} -> ${hovered.background}`);
+    assert(parseFloat(hovered.thickness) >= parseFloat(idle.thickness),
+      `reply link underline thins on hover: ${idle.thickness} -> ${hovered.thickness}`);
+    console.log(`reply link hover: ${idle.color} -> ${hovered.color}, wash ${idle.background} -> ${hovered.background}`);
     await browser.call("Input.dispatchMouseEvent",
       { type: "mouseMoved", x: 8, y: 8, button: "none", buttons: 0 });
     await sleep(120);
