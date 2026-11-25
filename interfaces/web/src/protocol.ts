@@ -357,7 +357,17 @@ export type ResponsePreview = {
   reasoning_tokens?: number | null;
   stream_phase?: "thinking" | "responding" | null;
   interruption?: string | null;
-  response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
+  response?: {
+    attempt: number;
+    revision: number;
+    /** Cumulative text; present only on the base frame of an attempt. */
+    text?: string;
+    status: "streaming" | "intermediate" | "final";
+    /** Appended slice, present on every frame after the base. */
+    text_delta?: string;
+    /** UTF-16 offset in the local copy that `text_delta` continues from. */
+    text_base_len?: number;
+  } | null;
 };
 
 export type WebTurn = {

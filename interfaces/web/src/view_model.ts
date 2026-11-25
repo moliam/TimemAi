@@ -2010,6 +2010,32 @@ export function clearDecisionsForWorker(
  * between agents. This reducer is intentionally strict: an event can mutate
  * only the session named by the canonical core topic envelope.
  */
+/**
+ * Streaming preview frames are pure deltas after the first one: a frame that
+ * carries `text` becomes the new base, every later frame carries only
+ * `text_delta` plus the UTF-16 offset it continues from. Normalize here so all
+ * downstream consumers keep reading one cumulative `text`.
+ *
+ * Returns null when a delta does not continue the local copy (this client
+ * missed the base). The caller drops that frame rather than rendering a
+ * corrupted prefix; the next base frame, or the turn snapshot, resynchronizes.
+ */
+export function resolvePreviewDelta(
+  incoming: NonNullable<WebTurn["preview"]>,
+  previous: WebTurn["preview"] | undefined,
+): NonNullable<WebTurn["preview"]> | null {
+  const response = incoming.response;
+  if (!response) return incoming;
+  if (typeof response.text === "string") return incoming;
+  const delta = response.text_delta;
+  if (typeof delta !== "string") return null;
+  const previousResponse =
+    previous && previous.attempt === response.attempt ? previous.response : null;
+  const base = previousResponse?.text;
+  if (typeof base !== "string" || base.length !== response.text_base_len) return null;
+  return { ...incoming, response: { ...response, text: base + delta } };
+}
+
 export function applyCoreTopicToSession(
   session: Session,
   event: CoreTopicEvent,
@@ -2046,8 +2072,12 @@ export function applyCoreTopicToSession(
     if (turnIndex < 0) return session;
     const target = session.turns[turnIndex];
     if (preview.revision <= (target.preview?.revision ?? 0)) return session;
+    const resolved = resolvePreviewDelta(preview, target.preview);
+    // A delta that does not continue the local copy means frames were missed;
+    // the next snapshot frame resynchronizes instead of a corrupted prefix.
+    if (!resolved) return session;
     const turns = [...session.turns];
-    turns[turnIndex] = { ...target, preview };
+    turns[turnIndex] = { ...target, preview: resolved };
     return { ...session, turns };
   }
   const contextState = event.payload.context_state;
@@ -3020,6 +3050,7 @@ export function toolDisplayName(name: string) {
   if (name === "memmgr") return "MemMgr";
   if (name === "capmgr") return "CapMgr";
   if (name === "self_tool") return "Self Tool";
+  if (name === "timer_after" || name === "timer_every" || name === "timer_on" || name === "timer_cancel") return "Timer";
   return name;
 }
 
