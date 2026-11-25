@@ -442,7 +442,7 @@ describe("file edits auto-expand contract", () => {
     // 自动展开只呈现 diff 面板：命令保持单行缩略，完整代码/输出由手动展开控制。
     expect(main).toContain("const editsAutoOpen = hasEdits && !manuallyToggled;");
     expect(main).toContain('<div className="stream-tool-command-shell">');
-    expect(main).toContain('<pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>');
+    expect(main).toContain('<pre className="stream-tool-command">{code}</pre>');
     expect(main).toContain("(!open || editsAutoOpen) && invocationPreview");
     // 带修改证据的行豁免折叠组合并，diff 卡片始终完整可见。
     expect(main).toContain("const mergeableCount = completed.filter(activity => !activity.edits?.length).length;");

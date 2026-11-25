@@ -13782,11 +13782,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
     const timer = window.setTimeout(() => setSettledAbsorbed(true), STREAM_COLLAPSE_MS);
     return () => window.clearTimeout(timer);
   }, [absorbed, settledAbsorbed]);
-  const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;
-  const commandPreview = useMemo(
-    () => (code ? commandPreviewText(code, commandCap) : undefined),
-    [code, commandCap],
-  );
+  // 折叠行头保留单行预览与省略号；展开后的命令体始终展示完整代码。
   const multilineCommand = commandHasMoreLines(activity);
   const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
@@ -13934,7 +13930,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
                   {t("tools.collapseCommand")}
                 </button>
               )}
-              <pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>
+              <pre className="stream-tool-command">{code}</pre>
             </div>
           )}
           {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
@@ -15718,12 +15714,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
-  // 归档视图：完成即视为已收纳，命令预览收缩为单行；运行中（经典模式）给 5 行。
-  const commandCap = running ? COMMAND_PREVIEW_MAX_LINES : 1;
-  const commandPreview = useMemo(
-    () => (code ? commandPreviewText(code, commandCap) : undefined),
-    [code, commandCap],
-  );
+  // 折叠标题保留单行预览；展开后的命令体始终展示完整代码。
   const multilineCommand = commandHasMoreLines(activity);
   const hasExpandableDetail = !!detail || !!code || !!activity.edits?.length;
   const editsAutoOpen = hasEdits && !manuallyToggled;
@@ -15867,7 +15858,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
                 {t("tools.collapseCommand")}
               </button>
             )}
-            <pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>
+            <pre className="stream-tool-command">{code}</pre>
           </div>
         )}
         {activity.edits?.length ? <FileEditsPanel edits={activity.edits} /> : null}
@@ -15948,19 +15939,9 @@ function toolInvocationPreview(activity: Activity) {
   if (code) return code;
   return activity.detail?.split("\n", 1)[0]?.trim();
 }
-// 用户需求：命令多行预览一次性不可恢复。未被折叠收纳（运行中/新近完成）最多
-// COMMAND_PREVIEW_MAX_LINES 行（结尾省略行+底部渐隐）；一经折叠收纳（handoff/
-// superseded）或进入归档视图，永久收缩为单行，不再恢复完整多行展示。
-const COMMAND_PREVIEW_MAX_LINES = 5;
 // 收纳的收拢时长（与 styles.css 的 .stream-tool-merged-item 过渡一致）：这段时间里
 // 行保持原有内容与高度平滑收拢，内容（预览、命令缩略）等收拢结束再切换。
 const STREAM_COLLAPSE_MS = 220;
-function commandPreviewText(code: string, maxLines: number): { text: string; clipped: boolean } {
-  const lines = code.replace(/\r\n?/g, "\n").split("\n");
-  while (lines.length > 1 && !lines[lines.length - 1].trim()) lines.pop();
-  if (lines.length <= maxLines) return { text: lines.join("\n"), clipped: false };
-  return { text: [...lines.slice(0, maxLines), "…"].join("\n"), clipped: true };
-}
 // 与 toolInvocationPreview 同源：优先命令首行，回退详情首行；判断源文本是否还有后续行。
 function commandHasMoreLines(activity: Activity): boolean {
   const source = activity.code?.split("\n", 1)[0]?.trim() ? activity.code : activity.detail;

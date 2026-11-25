@@ -286,8 +286,8 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview && <span");
   expect(stream).toContain('{!editsAutoOpen && code && (');
   expect(stream).toContain('<div className="stream-tool-command-shell">');
-  expect(stream).toContain('const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;');
-  expect(stream).toContain('<pre className={`stream-tool-command${commandPreview?.clipped ? " stream-tool-command-clipped" : ""}`}>{commandPreview?.text ?? code}</pre>');
+  expect(stream).toContain('<pre className="stream-tool-command">{code}</pre>');
+  expect(stream).not.toContain("commandPreview");
   expect(stream).toContain('{!editsAutoOpen && detail && <div className="stream-tool-detail">{detail}</div>}');
   expect(stream).not.toContain("const command =");
   expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
@@ -423,31 +423,35 @@ it("renders pipe-delimited result size before elapsed in both tool views", () =>
   expect(styles).toContain(".tool-activity summary .tool-activity-sep { display: none; }");
 });
 
-describe("command multi-line preview one-way shrink", () => {
-  const helper = source.slice(source.indexOf("const COMMAND_PREVIEW_MAX_LINES"), source.indexOf("function activitiesFromTurnEvent("));
-  it("caps live commands at five lines with a trailing ellipsis and normalizes newlines", () => {
-    expect(helper).toContain("const COMMAND_PREVIEW_MAX_LINES = 5;");
-    expect(helper).toContain("code.replace(/\\r\\n?/g, \"\\n\").split(\"\\n\")");
-    expect(helper).toContain('[...lines.slice(0, maxLines), "…"].join("\\n")');
-    expect(helper).toContain("clipped: true");
+describe("command preview and expanded body", () => {
+  const helper = source.slice(
+    source.indexOf("// 与 toolInvocationPreview 同源"),
+    source.indexOf("function activitiesFromTurnEvent("),
+  );
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+
+  it("keeps the collapsed header hint while rendering the full expanded command", () => {
     expect(helper).toContain("function commandHasMoreLines(activity: Activity): boolean");
-  });
-  it("stream rows shrink permanently once absorbed and archive rows settle single-line", () => {
-    const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
-    const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
-    expect(stream).toContain("absorbed?: boolean");
-    expect(stream).toContain("const commandCap = running || !settledAbsorbed ? COMMAND_PREVIEW_MAX_LINES : 1;");
-    expect(stream).toContain("if (previous.absorbed !== next.absorbed) return false;");
-    expect(source).toContain("absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))}");
-    expect(ordinary).toContain("const commandCap = running ? COMMAND_PREVIEW_MAX_LINES : 1;");
-    expect(ordinary).not.toContain("fencedCode");
-  });
-  it("head previews hint multi-line commands and clipped bodies fade at the bottom", () => {
+    expect(source).not.toContain("COMMAND_PREVIEW_MAX_LINES");
+    expect(source).not.toContain("commandPreviewText");
+    for (const section of [stream, ordinary]) {
+      expect(section).toContain('<pre className="stream-tool-command">{code}</pre>');
+      expect(section).not.toContain("commandPreview");
+    }
     expect(source).toContain('{invocationPreview.replace(/\\s+/g, " ")}{multilineCommand ? " …" : ""}</span>');
     expect(source).toContain('{invocationPreview}{multilineCommand ? " …" : ""}');
-    expect(styles).toMatch(/\.stream-tool-command \{[^}]*position: relative;/s);
-    expect(styles).toContain(".stream-tool-command-clipped::after");
-    expect(styles).toContain('linear-gradient(180deg, transparent, #262626)');
-    expect(styles).toContain(':root[data-theme="light"] .stream-tool-command-clipped::after');
+  });
+
+  it("keeps absorbed stream rows stable and archive rows expandable", () => {
+    expect(stream).toContain("absorbed?: boolean");
+    expect(stream).toContain("if (previous.absorbed !== next.absorbed) return false;");
+    expect(source).toContain("absorbed={!isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) && (superseded || handoffIds.has(activity.id))}");
+    expect(ordinary).not.toContain("fencedCode");
+  });
+
+  it("scrolls long expanded commands instead of fading a truncated preview", () => {
+    expect(styles).toMatch(/\.stream-tool-command \{[^}]*max-height: 200px;[^}]*overflow: auto;/s);
+    expect(styles).not.toContain(".stream-tool-command-clipped");
   });
 });

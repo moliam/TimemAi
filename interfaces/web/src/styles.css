@@ -5622,19 +5622,6 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-bytes { color: #6a7d88; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
-/* 多行命令预览：上限截断后结尾省略行底部渐隐（单行收纳态不裁剪、无渐变）。 */
-.stream-tool-command-clipped::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 14px;
-  border-radius: 0 0 5px 5px;
-  background: linear-gradient(180deg, transparent, #262626);
-  pointer-events: none;
-}
-:root[data-theme="light"] .stream-tool-command-clipped::after { background: linear-gradient(180deg, transparent, #eef2f1); }
 :root[data-theme="light"] .stream-tool-code-collapse,
 :root[data-theme="light"] .tool-activity-code-collapse { border-color: #b9c8ce; background: #eef2f1e6; color: #52646f; }
 :root[data-theme="light"] .stream-tool-code-collapse:hover,
