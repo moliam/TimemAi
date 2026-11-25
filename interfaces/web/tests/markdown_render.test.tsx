@@ -177,4 +177,27 @@ Inline \\(2P\\) and \\(P_{\\text{decode,active}}\\).
     expect(html).toContain('href="/docs"');
     expect(html).not.toContain("file:///home/alice/project/notes/a.md");
   });
+
+  it("marks outbound links but not links that already show the address", () => {
+    const html = render("[docs](https://example.com/docs) and https://example.com/raw");
+    expect(html).toContain(
+      'class="markdown-external-link" href="https://example.com/docs"',
+    );
+    expect(html).toContain(
+      'class="markdown-external-link markdown-address-link" href="https://example.com/raw"',
+    );
+    expect(html).toContain("https://example.com/raw</a>");
+  });
+
+  it("keeps local file links out of the outbound-link marker", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        FileLinkProvider,
+        { sessionId: "session_1", cwd: "/home/alice/project" },
+        createElement(MarkdownContent, { text: "[notes](notes/a.md)" }),
+      ),
+    );
+    expect(html).toContain('class="markdown-local-file-link"');
+    expect(html).not.toContain("markdown-external-link");
+  });
 });

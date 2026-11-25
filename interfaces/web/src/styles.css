@@ -294,9 +294,6 @@ button:disabled { cursor: not-allowed; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.45em; }
 .markdown-body li + li { margin-top: .2em; }
 .markdown-body li::marker { color: #65bfae; }
-.markdown-body a { color: #75cbbb; text-decoration-color: #75cbbb66; text-underline-offset: 3px; }
-.markdown-body a:hover { color: #9be0d2; text-decoration-color: currentColor; }
-.markdown-body a.markdown-local-file-link { text-decoration-style: dotted; }
 .markdown-body blockquote { margin: .68em 0; padding: .15em .75em; border-left: 3px solid #4e9f91; color: #aebfc8; background: #142028; }
 .markdown-body blockquote > :first-child { margin-top: .34em; }
 .markdown-body blockquote > :last-child { margin-bottom: .34em; }
@@ -732,8 +729,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .markdown-body h4 { color: #17272e; }
 :root[data-theme="light"] .markdown-body h1,
 :root[data-theme="light"] .markdown-body h2 { border-color: #d6e0e4; }
-:root[data-theme="light"] .markdown-body li::marker,
-:root[data-theme="light"] .markdown-body a { color: #167669; }
+:root[data-theme="light"] .markdown-body li::marker { color: #167669; }
 :root[data-theme="light"] .markdown-body blockquote { border-color: #41998a; background: #edf4f3; color: #536970; }
 :root[data-theme="light"] .markdown-body hr { background: #d5dfe3; }
 :root[data-theme="light"] .table-scroll { border-color: #c7d2d8; background: linear-gradient(90deg, #fff 0, transparent 18px), linear-gradient(270deg, #fff 0, transparent 18px); }
@@ -1727,7 +1723,10 @@ button:disabled { cursor: not-allowed; }
 
 /* Accessible semantic palette for formatted Markdown output.
    Colors are semantic theme tokens so inline code, code blocks, and syntax
-   highlighting keep readable foreground/background pairs in both themes. */
+   highlighting keep readable foreground/background pairs in both themes.
+   Link tokens live here too, because model replies render links on the chat
+   shell surface (#212121 dark, #ffffff light) rather than on the page
+   background. */
 :root {
   --markdown-surface-bg: #0c1117;
   --markdown-inline-code-bg: #182630;
@@ -1744,6 +1743,10 @@ button:disabled { cursor: not-allowed; }
   --markdown-code-meta: #ffc078;
   --markdown-code-params: #f0c6a8;
   --markdown-code-deletion: #ff9b9b;
+  --link-ink: #6fe0cb;
+  --link-underline: #6fe0cb80;
+  --link-hover-ink: #b9f7ea;
+  --link-hover-wash: #6fe0cb1f;
 }
 
 :root[data-theme="light"] {
@@ -1762,6 +1765,61 @@ button:disabled { cursor: not-allowed; }
   --markdown-code-meta: #953800;
   --markdown-code-params: #6e4c1e;
   --markdown-code-deletion: #a40e26;
+  --link-ink: #0f6b5e;
+  --link-underline: #0f6b5eb3;
+  --link-hover-ink: #0a4f45;
+  --link-hover-wash: #0f6b5e14;
+}
+
+/* Link affordance. A link never relies on color alone: the underline is
+   always on, hover thickens it and adds a wash, and keyboard focus draws a
+   ring. Dotted underlines mark destinations the interface handles itself
+   (workspace file preview, debug browser); solid underlines leave the page. */
+a {
+  border-radius: 3px;
+  color: var(--link-ink);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
+  transition: color .15s ease, background-color .15s ease, text-decoration-color .15s ease;
+}
+
+a:hover {
+  color: var(--link-hover-ink);
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+  background-color: var(--link-hover-wash);
+}
+
+a:focus-visible {
+  outline: 2px solid var(--link-ink);
+  outline-offset: 2px;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+}
+
+/* An outbound link opens a new tab, so it carries a small arrow. Links whose
+   label already is the address skip the arrow: the text is the destination,
+   and the marker must never leak into copied reply text. */
+.markdown-body a.markdown-external-link:not(.markdown-address-link)::after {
+  content: "\2197";
+  display: inline-block;
+  margin-left: .14em;
+  font-size: .78em;
+  vertical-align: .16em;
+  opacity: .72;
+  text-decoration: none;
+  user-select: none;
+}
+
+.markdown-body a.markdown-local-file-link {
+  cursor: pointer;
+  text-decoration-style: dotted;
+}
+
+.markdown-body a.markdown-local-file-link:hover {
+  text-decoration-style: solid;
 }
 
 .markdown-body :not(pre) > code {
@@ -5971,8 +6029,15 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Live text/tools share a compact line rhythm; do not stack paragraph margin,
    grid gap and row padding. Archived/non-stream text keeps its own spacing. */
 .turn-stream-tools > .stream-thought-text { margin-bottom: 0; }
-.composer-debug-inline.composer-debug-link { cursor: pointer; color: inherit; text-decoration: none; }
-.composer-debug-inline.composer-debug-link:hover { text-decoration: underline; }
+.composer-debug-inline.composer-debug-link,
+.composer-debug-inline.composer-debug-link b,
+.composer-debug-inline.composer-debug-link span { color: var(--link-ink); }
+.composer-debug-inline.composer-debug-link { cursor: pointer; text-decoration: none; }
+.composer-debug-inline.composer-debug-link span { text-decoration: underline dotted var(--link-underline); text-underline-offset: 3px; }
+.composer-debug-inline.composer-debug-link:hover,
+.composer-debug-inline.composer-debug-link:hover b,
+.composer-debug-inline.composer-debug-link:hover span { color: var(--link-hover-ink); }
+.composer-debug-inline.composer-debug-link:hover span { text-decoration: underline dotted currentColor; }
 
 /* Active long-task memo indicator below the working navigation button. */
 /* 用户反馈：导航列要与输入框顶部对齐且比输入框矮；四个控件竖排一定超高，
@@ -7477,7 +7542,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-row-meta { color: #5c6f7c; }
 /* About pane project row. */
 .about-project-row { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 12px; color: #8fa3ad; }
-.about-project-row a { color: #6fd3c0; overflow-wrap: anywhere; }
+.about-project-row a { overflow-wrap: anywhere; }
 :root[data-theme="light"] .about-project-row { color: #5c6f7a; }
 /* Wrap mode: long diff lines fold instead of horizontal scrolling. The
    table fills the container and code cells soft-wrap; gutters stay fixed. */

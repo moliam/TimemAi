@@ -145,6 +145,20 @@ type MarkdownLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href"> &
   href?: string;
 };
 
+// GFM autolinks and hand-written bare URLs use the address as the label. Those
+// already read as destinations, so the outbound marker would only add noise.
+const ADDRESS_LABEL = /^https?:\/\/\S+$/i;
+
+function labelIsAddress(children: ReactNode): boolean {
+  if (typeof children === "string") return ADDRESS_LABEL.test(children.trim());
+  return (
+    Array.isArray(children) &&
+    children.length === 1 &&
+    typeof children[0] === "string" &&
+    ADDRESS_LABEL.test(children[0].trim())
+  );
+}
+
 export function MarkdownLink({ href, children, ...props }: MarkdownLinkProps) {
   useT();
   const context = useContext(FileLinkContext);
@@ -154,8 +168,21 @@ export function MarkdownLink({ href, children, ...props }: MarkdownLinkProps) {
     return <LocalFileLink {...props} href={href} targetPath={localTarget} sessionId={sessionId} token={context?.token} />;
   }
   const safeHref = safeMarkdownLinkUrl(href);
+  const className = [
+    "markdown-external-link",
+    labelIsAddress(children) ? "markdown-address-link" : null,
+    props.className,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return safeHref ? (
-    <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer">
+    <a
+      {...props}
+      className={className}
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
       {children}
     </a>
   ) : (

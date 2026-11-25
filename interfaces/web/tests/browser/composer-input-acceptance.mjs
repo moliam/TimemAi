@@ -510,6 +510,149 @@ async function main() {
     await waitFor(() => browser.evaluate(`!document.querySelector(".user-message-history")`),
       "history panel did not close after the pointer left the arrows", 2500);
 
+    // 4. 模型回复里的超链接：链接必须一眼可辨（常显下划线 + 专属色），
+    //    外链带出站箭头，明暗两套都要在真实回复背景上达到 WCAG AA。
+    const readLink = () => browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      if (!anchor) return null;
+      const style = getComputedStyle(anchor);
+      let node = anchor;
+      let surface = "rgba(0, 0, 0, 0)";
+      while (node) {
+        const background = getComputedStyle(node).backgroundColor;
+        if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
+          surface = background;
+          break;
+        }
+        node = node.parentElement;
+      }
+      // The outbound marker is decorative: it must not enter copied text.
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(anchor);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const copied = selection.toString();
+      selection.removeAllRanges();
+      return {
+        color: style.color,
+        surface,
+        line: style.textDecorationLine,
+        thickness: style.textDecorationThickness,
+        offset: style.textUnderlineOffset,
+        marker: getComputedStyle(anchor, "::after").content,
+        copied,
+        text: anchor.textContent,
+      };
+    })()`);
+    const setTheme = async (theme) => {
+      await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      // Anchor colors transition; read the settled value, not a mid-flight frame.
+      await sleep(260);
+    };
+    await setTheme("dark");
+    const darkLink = await readLink();
+    await setTheme("light");
+    const lightLink = await readLink();
+    await setTheme("dark");
+    const links = { dark: darkLink, light: lightLink };
+    assert(links.dark && links.light, "no outbound link rendered inside a model reply");
+    const channels = (value) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const luminance = (value) => {
+      const [red, green, blue] = channels(value).map((channel) => {
+        const scaled = channel / 255;
+        return scaled <= 0.04045 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    };
+    const ratio = (foreground, background) => {
+      const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+    for (const theme of ["dark", "light"]) {
+      const link = links[theme];
+      assert(link.line === "underline",
+        `${theme} reply link is not underlined: ${link.line}`);
+      assert(link.offset !== "auto" && parseFloat(link.offset) >= 2,
+        `${theme} reply underline offset is ${link.offset}`);
+      assert(link.thickness !== "auto" && parseFloat(link.thickness) >= 1,
+        `${theme} reply underline thickness is ${link.thickness}`);
+      assert(link.marker.includes("\u2197"),
+        `${theme} outbound link marker is ${JSON.stringify(link.marker)}`);
+      const contrast = ratio(link.color, link.surface);
+      assert(contrast >= 4.5,
+        `${theme} reply link contrast is ${contrast.toFixed(2)}:1 on ${link.surface}`);
+      console.log(`reply link ${theme}: ${link.color} on ${link.surface}, contrast ${contrast.toFixed(2)}:1`);
+    }
+    for (const theme of ["dark", "light"]) {
+      const [red, green, blue] = channels(links[theme].color);
+      assert(Math.max(red, green, blue) - Math.min(red, green, blue) >= 48,
+        `${theme} reply link ink is not a distinct hue: ${links[theme].color}`);
+    }
+    for (const theme of ["dark", "light"]) {
+      assert(links[theme].copied.trim() === links[theme].text.trim(),
+        `${theme} outbound marker leaked into copied text: ${JSON.stringify(links[theme].copied)}`);
+    }
+
+    // The arrow must be a decoration, not a layout change: toggling it off and
+    // on must leave the paragraph's height untouched.
+    const markerLayout = await browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      const paragraph = anchor.closest("p") ?? anchor.parentElement;
+      const withMarker = paragraph.getBoundingClientRect().height;
+      anchor.classList.add("markdown-address-link");
+      const withoutMarker = paragraph.getBoundingClientRect().height;
+      anchor.classList.remove("markdown-address-link");
+      const restored = paragraph.getBoundingClientRect().height;
+      return { withMarker, withoutMarker, restored };
+    })()`);
+    assert(Math.abs(markerLayout.withMarker - markerLayout.withoutMarker) <= 1,
+      `outbound marker changes the reply line box: ${markerLayout.withoutMarker}px -> ${markerLayout.withMarker}px`);
+    assert(Math.abs(markerLayout.restored - markerLayout.withMarker) <= 1,
+      "reply paragraph height does not settle after the marker returns");
+
+    // Hover must add a second, non-color cue: thicker underline + a wash.
+    // The reply sits far down the history, so bring the link into the viewport
+    // before the synthetic pointer lands on it.
+    await browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      anchor.scrollIntoView({ block: "center" });
+    })()`);
+    await sleep(220);
+    const idle = await browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      const style = getComputedStyle(anchor);
+      return { color: style.color, background: style.backgroundColor, thickness: style.textDecorationThickness };
+    })()`);
+    const hoverPoint = await browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      const rect = anchor.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        inViewport: rect.top >= 0 && rect.bottom <= window.innerHeight,
+      };
+    })()`);
+    assert(hoverPoint.inViewport, "reply link is outside the viewport before hovering");
+    await browser.call("Input.dispatchMouseEvent",
+      { type: "mouseMoved", x: hoverPoint.x, y: hoverPoint.y, button: "none", buttons: 0 });
+    await sleep(220);
+    const hovered = await browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-external-link");
+      const style = getComputedStyle(anchor);
+      return { color: style.color, background: style.backgroundColor, thickness: style.textDecorationThickness };
+    })()`);
+    assert(hovered.color !== idle.color,
+      `reply link color does not react to hover: ${idle.color}`);
+    assert(hovered.background !== idle.background,
+      `reply link has no hover wash: ${idle.background}`);
+    assert(parseFloat(hovered.thickness) > parseFloat(idle.thickness),
+      `reply link underline does not thicken on hover: ${idle.thickness} -> ${hovered.thickness}`);
+    console.log(`reply link hover: ${idle.color} -> ${hovered.color}, underline ${idle.thickness} -> ${hovered.thickness}`);
+    await browser.call("Input.dispatchMouseEvent",
+      { type: "mouseMoved", x: 8, y: 8, button: "none", buttons: 0 });
+    await sleep(120);
+
     // 5. Streaming + slow scroll-up. While a Session is working the viewport
     //    pins itself to the bottom; a slow upward wheel must detach immediately,
     //    and the commits that follow must not pull the reader back down (the
