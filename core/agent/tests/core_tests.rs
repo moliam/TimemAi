@@ -2994,6 +2994,7 @@ fn clear_context_restates_runtime_known_state_once() {
         trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "user".to_string(),
+        allow_agent_edit: true,
     }]);
     core.record_turn_start_audit(&audit, "session_snap", "turn_0", "seed");
     let _ = core.begin_turn("seed task", None);

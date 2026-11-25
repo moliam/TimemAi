@@ -865,6 +865,114 @@ fn run_bash_manifest_renders_every_example_array_element() {
     assert!(!run_bash.description.contains(r#"{"run_bash":"#));
 }
 
+#[test]
+fn timer_tools_render_individual_examples_in_every_protocol() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    let catalog = registry.tool_catalog_value();
+    let tools = ["timer_after", "timer_every", "timer_on", "timer_cancel"];
+    for tool in tools {
+        assert!(registry.contains_tool(tool), "missing {tool}");
+        let example = &catalog[tool]["example"];
+        assert_eq!(example.as_object().unwrap().len(), 1, "{tool}");
+        let arguments = &example[tool];
+        registry.validate_action_input(tool, arguments).unwrap();
+        assert!(
+            !arguments
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value.as_str() == Some("")),
+            "{tool} example must not carry empty-string placeholders"
+        );
+    }
+    assert!(
+        !registry.contains_tool("timer"),
+        "old combined tool must disappear"
+    );
+
+    assert!(catalog["timer_after"]["required_any"].as_array().is_some());
+    assert!(catalog["timer_after"]["example"]["timer_after"]
+        .get("delay_ms")
+        .is_some());
+    for field in ["op", "mode", "trigger", "after_ms"] {
+        assert!(
+            catalog["timer_after"]["input_schema"]["properties"]
+                .get(field)
+                .is_none(),
+            "timer_after must not expose {field}"
+        );
+    }
+    for field in ["op", "mode", "after_ms", "at", "trigger"] {
+        assert!(
+            catalog["timer_every"]["input_schema"]["properties"]
+                .get(field)
+                .is_none(),
+            "timer_every must not expose {field}"
+        );
+    }
+    for field in ["op", "mode", "after_ms", "at", "interval_ms"] {
+        assert!(
+            catalog["timer_on"]["input_schema"]["properties"]
+                .get(field)
+                .is_none(),
+            "timer_on must not expose {field}"
+        );
+    }
+
+    for tool in tools {
+        let markdown = registry.render_tool_catalog_markdown();
+        let section = markdown
+            .split(&format!("#### `{tool}`"))
+            .nth(1)
+            .unwrap()
+            .split("\n#### `")
+            .next()
+            .unwrap();
+        let rendered: Vec<Value> = section
+            .lines()
+            .filter(|line| line.starts_with(&format!("`{{\"{tool}\":")))
+            .map(|line| serde_json::from_str(line.trim_matches('`')).unwrap())
+            .collect();
+        assert_eq!(rendered.len(), 1, "{tool}: {section}");
+        assert_eq!(&rendered[0], &catalog[tool]["example"]);
+
+        let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
+        let section = xml
+            .split(&format!("#### `{tool}`"))
+            .nth(1)
+            .unwrap()
+            .split("\n#### `")
+            .next()
+            .unwrap();
+        assert!(
+            section.contains(&format!("`<{tool}>")),
+            "{tool} XML synopsis: {section}"
+        );
+
+        let definitions = registry.native_tool_definitions();
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == tool)
+            .unwrap();
+        let example: Value = definition
+            .description
+            .split("Valid argument examples:\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            example.get(tool).is_none(),
+            "{tool} native example must omit the tool-name wrapper"
+        );
+        assert_eq!(&example, &catalog[tool]["example"][tool]);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn capmgr_can_list_and_load_skill_content() {

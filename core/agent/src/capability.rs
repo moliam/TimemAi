@@ -20,7 +20,13 @@ const RUN_POWERSHELL_MANIFEST: &str =
 const SELF_TOOL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/self_tool.yaml");
 const MEMO_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memo.yaml");
-const TIMER_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/timer.yaml");
+const TIMER_AFTER_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/timer_after.yaml");
+const TIMER_EVERY_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/timer_every.yaml");
+const TIMER_ON_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/timer_on.yaml");
+const TIMER_CANCEL_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/timer_cancel.yaml");
 const MAILBOX_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/mailbox.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
 const TURN_FINISHED_MANIFEST: &str =
@@ -389,7 +395,10 @@ impl CapabilityRegistry {
                 RUN_POWERSHELL_MANIFEST,
                 SELF_TOOL_MANIFEST,
                 MEMO_MANIFEST,
-                TIMER_MANIFEST,
+                TIMER_AFTER_MANIFEST,
+                TIMER_EVERY_MANIFEST,
+                TIMER_ON_MANIFEST,
+                TIMER_CANCEL_MANIFEST,
                 MAILBOX_MANIFEST,
                 TOOLGEN_MANIFEST,
                 TURN_FINISHED_MANIFEST,

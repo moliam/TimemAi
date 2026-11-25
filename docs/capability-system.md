@@ -107,6 +107,23 @@ unknown fields, and tool-specific schemas must encode the same mutually
 exclusive modes, required combinations, and numeric limits enforced by the
 paired Rust callback.
 
+Timer scheduling is split into four narrow tools rather than one `op`/`mode`
+surface: `timer_after` (one-shot after `delay_ms` or at an absolute `at`),
+`timer_every` (repeat every `interval_ms`), `timer_on` (fire on `event` =
+`session_idle` or `after_compression`), and `timer_cancel` (delete by `name`).
+Each manifest accepts only its own fields, so a periodic timer cannot carry an
+event and an event timer cannot carry a schedule. `timer_after` requires exactly
+one of `delay_ms`/`at`; the manifest expresses at-least-one with
+`x-required-any`, and the paired callback rejects both. The four tools share
+`TimerSpec`, host scheduling, persistence, and the timer topic, so the split
+changes the model-facing interface only. The same focused example must remain
+visible in inline JSON/XML and native API tool arguments. Registry rendering
+tests and real action-execution tests protect this contract without changing
+timer scheduling semantics. A user-created timer carries
+`allow_agent_edit` (default true); when the user turns it off, the delete tool
+fails closed and the Host refuses to drop the timer even if a stray deletion
+event arrives.
+
 Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`

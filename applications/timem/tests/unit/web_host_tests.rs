@@ -21076,6 +21076,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
             trigger: None,
             queue_timeout_minutes: u64::MAX,
             created_by: "user".to_string(),
+            allow_agent_edit: true,
         },
         created_at_ms: now_ms(),
         enabled: true,
@@ -21098,6 +21099,7 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
         trigger: None,
         queue_timeout_minutes: 0,
         created_by: "user".into(),
+        allow_agent_edit: true,
     };
     assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
     let spec = TimerSpec {
@@ -21227,6 +21229,7 @@ fn web_timer_trigger_timer_scheduling_is_event_owned() {
         None,
         Some("session_idle".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -21306,6 +21309,7 @@ fn fire_trigger_timers_matches_event_and_parks_failed_delivery() {
         None,
         Some("session_idle".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     create_session_timer(
@@ -21319,6 +21323,7 @@ fn fire_trigger_timers_matches_event_and_parks_failed_delivery() {
         None,
         Some("after_compression".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     // A disabled timer is invisible to its event: it stays parked-free.
@@ -21333,6 +21338,7 @@ fn fire_trigger_timers_matches_event_and_parks_failed_delivery() {
         None,
         Some("session_idle".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     let idle_off_id = state.sessions.lock().unwrap()["session_a"].timers[2]
@@ -21394,6 +21400,7 @@ fn timer_commands_accept_trigger_fields_on_the_wire() {
             interval_ms: None,
             trigger: Some("after_compression".into()),
             queue_timeout_minutes: 0,
+            allow_agent_edit: false,
         },
     )
     .unwrap();
@@ -21402,6 +21409,7 @@ fn timer_commands_accept_trigger_fields_on_the_wire() {
         let timer = &sessions["session_a"].timers[0];
         assert_eq!(timer.spec.mode, "trigger");
         assert_eq!(timer.spec.trigger.as_deref(), Some("after_compression"));
+        assert!(!timer.spec.allow_agent_edit, "wire flag must be persisted");
     }
     // A trigger schedule mixed with calendar fields is rejected over the wire.
     let error = handle_command(
@@ -21417,6 +21425,7 @@ fn timer_commands_accept_trigger_fields_on_the_wire() {
             interval_ms: None,
             trigger: Some("session_idle".into()),
             queue_timeout_minutes: 0,
+            allow_agent_edit: true,
         },
     )
     .unwrap_err();
@@ -21509,6 +21518,7 @@ fn real_worker_turn_finished_fires_session_idle_trigger_timer() {
         None,
         Some("session_idle".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     // A user turn is in flight when the model ends it through task_finished:
@@ -21596,6 +21606,7 @@ fn cancelled_turn_does_not_fire_session_idle_trigger_timer() {
         None,
         Some("session_idle".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     start_web_turn(&state, &session_id, "long task").unwrap();
@@ -21638,6 +21649,7 @@ fn real_worker_compression_completed_fires_after_compression_trigger_timer() {
         None,
         Some("after_compression".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     let worker_id = primary_worker_id_of(&state, &session_id);
@@ -21720,6 +21732,7 @@ fn child_worker_compression_does_not_fire_after_compression_trigger_timer() {
         None,
         Some("after_compression".into()),
         u64::MAX,
+        true,
     )
     .unwrap();
     let child_worker_id = format!("worker_child_{}", session_id);
@@ -21755,7 +21768,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         None,
         None,
-        0
+        0,
+        true
     )
     .unwrap_err()
     .contains("prompt_required"));
@@ -21771,6 +21785,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     create_session_timer(
@@ -21784,6 +21799,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     {
@@ -21806,7 +21822,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         None,
         None,
-        0
+        0,
+        true
     )
     .unwrap_err()
     .contains("name_exists"));
@@ -21831,6 +21848,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     create_session_timer(
@@ -21844,6 +21862,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -21963,6 +21982,7 @@ fn web_timer_toggle_and_delete() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -22020,8 +22040,10 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
+        allow_agent_edit: true,
     };
-    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer], "created", None)
+        .unwrap();
     let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
     assert_eq!(timers.len(), 2);
     let kept = timers
@@ -22064,6 +22086,7 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -22102,8 +22125,10 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
+        allow_agent_edit: true,
     };
-    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer], "created", None)
+        .unwrap();
 
     let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
     let kept = timers.iter().find(|t| t.spec.timer_id == timer_id).unwrap();
@@ -22116,6 +22141,69 @@ fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
         "the stale merge must not repersist the pre-edit prompt"
     );
     assert!(!persisted.contains("original prompt"));
+}
+
+#[test]
+fn web_timer_core_deletion_honors_user_agent_permission() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("open".into()),
+        "open prompt".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        None,
+        0,
+        true,
+    )
+    .unwrap();
+    let open_spec = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .clone();
+    // An explicit agent deletion removes the user timer instead of being
+    // mistaken for a creation whose TimerSync is still queued.
+    merge_session_timers_from_core(&state, "session_a", &[], "deleted", Some(&open_spec)).unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .timers
+        .is_empty());
+
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("locked".into()),
+        "locked prompt".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        None,
+        0,
+        false,
+    )
+    .unwrap();
+    let locked_spec = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .clone();
+    assert!(!locked_spec.allow_agent_edit);
+    // Defense in depth: even a stray deletion event cannot remove a timer the
+    // user made read-only for the agent.
+    merge_session_timers_from_core(&state, "session_a", &[], "deleted", Some(&locked_spec))
+        .unwrap();
+    let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
+    assert_eq!(
+        timers.len(),
+        1,
+        "agent changes disabled must keep the timer"
+    );
+    assert_eq!(timers[0].spec.name, "locked");
+
+    // Any non-deletion event still keeps user timers missing from Core's
+    // reported set (in-flight creation race guard).
+    merge_session_timers_from_core(&state, "session_a", &[], "created", None).unwrap();
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].timers.len(), 1);
 }
 
 #[test]
@@ -22132,6 +22220,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     // Simulate a turn in flight: pending_turn_id alone satisfies the
@@ -22166,6 +22255,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(60_000),
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     {
@@ -22221,6 +22311,7 @@ fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     {
@@ -22348,7 +22439,7 @@ impl ModelClient for TimerToolCallModel {
         // Round 1: call the timer tool through the XML protocol. The child
         // element text form exercises the same parsing a real model uses.
         let content = if self.calls == 1 {
-            "<ASSISTANT><free_talk>Scheduling a reminder.</free_talk><actions><timer name=\"schedule reminder\"><op>new</op><name>build-watch</name><prompt>check the long build</prompt><after_ms>60000</after_ms></timer></actions></ASSISTANT>".to_string()
+            "<ASSISTANT><free_talk>Scheduling a reminder.</free_talk><actions><timer_after name=\"schedule reminder\"><name>build-watch</name><prompt>check the long build</prompt><delay_ms>60000</delay_ms></timer_after></actions></ASSISTANT>".to_string()
         } else {
             confirmed_xml_response("<final_answer>Reminder scheduled.</final_answer>")
         };
@@ -22469,6 +22560,7 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     // Force the timer due on the next scheduler tick.
@@ -22568,6 +22660,7 @@ fn real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary(
         None,
         None,
         1,
+        true,
     )
     .unwrap();
     {
@@ -22783,6 +22876,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     let (timer_id, next_fire, enabled) = {
@@ -22908,6 +23002,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         None,
         None,
         0,
+        true,
     )
     .unwrap();
     {
@@ -22955,6 +23050,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         None,
         None,
         u64::MAX,
+        true,
     )
     .unwrap();
     {

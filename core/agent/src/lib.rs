@@ -65,8 +65,16 @@ pub mod model_transport;
 pub mod negotiation;
 mod notification;
 pub mod reasoning;
-#[path = "../../../resources/capabilities/tools/timer.rs"]
-pub mod timer;
+#[path = "../../../resources/capabilities/tools/timer_after.rs"]
+pub mod timer_after;
+#[path = "../../../resources/capabilities/tools/timer_cancel.rs"]
+pub mod timer_cancel;
+#[path = "../../../resources/capabilities/tools/timer_every.rs"]
+pub mod timer_every;
+#[path = "../../../resources/capabilities/tools/timer_on.rs"]
+pub mod timer_on;
+#[path = "../../../resources/capabilities/tools/timer_shared.rs"]
+pub(crate) mod timer_shared;
 pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
@@ -577,6 +585,12 @@ where
     }
 }
 
+/// User-created timers default to allowing agent-side deletion and
+/// modification; the creating user may opt out per timer.
+fn default_allow_agent_edit() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimerSpec {
     pub timer_id: String,
@@ -615,6 +629,12 @@ pub struct TimerSpec {
     pub queue_timeout_minutes: u64,
     /// Who created the timer: "model" (timer tool) or "user" (interface).
     pub created_by: String,
+    /// Whether agent-initiated timer tools may delete or modify this timer.
+    /// User-created timers default to true; the user may turn it off at
+    /// creation time to make the timer read-only for the agent. Timers the
+    /// agent created itself always allow agent changes.
+    #[serde(default = "default_allow_agent_edit")]
+    pub allow_agent_edit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

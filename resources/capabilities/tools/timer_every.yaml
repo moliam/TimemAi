@@ -1,0 +1,25 @@
+kind: tool
+id: timer_every
+binding_type: builtin
+binding_name: timer_every
+summary: Schedule a repeating prompt on a fixed interval until it is cancelled.
+description: |
+  Schedule a prompt to repeat every `interval_ms`. The first delivery happens one
+  interval after creation, then again after each interval until the timer is
+  deleted with timer_cancel. Include a clear stop condition in the prompt.
+  The timer survives compression and restart. `name` is optional and
+  auto-generated as timer0, timer1, ... when omitted; keep the returned name to
+  cancel it later.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "prompt": {"type":"string","minLength":1,"description":"Prompt text delivered each time the timer fires."},
+      "name": {"type":"string","description":"Optional stable handle name; auto-named timer0/timer1/... when omitted."},
+      "interval_ms": {"type":"integer","minimum":1,"description":"Refire period in milliseconds; the first fire is one interval after creation."}
+    },
+    "required": ["prompt","interval_ms"]
+  }
+example_json: |
+  {"timer_every":{"prompt":"Review progress and continue the active task; when it is complete or cancelled, delete timer progress-watch and stop.","name":"progress-watch","interval_ms":900000}}

@@ -330,10 +330,9 @@ describe("memory search icon", () => {
 });
 
 describe("readable timer lifecycle presentation", () => {
-  it("renders a once timer with a relative delay in user language", () => {
-    const timer = timerPresentation("timer", {
-      op: "new", name: "build-check", prompt: "检查 CI 构建结果",
-      mode: "once", after_ms: 600000,
+  it("renders a one-shot timer from timer_after with a relative delay", () => {
+    const timer = timerPresentation("timer_after", {
+      name: "build-check", prompt: "检查 CI 构建结果", delay_ms: 600000,
     })!;
     expect(timer.kind).toBe("new_once");
     const html = renderToStaticMarkup(<><TimerToolIcon /><TimerInvocation timer={timer} /></>);
@@ -344,13 +343,13 @@ describe("readable timer lifecycle presentation", () => {
     expect(html).toContain("10 分钟后");
     expect(html).toContain("任务");
     expect(html).toContain("检查 CI 构建结果");
-    expect(html).not.toContain("after_ms");
+    expect(html).not.toContain("delay_ms");
     expect(html).not.toContain("600000");
   });
 
-  it("renders a repeat timer with the interval and an absolute once with local time", () => {
-    const repeat = timerPresentation("timer", {
-      op: "new", prompt: "日报", mode: "repeat", interval_ms: 1800000, after_ms: 60000,
+  it("renders timer_every with its interval and timer_after with local time", () => {
+    const repeat = timerPresentation("timer_every", {
+      prompt: "日报", interval_ms: 1800000,
     })!;
     expect(repeat.kind).toBe("new_repeat");
     const repeatHtml = renderToStaticMarkup(<TimerInvocation timer={repeat} />);
@@ -358,17 +357,17 @@ describe("readable timer lifecycle presentation", () => {
     expect(repeatHtml).toContain("每 30 分钟");
     expect(repeatHtml).not.toContain("interval_ms");
 
-    const at = timerPresentation("timer", {
-      op: "new", prompt: "早会", mode: "once", at: "2026-10-16T01:30:00Z",
+    const at = timerPresentation("timer_after", {
+      prompt: "早会", at: "2026-10-16T01:30:00Z",
     })!;
     const atHtml = renderToStaticMarkup(<TimerInvocation timer={at} />);
     expect(atHtml).toContain("于 2026-");
     expect(atHtml).toContain("任务");
   });
 
-  it("renders an event-driven trigger timer with its event", () => {
-    const trig = timerPresentation("timer", {
-      op: "new", prompt: "压缩后续读", mode: "trigger", trigger: "after_compression",
+  it("renders timer_on with its event", () => {
+    const trig = timerPresentation("timer_on", {
+      prompt: "压缩后续读", event: "after_compression",
     })!;
     expect(trig.kind).toBe("new_trigger");
     const html = renderToStaticMarkup(<TimerInvocation timer={trig} />);
@@ -377,39 +376,48 @@ describe("readable timer lifecycle presentation", () => {
     expect(html).not.toContain("after_ms");
     expect(html).toContain("压缩后续读");
 
-    const idle = timerPresentation("timer", {
-      op: "new", prompt: "空闲跟进", mode: "trigger", trigger: "session_idle",
+    const idle = timerPresentation("timer_on", {
+      prompt: "空闲跟进", event: "session_idle",
     })!;
     const idleHtml = renderToStaticMarkup(<TimerInvocation timer={idle} />);
     expect(idleHtml).toContain("会话空闲时");
   });
 
-  it("renders a delete row naming the timer", () => {
-    const del = timerPresentation("timer", { op: "del", name: "build-check" })!;
+  it("renders timer_cancel as a delete row naming the timer", () => {
+    const del = timerPresentation("timer_cancel", { name: "build-check" })!;
     expect(del).toEqual({ kind: "delete", name: "build-check" });
     const html = renderToStaticMarkup(<TimerInvocation timer={del} />);
     expect(html).toContain("删除定时");
     expect(html).toContain("build-check");
   });
 
+  it("uses the same timer icon for all four narrow tools", () => {
+    const icons = ["timer_after", "timer_every", "timer_on", "timer_cancel"].map(() =>
+      renderToStaticMarkup(<TimerToolIcon />));
+    expect(new Set(icons).size).toBe(1);
+    expect(icons[0]).toContain("lucide-calendar-clock");
+  });
+
   it.each([
-    { op: "new" },                                   // no prompt
-    { op: "new", prompt: "p" },                      // no schedule (exactly one required)
-    { op: "new", prompt: "p", after_ms: 1, at: "2026-01-01T00:00:00Z" }, // both schedules
-    { op: "new", prompt: "p", mode: "once", after_ms: 1, interval_ms: 2 }, // once+interval
-    { op: "new", prompt: "p", mode: "repeat", after_ms: 1 },               // repeat without interval
-    { op: "new", prompt: "p", after_ms: -1 },        // negative delay
-    { op: "new", prompt: "p", at: "not-a-date" },    // invalid absolute
-    { op: "new", prompt: "p", after_ms: 1, extra: 1 }, // unknown field
-    { op: "del" },                                   // delete without name
-    { op: "del", name: "x", prompt: "y" },           // delete with create fields
-    { op: "other", prompt: "p", after_ms: 1 },       // unknown op
-    { op: "new", prompt: "p", mode: "trigger" },                      // trigger without event
-    { op: "new", prompt: "p", mode: "trigger", trigger: "whenever" }, // unknown event
-    { op: "new", prompt: "p", mode: "trigger", trigger: "session_idle", after_ms: 1 }, // trigger + schedule
-    { op: "new", prompt: "p", trigger: "session_idle" },              // event without mode
-  ])("falls back instead of guessing malformed timer inputs: %j", (value) => {
-    expect(timerPresentation("timer", value)).toBeUndefined();
+    ["timer_after", {}],                                            // no prompt/schedule
+    ["timer_after", { prompt: "p" }],                               // no schedule
+    ["timer_after", { prompt: "p", delay_ms: 1, at: "2026-01-01T00:00:00Z" }], // both
+    ["timer_after", { prompt: "p", delay_ms: 0 }],                  // zero delay
+    ["timer_after", { prompt: "p", delay_ms: -1 }],                 // negative
+    ["timer_after", { prompt: "p", at: "not-a-date" }],             // invalid at
+    ["timer_after", { prompt: "p", delay_ms: 1, extra: 1 }],        // unknown field
+    ["timer_every", {}],                                            // no prompt/interval
+    ["timer_every", { prompt: "p" }],                               // no interval
+    ["timer_every", { prompt: "p", interval_ms: 0 }],               // zero interval
+    ["timer_every", { prompt: "p", interval_ms: 1, after_ms: 1 }],  // old field
+    ["timer_on", {}],                                               // no prompt/event
+    ["timer_on", { prompt: "p" }],                                  // no event
+    ["timer_on", { prompt: "p", event: "whenever" }],               // unknown event
+    ["timer_on", { prompt: "p", event: "session_idle", after_ms: 1 }], // schedule field
+    ["timer_cancel", {}],                                           // no name
+    ["timer_cancel", { name: "x", prompt: "y" }],                   // create field
+  ])("falls back instead of guessing malformed %s inputs: %j", (action, value) => {
+    expect(timerPresentation(action, value)).toBeUndefined();
   });
 
   it("splits durations into human units for delay and every labels", () => {

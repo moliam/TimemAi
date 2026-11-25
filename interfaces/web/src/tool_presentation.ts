@@ -145,58 +145,84 @@ export type TimerPresentation =
   | { kind: "new_trigger"; name?: string; prompt: string; triggerEvent: "session_idle" | "after_compression" }
   | { kind: "delete"; name: string };
 
-const TIMER_KNOWN = new Set(["op", "prompt", "name", "mode", "trigger", "after_ms", "at", "interval_ms"]);
+const TIMER_AFTER_KEYS = new Set(["prompt", "name", "delay_ms", "at"]);
+const TIMER_EVERY_KEYS = new Set(["prompt", "name", "interval_ms"]);
+const TIMER_ON_KEYS = new Set(["prompt", "name", "event"]);
+const TIMER_CANCEL_KEYS = new Set(["name"]);
+
+function timerName(input: Record<string, unknown>): string | undefined | null {
+  if (input.name === undefined || input.name === "") return undefined;
+  if (typeof input.name !== "string" || !input.name.trim()) return null;
+  return input.name.trim();
+}
+
+function timerPrompt(input: Record<string, unknown>): string | undefined {
+  return typeof input.prompt === "string" && input.prompt.trim()
+    ? input.prompt
+    : undefined;
+}
+
+function timerMs(value: unknown, min: number): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value)
+    || value < min || value > 3.2e12) return null;
+  return value;
+}
+
+function timerAt(value: unknown): string | undefined | null {
+  if (value === undefined || value === "") return undefined;
+  return typeof value === "string" && !Number.isNaN(new Date(value).getTime())
+    ? value
+    : null;
+}
+
+function knownKeys(input: Record<string, unknown>, allowed: Set<string>): boolean {
+  return Object.keys(input).every(key => allowed.has(key));
+}
 
 export function timerPresentation(
   action: string,
   input: unknown,
 ): TimerPresentation | undefined {
-  if (action !== "timer" || !record(input) || typeof input.op !== "string") return;
-  if (Object.keys(input).some(key => !TIMER_KNOWN.has(key))) return;
-  const name =
-    typeof input.name === "string" && input.name.trim() ? input.name.trim()
-    : undefined;
-  if (input.name !== undefined && name === undefined) return;
-  if (input.prompt !== undefined && (typeof input.prompt !== "string" || !input.prompt.trim())) return;
-  const parseMs = (value: unknown, min: number):
-    { valid: true; ms?: number } | { valid: false } => {
-    if (value === undefined) return { valid: true };
-    if (typeof value !== "number" || !Number.isSafeInteger(value)
-      || value < min || value > 3.2e12) return { valid: false };
-    return { valid: true, ms: value };
-  };
-  const after = parseMs(input.after_ms, 0);
-  if (!after.valid) return;
-  const interval = parseMs(input.interval_ms, 1);
-  if (!interval.valid) return;
-  const afterMs = after.ms;
-  const intervalMs = interval.ms;
-  const at =
-    input.at === undefined ? undefined
-    : typeof input.at === "string" && !Number.isNaN(new Date(input.at).getTime()) ? input.at
-    : undefined;
-  if (input.at !== undefined && at === undefined) return;
-  if (input.op === "del") {
-    if (!name || input.prompt !== undefined || input.mode !== undefined
-      || afterMs !== undefined || at !== undefined || intervalMs !== undefined) return;
+  if (!record(input)) return;
+  const name = timerName(input);
+  if (name === null) return;
+
+  if (action === "timer_cancel") {
+    if (!knownKeys(input, TIMER_CANCEL_KEYS) || name === undefined) return;
     return { kind: "delete", name };
   }
-  if (input.op !== "new" || !input.prompt) return;
-  const mode = input.mode === undefined ? "once" : input.mode;
-  if (mode === "trigger") {
-    // Event-driven timers carry no calendar; the event kind is mandatory.
-    if (afterMs !== undefined || at !== undefined || intervalMs !== undefined) return;
-    const triggerEvent = input.trigger;
+
+  if (action === "timer_after") {
+    if (!knownKeys(input, TIMER_AFTER_KEYS)) return;
+    const prompt = timerPrompt(input);
+    if (!prompt) return;
+    const afterMs = timerMs(input.delay_ms, 1);
+    const at = timerAt(input.at);
+    if (afterMs === null || at === null) return;
+    if ((afterMs === undefined) === (at === undefined)) return; // exactly one
+    return { kind: "new_once", name, prompt, afterMs, at };
+  }
+
+  if (action === "timer_every") {
+    if (!knownKeys(input, TIMER_EVERY_KEYS)) return;
+    const prompt = timerPrompt(input);
+    if (!prompt) return;
+    const intervalMs = timerMs(input.interval_ms, 1);
+    if (intervalMs === undefined || intervalMs === null) return;
+    return { kind: "new_repeat", name, prompt, intervalMs };
+  }
+
+  if (action === "timer_on") {
+    if (!knownKeys(input, TIMER_ON_KEYS)) return;
+    const prompt = timerPrompt(input);
+    if (!prompt) return;
+    const triggerEvent = input.event;
     if (triggerEvent !== "session_idle" && triggerEvent !== "after_compression") return;
-    return { kind: "new_trigger", name, prompt: input.prompt, triggerEvent };
+    return { kind: "new_trigger", name, prompt, triggerEvent };
   }
-  if ((afterMs === undefined) === (at === undefined)) return; // exactly one
-  if (mode === "once") {
-    if (intervalMs !== undefined) return;
-    return { kind: "new_once", name, prompt: input.prompt, afterMs, at };
-  }
-  if (mode !== "repeat" || intervalMs === undefined) return;
-  return { kind: "new_repeat", name, prompt: input.prompt, intervalMs, afterMs, at };
+
+  return;
 }
 
 export function isTimerActivityInput(action: string, input: unknown): boolean {

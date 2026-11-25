@@ -169,16 +169,20 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         "chat_history_query" => CoreActionKind::ChatHistory {
             operation: "query".to_string(),
         },
-        "timer" => CoreActionKind::Timer {
-            op: action.input_str("op"),
-            name: {
-                let name = action.input_str("name");
-                if name.is_empty() {
+        "timer_after" | "timer_every" | "timer_on" => {
+            let name = action.input_str("name");
+            CoreActionKind::Timer {
+                op: "new".to_string(),
+                name: if name.is_empty() {
                     action.input_str("prompt")
                 } else {
                     name
-                }
-            },
+                },
+            }
+        }
+        "timer_cancel" => CoreActionKind::Timer {
+            op: "del".to_string(),
+            name: action.input_str("name"),
         },
         other => CoreActionKind::Other {
             action: other.to_string(),

@@ -1,0 +1,25 @@
+kind: tool
+id: timer_cancel
+binding_type: builtin
+binding_name: timer_cancel
+summary: Delete a scheduled timer by its exact name.
+description: |
+  Delete a scheduled timer by its exact `name`. Use the name returned by
+  timer_after, timer_every, or timer_on, or a name shown in the active timer
+  list. Deleting a missing timer returns an explicit error and changes nothing.
+  A timer the user created may forbid agent changes; deleting it then fails
+  with an explicit error and changes nothing. Ask the user to delete it or to
+  recreate it with agent changes allowed. To change an existing timer's prompt
+  or schedule, cancel it and create a replacement (the same permission
+  applies).
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "name": {"type":"string","minLength":1,"description":"Exact name of the timer to delete."}
+    },
+    "required": ["name"]
+  }
+example_json: |
+  {"timer_cancel":{"name":"progress-watch"}}

@@ -1,0 +1,27 @@
+kind: tool
+id: timer_after
+binding_type: builtin
+binding_name: timer_after
+summary: Schedule a one-shot prompt after a relative delay or at an absolute UTC time.
+description: |
+  Schedule a prompt to be delivered once. Use `delay_ms` for a relative delay
+  such as "in 15 minutes", or `at` for an absolute instant such as
+  "2026-01-01T09:00:00Z". Provide exactly one of delay_ms and at.
+  The timer survives compression and restart. `name` is optional and
+  auto-generated as timer0, timer1, ... when omitted; keep the returned name to
+  cancel it later with timer_cancel.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "prompt": {"type":"string","minLength":1,"description":"Prompt text delivered when the timer fires."},
+      "name": {"type":"string","description":"Optional stable handle name; auto-named timer0/timer1/... when omitted."},
+      "delay_ms": {"type":"integer","minimum":1,"description":"Relative delay from creation in milliseconds."},
+      "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."}
+    },
+    "required": ["prompt"],
+    "x-required-any": [["delay_ms","at"]]
+  }
+example_json: |
+  {"timer_after":{"prompt":"Check the build result once and report it.","name":"build-check","delay_ms":600000}}

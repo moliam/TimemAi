@@ -1,6 +1,7 @@
 use crate::response_protocol::ParsedAction;
 use crate::{
-    capmgr, mailbox, memmgr, memo, readfile, self_tool, shell_exec, task_finished, timer, toolgen,
+    capmgr, mailbox, memmgr, memo, readfile, self_tool, shell_exec, task_finished, timer_after,
+    timer_cancel, timer_every, timer_on, toolgen,
 };
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -9,7 +10,10 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "memmgr",
     "capmgr",
     "memo",
-    "timer",
+    "timer_after",
+    "timer_every",
+    "timer_on",
+    "timer_cancel",
     "mailbox",
     "context_compress",
     "readfile",
@@ -50,7 +54,10 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "capmgr" => Some(execute_capmgr),
         "memo" => Some(execute_memo),
         "mailbox" => Some(execute_mailbox),
-        "timer" => Some(execute_timer),
+        "timer_after" => Some(execute_timer_after),
+        "timer_every" => Some(execute_timer_every),
+        "timer_on" => Some(execute_timer_on),
+        "timer_cancel" => Some(execute_timer_cancel),
         "context_compress" => Some(execute_context_compress),
         "memmgr" => Some(execute_memmgr),
         "readfile" => Some(execute_readfile),
@@ -120,12 +127,36 @@ fn execute_memo(
     memo::execute_action(core, action, runtime)
 }
 
-fn execute_timer(
+fn execute_timer_after(
     core: &mut crate::AgentCore,
     action: &crate::response_protocol::ParsedAction,
     runtime: &mut dyn crate::ActionRuntime,
 ) -> crate::ActionExecution {
-    timer::execute_action(core, action, runtime)
+    timer_after::execute_action(core, action, runtime)
+}
+
+fn execute_timer_every(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    timer_every::execute_action(core, action, runtime)
+}
+
+fn execute_timer_on(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    timer_on::execute_action(core, action, runtime)
+}
+
+fn execute_timer_cancel(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    timer_cancel::execute_action(core, action, runtime)
 }
 
 fn execute_mailbox(

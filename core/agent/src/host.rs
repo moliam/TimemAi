@@ -1030,6 +1030,7 @@ pub fn timer_topic_event(
     session_id: impl Into<String>,
     op: &str,
     timers: &[crate::TimerSpec],
+    target: Option<&crate::TimerSpec>,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -1043,6 +1044,10 @@ pub fn timer_topic_event(
         json!({
             "op": op,
             "timers": timers,
+            // The timer this event acted on. The full set alone cannot tell a
+            // Host why a user-created timer is missing: deletion and an
+            // in-flight creation both look like absence.
+            "target": target,
         }),
     )
 }

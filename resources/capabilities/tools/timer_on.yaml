@@ -1,0 +1,26 @@
+kind: tool
+id: timer_on
+binding_type: builtin
+binding_name: timer_on
+summary: Schedule a prompt that fires whenever a selected runtime event occurs.
+description: |
+  Schedule a prompt that fires on a runtime event. `event` must be
+  "session_idle" (a turn ended through task_finished) or "after_compression"
+  (this session's context compression completed). The timer stays armed and
+  fires every time the event occurs until it is deleted with timer_cancel, so
+  the prompt must include a stop condition. The timer survives compression and
+  restart. `name` is optional and auto-generated as timer0, timer1, ... when
+  omitted.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "prompt": {"type":"string","minLength":1,"description":"Prompt text delivered when the event occurs."},
+      "name": {"type":"string","description":"Optional stable handle name; auto-named timer0/timer1/... when omitted."},
+      "event": {"type":"string","enum":["session_idle","after_compression"],"description":"Event that fires the prompt: session_idle after task_finished, or after_compression after context compression."}
+    },
+    "required": ["prompt","event"]
+  }
+example_json: |
+  {"timer_on":{"prompt":"Compression just completed: verify the session work file still covers the active goal, then continue it. If no agreed task remains, delete timer compression-watch and stop.","name":"compression-watch","event":"after_compression"}}

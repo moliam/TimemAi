@@ -3751,6 +3751,57 @@ describe("web topic view model", () => {
     });
   });
 
+  it("maps the four timer tools to the shared timer activity row", () => {
+    const repeat = activityFromTopic(
+      topic("core.action", {
+        action: "timer_every",
+        status: "running",
+        input: { name: "progress-watch", prompt: "继续任务", interval_ms: 900000 },
+      }),
+    );
+    expect(repeat).toMatchObject({
+      tone: "action",
+      title: "Timer · running",
+      tool_name: "timer_every",
+      timer: { kind: "new_repeat", name: "progress-watch", intervalMs: 900000 },
+    });
+
+    const once = activityFromTopic(
+      topic("core.action", {
+        action: "timer_after",
+        status: "completed",
+        input: { prompt: "提醒我", delay_ms: 60000 },
+      }),
+    );
+    expect(once.title).toContain("Timer");
+    expect(once).toMatchObject({
+      timer: { kind: "new_once", afterMs: 60000 },
+    });
+
+    const on = activityFromTopic(
+      topic("core.action", {
+        action: "timer_on",
+        status: "completed",
+        input: { prompt: "压缩后续读", event: "after_compression" },
+      }),
+    );
+    expect(on).toMatchObject({
+      timer: { kind: "new_trigger", triggerEvent: "after_compression" },
+    });
+
+    const cancel = activityFromTopic(
+      topic("core.action", {
+        action: "timer_cancel",
+        status: "completed",
+        input: { name: "progress-watch" },
+      }),
+    );
+    expect(cancel.title).toContain("Timer");
+    expect(cancel).toMatchObject({
+      timer: { kind: "delete", name: "progress-watch" },
+    });
+  });
+
   it("renders run_bash commands as Bash code and keeps the structured status", () => {
     const activity = activityFromTopic(
       topic("core.action", {

@@ -244,6 +244,8 @@ export type TimerInfo = {
   interval_ms?: number | null;
   /** Minutes a fired prompt may wait in the session queue when busy; 0 delivers immediately. */
   queue_timeout_minutes?: number;
+  /** Whether agent timer tools may delete or modify this timer. */
+  allow_agent_edit?: boolean;
   created_by: "user" | "model" | string;
   created_at_ms: number;
   enabled: boolean;
@@ -1169,6 +1171,8 @@ export type ClientCommand =
       at?: string;
       interval_ms?: number;
       queue_timeout_minutes?: number;
+      /** Allow agent timer tools to delete or modify this timer; defaults to true. */
+      allow_agent_edit?: boolean;
     }
   | { type: "timer_delete"; session_id: string; timer_id: string }
   | {

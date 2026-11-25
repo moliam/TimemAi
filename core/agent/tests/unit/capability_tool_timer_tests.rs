@@ -1,6 +1,9 @@
 use crate::response_protocol::ParsedAction;
-use crate::{ActionExecution, ActionRuntime, AgentCore, TimerSpec};
+use crate::{
+    ActionExecution, ActionRuntime, AgentCore, CoreStep, LlmResponse, TimerSpec, UsageStats,
+};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 fn setup(name: &str) -> (AgentCore, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!(
@@ -20,11 +23,11 @@ fn setup(name: &str) -> (AgentCore, std::path::PathBuf) {
     (core, dir)
 }
 
-fn timer_action(input: serde_json::Value) -> ParsedAction {
+fn timer_action(tool: &str, input: serde_json::Value) -> ParsedAction {
     ParsedAction {
-        action: "timer".into(),
+        action: tool.into(),
         name: None,
-        call_id: "call_timer".into(),
+        call_id: format!("call_{tool}"),
         raw_input: input,
     }
 }
@@ -37,9 +40,9 @@ impl ActionRuntime for NoopRuntime {
     }
 }
 
-fn run(core: &mut AgentCore, input: serde_json::Value) -> String {
+fn run(core: &mut AgentCore, tool: &str, input: serde_json::Value) -> String {
     let mut runtime = NoopRuntime;
-    match super::execute_action(core, &timer_action(input), &mut runtime) {
+    match core.execute_action(timer_action(tool, input), &mut runtime) {
         ActionExecution::Completed(outcome) => outcome.text,
         ActionExecution::NeedsApproval(_) => panic!("unexpected approval"),
     }
@@ -47,7 +50,7 @@ fn run(core: &mut AgentCore, input: serde_json::Value) -> String {
 
 #[derive(Default)]
 struct RecordingRuntime {
-    ops: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ops: Arc<Mutex<Vec<String>>>,
 }
 
 impl ActionRuntime for RecordingRuntime {
@@ -72,12 +75,23 @@ impl ActionRuntime for RecordingRuntime {
     }
 }
 
+fn usage() -> UsageStats {
+    UsageStats {
+        llm_calls: 1,
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        total_tokens: 12,
+        ..UsageStats::zero()
+    }
+}
+
 #[test]
-fn timer_new_once_defaults_name_and_mode() {
-    let (mut core, dir) = setup("once_basic");
+fn timer_after_defaults_name_and_once_mode() {
+    let (mut core, dir) = setup("after_basic");
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "check the build", "after_ms": 60000}),
+        "timer_after",
+        json!({"prompt": "check the build", "delay_ms": 60000}),
     );
     assert!(!out.contains("error"), "{out}");
     let timers = core.timers();
@@ -87,6 +101,8 @@ fn timer_new_once_defaults_name_and_mode() {
     assert_eq!(timers[0].after_ms, Some(60000));
     assert_eq!(timers[0].at, None);
     assert_eq!(timers[0].interval_ms, None);
+    assert_eq!(timers[0].trigger, None);
+    assert_eq!(timers[0].queue_timeout_minutes, 0);
     assert_eq!(timers[0].created_by, "model");
     assert!(!timers[0].timer_id.is_empty());
     drop(core);
@@ -94,95 +110,105 @@ fn timer_new_once_defaults_name_and_mode() {
 }
 
 #[test]
-fn timer_new_repeat_with_at_and_interval() {
-    let (mut core, dir) = setup("repeat_basic");
+fn timer_after_accepts_absolute_at_instead_of_delay() {
+    let (mut core, dir) = setup("after_at");
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "report status", "mode": "repeat",
-               "at": "2026-01-01T09:00:00Z", "interval_ms": 3600000}),
+        "timer_after",
+        json!({"prompt": "morning meeting", "at": "2026-01-01T09:00:00Z"}),
     );
     assert!(!out.contains("error"), "{out}");
     let timers = core.timers();
-    assert_eq!(timers[0].mode, "repeat");
+    assert_eq!(timers[0].mode, "once");
     assert_eq!(timers[0].at.as_deref(), Some("2026-01-01T09:00:00Z"));
     assert_eq!(timers[0].after_ms, None);
-    assert_eq!(timers[0].interval_ms, Some(3600000));
+    assert_eq!(timers[0].interval_ms, None);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn timer_new_trigger_event_kind_is_validated_and_schedule_forbidden() {
-    let (mut core, dir) = setup("trigger_validation");
-    // missing event kind
+fn timer_after_requires_exactly_one_schedule_and_a_prompt() {
+    let (mut core, dir) = setup("after_validation");
+    assert!(run(&mut core, "timer_after", json!({"prompt": "x"})).contains("delay_ms, at"));
     assert!(run(
         &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "trigger"})
+        "timer_after",
+        json!({"prompt": "x", "delay_ms": 1000, "at": "2026-01-01T00:00:00Z"})
     )
-    .contains("needs trigger=\"session_idle\""));
-    // unknown event kind
+    .contains("not both"));
     assert!(run(
         &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "whenever"})
+        "timer_after",
+        json!({"prompt": "x", "delay_ms": 0})
     )
-    .contains("needs trigger=\"session_idle\""));
-    // schedule fields are forbidden in trigger mode
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "after_ms": 1000})
-    )
-    .contains("event-driven"));
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "interval_ms": 50})
-    )
-    .contains("event-driven"));
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "trigger", "trigger": "session_idle", "at": "2030-01-01T00:00:00Z"})
-    )
-    .contains("event-driven"));
-    // an event kind on a time-based mode
-    let out = run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 1000, "trigger": "session_idle"}),
-    );
+    .contains("greater than zero"));
+    let missing_prompt = run(&mut core, "timer_after", json!({"delay_ms": 1000}));
     assert!(
-        out.contains("trigger is only valid with mode=\"trigger\""),
-        "{out}"
+        missing_prompt.contains("prompt") && missing_prompt.contains("missing"),
+        "{missing_prompt}"
     );
-    let repeated = run(
+    // An empty at is treated as absent, matching the forgiving executor path.
+    assert!(!run(
         &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 5000, "trigger": "session_idle"}),
-    );
-    assert!(
-        repeated.contains("trigger is only valid with mode=\"trigger\""),
-        "{repeated}"
-    );
-    assert!(
-        repeated.contains("For a periodic timer")
-            && repeated.contains("mode=\"repeat\"")
-            && repeated.contains("omit trigger"),
-        "timer rejection must explain both valid alternatives in prose: {repeated}"
-    );
-    // nothing was recorded
-    assert!(core.timers().is_empty());
+        "timer_after",
+        json!({"prompt": "x", "delay_ms": 1000, "at": ""})
+    )
+    .contains("error"));
+    assert_eq!(core.timers().len(), 1);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn timer_new_trigger_stays_armed_event_owned() {
-    let (mut core, dir) = setup("trigger_basic");
+fn timer_every_sets_repeat_and_first_fire_one_interval_out() {
+    let (mut core, dir) = setup("every_basic");
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "continue after compression", "mode": "trigger",
-               "trigger": "after_compression", "name": "compress-watch"}),
+        "timer_every",
+        json!({"prompt": "report status", "name": "progress", "interval_ms": 900000}),
+    );
+    assert!(!out.contains("error"), "{out}");
+    let timers = core.timers();
+    assert_eq!(timers[0].name, "progress");
+    assert_eq!(timers[0].mode, "repeat");
+    assert_eq!(timers[0].after_ms, Some(900000));
+    assert_eq!(timers[0].interval_ms, Some(900000));
+    assert_eq!(timers[0].at, None);
+    assert_eq!(timers[0].trigger, None);
+
+    let missing_interval = run(&mut core, "timer_every", json!({"prompt": "x"}));
+    assert!(
+        missing_interval.contains("interval_ms") && missing_interval.contains("missing"),
+        "{missing_interval}"
+    );
+    assert!(run(
+        &mut core,
+        "timer_every",
+        json!({"prompt": "x", "interval_ms": 0})
+    )
+    .contains("greater than zero"));
+    let missing_prompt = run(&mut core, "timer_every", json!({"interval_ms": 1000}));
+    assert!(
+        missing_prompt.contains("prompt") && missing_prompt.contains("missing"),
+        "{missing_prompt}"
+    );
+    assert_eq!(core.timers().len(), 1);
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_on_supports_both_events_and_rejects_schedules() {
+    let (mut core, dir) = setup("on_basic");
+    let out = run(
+        &mut core,
+        "timer_on",
+        json!({"prompt": "continue after compression", "name": "compress-watch", "event": "after_compression"}),
     );
     assert!(!out.contains("error"), "{out}");
     assert!(out.contains("stays armed"), "{out}");
     let timers = core.timers();
-    assert_eq!(timers.len(), 1);
     assert_eq!(timers[0].name, "compress-watch");
     assert_eq!(timers[0].mode, "trigger");
     assert_eq!(timers[0].trigger.as_deref(), Some("after_compression"));
@@ -190,44 +216,145 @@ fn timer_new_trigger_stays_armed_event_owned() {
     assert_eq!(timers[0].at, None);
     assert_eq!(timers[0].interval_ms, None);
     assert_eq!(timers[0].created_by, "model");
-    // The confirmation line carries the event-driven mode.
     let line = core.active_timers_confirmation_line();
     assert!(line.contains("[compress-watch|trigger|model]"), "{line}");
-    // A second trigger timer with the other event kind.
+
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "wake when idle", "mode": "trigger", "trigger": "session_idle"}),
+        "timer_on",
+        json!({"prompt": "wake when idle", "event": "session_idle"}),
     );
     assert!(!out.contains("error"), "{out}");
-    let timers = core.timers();
-    assert_eq!(timers.len(), 2);
-    assert_eq!(timers[1].trigger.as_deref(), Some("session_idle"));
+    assert_eq!(core.timers()[1].trigger.as_deref(), Some("session_idle"));
+
+    let missing_event = run(&mut core, "timer_on", json!({"prompt": "x"}));
+    assert!(
+        missing_event.contains("event") && missing_event.contains("missing"),
+        "{missing_event}"
+    );
+    assert!(run(
+        &mut core,
+        "timer_on",
+        json!({"prompt": "x", "event": "whenever"})
+    )
+    .contains("does not accept"));
+    let missing_prompt = run(&mut core, "timer_on", json!({"event": "session_idle"}));
+    assert!(
+        missing_prompt.contains("prompt") && missing_prompt.contains("missing"),
+        "{missing_prompt}"
+    );
+    // Unknown fields are rejected by the schema before dispatch; the
+    // executor's own event check still rejects a missing/unknown event.
+    assert_eq!(core.timers().len(), 2);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
+fn timer_cancel_deletes_by_name_and_reports_missing_names() {
+    let (mut core, dir) = setup("cancel_basic");
+    run(
+        &mut core,
+        "timer_after",
+        json!({"prompt": "x", "delay_ms": 1000}),
+    );
+    let missing_name = run(&mut core, "timer_cancel", json!({}));
+    assert!(
+        missing_name.contains("name") && missing_name.contains("missing"),
+        "{missing_name}"
+    );
+    assert!(run(&mut core, "timer_cancel", json!({"name": "nope"}))
+        .contains("no timer named \"nope\" exists"));
+    let out = run(&mut core, "timer_cancel", json!({"name": "timer0"}));
+    assert!(!out.contains("error"), "{out}");
+    assert!(core.timers().is_empty());
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_cancel_respects_user_timer_agent_permission() {
+    let (mut core, dir) = setup("cancel_permission");
+    let user_spec = |name: &str, allow: bool| TimerSpec {
+        timer_id: format!("timer_user_{name}"),
+        name: name.into(),
+        prompt: "user job".into(),
+        mode: "once".into(),
+        after_ms: Some(60_000),
+        at: None,
+        interval_ms: None,
+        trigger: None,
+        queue_timeout_minutes: 0,
+        created_by: "user".into(),
+        allow_agent_edit: allow,
+    };
+    core.replace_timers(vec![user_spec("locked", false), user_spec("open", true)]);
+
+    let blocked = run(&mut core, "timer_cancel", json!({"name": "locked"}));
+    assert!(blocked.contains("disabled agent changes"), "{blocked}");
+    assert_eq!(
+        core.timers().len(),
+        2,
+        "a blocked delete must change nothing"
+    );
+
+    let deleted = run(&mut core, "timer_cancel", json!({"name": "open"}));
+    assert!(!deleted.contains("error"), "{deleted}");
+    assert_eq!(core.timers().len(), 1);
+    assert_eq!(core.timers()[0].name, "locked");
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_spec_allows_agent_changes_for_legacy_json() {
+    // timers.json rows written before the option existed carry no field and
+    // must keep the default: the agent may delete or modify them.
+    let spec: TimerSpec = serde_json::from_value(json!({
+        "timer_id": "timer_legacy",
+        "name": "timer0",
+        "prompt": "legacy prompt",
+        "mode": "once",
+        "after_ms": 60000,
+        "queue_timeout_minutes": 0,
+        "created_by": "user"
+    }))
+    .unwrap();
+    assert!(spec.allow_agent_edit);
+}
+
+#[test]
+fn timer_tools_share_auto_naming_and_duplicate_rejection() {
     let (mut core, dir) = setup("auto_name");
     run(
         &mut core,
-        json!({"op": "new", "prompt": "a", "after_ms": 1000}),
+        "timer_after",
+        json!({"prompt": "a", "delay_ms": 1000}),
     );
     run(
         &mut core,
-        json!({"op": "new", "prompt": "b", "after_ms": 1000}),
+        "timer_every",
+        json!({"prompt": "b", "interval_ms": 1000}),
     );
-    run(&mut core, json!({"op": "del", "name": "timer0"}));
     run(
         &mut core,
-        json!({"op": "new", "prompt": "c", "after_ms": 1000}),
+        "timer_on",
+        json!({"prompt": "c", "event": "session_idle"}),
     );
     let names: Vec<&str> = core.timers().iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, vec!["timer1", "timer0"]);
-    // Duplicate explicit name is rejected.
+    assert_eq!(names, vec!["timer0", "timer1", "timer2"]);
+    run(&mut core, "timer_cancel", json!({"name": "timer0"}));
+    run(
+        &mut core,
+        "timer_after",
+        json!({"prompt": "d", "delay_ms": 1000}),
+    );
+    let names: Vec<&str> = core.timers().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["timer1", "timer2", "timer0"]);
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "d", "name": "timer1", "after_ms": 1000}),
+        "timer_every",
+        json!({"prompt": "e", "name": "timer1", "interval_ms": 1000}),
     );
     assert!(out.contains("already exists"), "{out}");
     drop(core);
@@ -235,112 +362,80 @@ fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
 }
 
 #[test]
-fn timer_validates_schedule_and_mode() {
-    let (mut core, dir) = setup("validation");
-    // missing prompt
-    assert!(run(&mut core, json!({"op": "new", "after_ms": 1000}))
-        .contains("requires a non-empty prompt"));
-    // no schedule
-    assert!(run(&mut core, json!({"op": "new", "prompt": "x"}))
-        .contains("exactly one of after_ms or at"));
-    // both after_ms and at
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 1000, "at": "2026-01-01T00:00:00Z"})
-    )
-    .contains("exactly one of after_ms or at"));
-    // zero delay
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 0})
-    )
-    .contains("after_ms must be greater than zero"));
-    // interval on once
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 1000, "interval_ms": 5000})
-    )
-    .contains("only applies to mode=\"repeat\""));
-    // repeat without interval
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000})
-    )
-    .contains("also requires interval_ms"));
-    // repeat with zero interval
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "repeat", "after_ms": 1000, "interval_ms": 0})
-    )
-    .contains("interval_ms must be greater than zero"));
-    // invalid mode
-    assert!(run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "mode": "hourly", "after_ms": 1000})
-    )
-    .contains("mode must be"));
-    // invalid op
-    assert!(run(&mut core, json!({"op": "create", "prompt": "x"})).contains("op must be"));
-    // nothing was recorded
-    assert!(core.timers().is_empty());
-    drop(core);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn timer_del_unknown_name_errors_and_name_required() {
-    let (mut core, dir) = setup("del");
-    run(
-        &mut core,
-        json!({"op": "new", "prompt": "x", "after_ms": 1000}),
-    );
-    assert!(run(&mut core, json!({"op": "del"})).contains("without its name"));
-    assert!(run(&mut core, json!({"op": "del", "name": "nope"}))
-        .contains("no timer named \"nope\" exists"));
-    let out = run(&mut core, json!({"op": "del", "name": "timer0"}));
-    assert!(!out.contains("error"), "{out}");
-    assert!(core.timers().is_empty());
-    drop(core);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn timer_enforces_cap() {
+fn timer_tools_enforce_the_session_cap() {
     let (mut core, dir) = setup("cap");
-    for i in 0..crate::MAX_TIMERS {
-        run(
+    for index in 0..crate::MAX_TIMERS {
+        let out = run(
             &mut core,
-            json!({"op": "new", "prompt": "p", "name": format!("t{i}"), "after_ms": 1000}),
+            "timer_after",
+            json!({"prompt": "p", "name": format!("t{index}"), "delay_ms": 1000}),
         );
+        assert!(!out.contains("error"), "{out}");
     }
-    assert_eq!(core.timers().len(), crate::MAX_TIMERS);
-    assert!(run(
+    let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "p", "name": "over", "after_ms": 1000})
-    )
-    .contains("maximum number of timers"));
+        "timer_every",
+        json!({"prompt": "p", "name": "over", "interval_ms": 1000}),
+    );
+    assert!(out.contains("maximum number of timers"), "{out}");
+    assert_eq!(core.timers().len(), crate::MAX_TIMERS);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
-fn timer_publishes_created_and_deleted_topic_ops() {
+fn timer_tools_publish_created_and_deleted_topic_ops() {
     let (mut core, dir) = setup("topic_ops");
-    let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ops = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = RecordingRuntime {
-        ops: std::sync::Arc::clone(&ops),
+        ops: Arc::clone(&ops),
     };
-    let _ = super::execute_action(
-        &mut core,
-        &timer_action(json!({"op": "new", "prompt": "a", "after_ms": 1000})),
+    let _ = core.execute_action(
+        timer_action("timer_every", json!({"prompt": "a", "interval_ms": 1000})),
         &mut runtime,
     );
-    let _ = super::execute_action(
-        &mut core,
-        &timer_action(json!({"op": "del", "name": "timer0"})),
+    let _ = core.execute_action(
+        timer_action("timer_cancel", json!({"name": "timer0"})),
         &mut runtime,
     );
     assert_eq!(*ops.lock().unwrap(), vec!["created", "deleted"]);
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_manifest_examples_execute_through_core_action_dispatch() {
+    let registry = crate::capability::CapabilityRegistry::builtin();
+    let definitions = registry.native_tool_definitions();
+    let (mut core, dir) = setup("manifest_examples");
+    let order = ["timer_after", "timer_every", "timer_on", "timer_cancel"];
+    for (index, tool) in order.into_iter().enumerate() {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == tool)
+            .unwrap();
+        let example: serde_json::Value = definition
+            .description
+            .split("Valid argument examples:\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let out = run(&mut core, tool, example);
+        assert!(!out.contains("error"), "{tool}: {out}");
+        if tool == "timer_cancel" {
+            assert_eq!(core.timers().len(), 2);
+        } else {
+            assert_eq!(core.timers().len(), index + 1);
+        }
+    }
+    assert!(core
+        .timers()
+        .iter()
+        .all(|timer| timer.name != "progress-watch"));
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -350,7 +445,8 @@ fn timer_snapshot_roundtrip_restores_timers() {
     let (mut core, dir) = setup("snapshot");
     run(
         &mut core,
-        json!({"op": "new", "prompt": "keep me", "name": "t1", "after_ms": 1000}),
+        "timer_after",
+        json!({"prompt": "keep me", "name": "t1", "delay_ms": 1000}),
     );
     let snapshot = core.export_dynamic_context();
     assert_eq!(snapshot.active_timers.len(), 1);
@@ -386,10 +482,11 @@ fn timer_confirmation_line_marks_created_by() {
     let (mut core, dir) = setup("confirmation");
     run(
         &mut core,
-        json!({"op": "new", "prompt": "model job", "name": "m1", "after_ms": 1000}),
+        "timer_every",
+        json!({"prompt": "model job", "name": "m1", "interval_ms": 900000}),
     );
     let line = core.active_timers_confirmation_line();
-    assert!(line.contains("[m1|once|model] model job"), "{line}");
+    assert!(line.contains("[m1|repeat|model] model job"), "{line}");
     // Projected user timer (as the host would after TimerSync).
     let user_spec = TimerSpec {
         timer_id: "timer_user_1".into(),
@@ -402,13 +499,14 @@ fn timer_confirmation_line_marks_created_by() {
         trigger: None,
         queue_timeout_minutes: u64::MAX,
         created_by: "user".into(),
+        allow_agent_edit: true,
     };
     let mut timers = core.timers().to_vec();
     timers.push(user_spec);
     core.replace_timers(timers);
     let line = core.active_timers_confirmation_line();
     assert!(line.contains("[u1|repeat|user] user job"), "{line}");
-    assert!(line.contains("[m1|once|model] model job"), "{line}");
+    assert!(line.contains("[m1|repeat|model] model job"), "{line}");
     // Empty set produces no line at all.
     core.replace_timers(vec![]);
     assert!(core.active_timers_confirmation_line().is_empty());
@@ -417,21 +515,48 @@ fn timer_confirmation_line_marks_created_by() {
 }
 
 #[test]
-fn timer_new_accepts_queue_timeout_minutes() {
-    let (mut core, dir) = setup("immediate_flag");
-    let out = run(
-        &mut core,
-        json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000}),
+fn timer_tools_work_from_a_model_response_through_core_dispatch() {
+    let (mut core, dir) = setup("model_e2e");
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+    let ops = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = RecordingRuntime {
+        ops: Arc::clone(&ops),
+    };
+    let create = r#"{"free_talk":"schedule progress guard","working_still_action":[{"timer_every":{"name":"l80-progress-guard","prompt":"继续完成 L80/M200 SGLang 分析与发布回读；完成或取消时删除本定时器。","interval_ms":900000}}]}"#;
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: create.into(),
+            tool_calls: Vec::new(),
+            model_name: "test".into(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
     );
-    assert!(!out.contains("Queue delivery"), "{out}");
-    assert_eq!(core.timers()[0].queue_timeout_minutes, 0);
-    let out = run(
-        &mut core,
-        json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000, "queue_timeout": 3}),
+    assert!(matches!(step, CoreStep::NeedModel { .. }), "{step:?}");
+    assert_eq!(core.timers().len(), 1);
+    let timer = &core.timers()[0];
+    assert_eq!(timer.name, "l80-progress-guard");
+    assert_eq!(timer.mode, "repeat");
+    assert_eq!(timer.after_ms, Some(900000));
+    assert_eq!(timer.interval_ms, Some(900000));
+    assert_eq!(timer.trigger, None);
+    assert_eq!(*ops.lock().unwrap(), vec!["created"]);
+
+    let cancel = r#"{"free_talk":"cancel progress guard","working_still_action":[{"timer_cancel":{"name":"l80-progress-guard"}}]}"#;
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            content: cancel.into(),
+            tool_calls: Vec::new(),
+            model_name: "test".into(),
+            usage: usage(),
+            truncated: false,
+        },
+        &mut runtime,
     );
-    assert!(out.contains("Queue delivery"), "{out}");
-    assert!(out.contains("up to 3 minute(s)"), "{out}");
-    assert_eq!(core.timers()[1].queue_timeout_minutes, 3);
+    assert!(matches!(step, CoreStep::NeedModel { .. }), "{step:?}");
+    assert!(core.timers().is_empty());
+    assert_eq!(*ops.lock().unwrap(), vec!["created", "deleted"]);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }

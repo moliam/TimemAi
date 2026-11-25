@@ -1861,6 +1861,10 @@ enum ClientCommand {
         trigger: Option<String>,
         #[serde(default)]
         queue_timeout_minutes: u64,
+        /// Whether agent timer tools may later delete or modify this
+        /// user-created timer. Absent means true.
+        #[serde(default = "default_allow_agent_edit")]
+        allow_agent_edit: bool,
     },
     TimerDelete {
         session_id: String,
@@ -4887,6 +4891,7 @@ fn handle_command_with_id(
             interval_ms,
             trigger,
             queue_timeout_minutes,
+            allow_agent_edit,
         } => {
             create_session_timer(
                 state,
@@ -4899,6 +4904,7 @@ fn handle_command_with_id(
                 interval_ms,
                 trigger,
                 queue_timeout_minutes,
+                allow_agent_edit,
             )?;
         }
         ClientCommand::TimerDelete {
@@ -9477,6 +9483,8 @@ fn merge_session_timers_from_core(
     state: &AppState,
     session_id: &str,
     specs: &[TimerSpec],
+    op: &str,
+    target: Option<&TimerSpec>,
 ) -> Result<(), String> {
     {
         let mut sessions = state
@@ -9520,16 +9528,30 @@ fn merge_session_timers_from_core(
             };
             merged.push(web_timer);
         }
-        // Race guard: a user timer created while a turn is in flight may not
-        // have reached Core's projection yet (TimerSync is queued behind the
-        // turn). Core is authoritative for model timers only; keep host-side
-        // user timers missing from the reported set instead of dropping them.
+        // An explicit agent deletion is the one case where a user timer's
+        // absence from Core's set means removal. A timer the user disabled
+        // agent changes for is never removed here, even if a stale Core
+        // projection reports it missing.
+        let deleted_target_id = (op == "deleted")
+            .then(|| {
+                target
+                    .filter(|timer| timer.created_by != "user" || timer.allow_agent_edit)
+                    .map(|timer| timer.timer_id.as_str())
+            })
+            .flatten();
+        // Race guard: any other absence means a user timer created while a
+        // turn is in flight has not reached Core's projection yet (TimerSync
+        // is queued behind the turn). Core is authoritative for model timers
+        // only; keep host-side user timers missing from the reported set.
         for timer in &session.timers {
             if timer.spec.created_by == "user"
                 && !merged
                     .iter()
                     .any(|candidate| candidate.spec.timer_id == timer.spec.timer_id)
             {
+                if Some(timer.spec.timer_id.as_str()) == deleted_target_id {
+                    continue;
+                }
                 merged.push(timer.clone());
             }
         }
@@ -9574,7 +9596,8 @@ fn publish_timer_topic_notice(state: &AppState, session_id: &str, op: &str) {
             })
         })
         .unwrap_or_default();
-    let wire_payload = agent_core::host::timer_topic_event(session_id, op, &specs).wire_payload();
+    let wire_payload =
+        agent_core::host::timer_topic_event(session_id, op, &specs, None).wire_payload();
     let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
     publish_core_semantic(
         state,
@@ -9615,6 +9638,12 @@ fn sync_worker_timers(state: &AppState, session_id: &str) {
             );
         }
     }
+}
+
+/// User-created timers default to allowing agent-side changes; a user may
+/// turn it off per timer at creation time.
+fn default_allow_agent_edit() -> bool {
+    true
 }
 
 fn validate_user_timer_input(
@@ -9676,6 +9705,7 @@ fn create_session_timer(
     interval_ms: Option<u64>,
     trigger: Option<String>,
     queue_timeout_minutes: u64,
+    allow_agent_edit: bool,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -9710,6 +9740,7 @@ fn create_session_timer(
         trigger,
         queue_timeout_minutes,
         created_by: "user".to_string(),
+        allow_agent_edit,
     };
     let next_fire_ms = compute_next_fire_ms(&spec, now)?;
     {
@@ -18900,7 +18931,23 @@ fn handle_scoped_worker_event(
                     if let Ok(topic_timers) =
                         serde_json::from_value::<Vec<TimerSpec>>(event.payload["timers"].clone())
                     {
-                        let _ = merge_session_timers_from_core(state, session_id, &topic_timers);
+                        let op = event
+                            .payload
+                            .get("op")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let target = event
+                            .payload
+                            .get("target")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value::<TimerSpec>(value).ok());
+                        let _ = merge_session_timers_from_core(
+                            state,
+                            session_id,
+                            &topic_timers,
+                            op,
+                            target.as_ref(),
+                        );
                     }
                 }
                 if event.topic.name == CORE_TOPIC_MAILBOX {
