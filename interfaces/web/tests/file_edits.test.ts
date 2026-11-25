@@ -279,6 +279,8 @@ describe("file edits surfaces", () => {
       "collapseCommand",
       "turnEditsTitle",
       "turnEditsOverflow",
+      "fileEditsShowMore",
+      "fileEditsShowLess",
     ];
     for (const key of keys) {
       expect(en).toContain(`${key}:`);
@@ -291,9 +293,12 @@ describe("file edits surfaces", () => {
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import {
+  FILE_EDITS_TOOL_LIST_LIMIT,
+  FILE_EDITS_TURN_LIST_LIMIT,
   FileEditsChip,
   FileEditsPanel,
   MAX_AUTO_EXPAND_DIFF_CHARS,
+  fileEditsFoldState,
   TurnEditsSummaryBox,
   fileEditSectionExpandable,
   shouldAutoExpandDiff,
@@ -619,5 +624,71 @@ describe("file edit section expandability", () => {
     expect(component).toContain('t("tools.fileDiffTooLarge")');
     // 旧提示彻底移除：截断不再是「可展开面板 + 尾部说明」。
     expect(component).not.toContain('t("tools.fileDiffOmitted")');
+  });
+});
+
+describe("file edits list folding", () => {
+  const many = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({ ...validEntry, path: `src/file-${index}.rs` }));
+
+  it("keeps a short running-command list and a screenful turn summary", () => {
+    // 用户反馈：工具执行中的中间卡片默认最多 6 个；最后的 diff 总结卡最多 24 个。
+    expect(FILE_EDITS_TOOL_LIST_LIMIT).toBe(6);
+    expect(FILE_EDITS_TURN_LIST_LIMIT).toBe(24);
+    expect(fileEditsFoldState(0, false)).toEqual({ foldable: false, visibleCount: 0, hiddenCount: 0 });
+    expect(fileEditsFoldState(6, false)).toEqual({ foldable: false, visibleCount: 6, hiddenCount: 0 });
+    expect(fileEditsFoldState(7, false)).toEqual({ foldable: true, visibleCount: 6, hiddenCount: 1 });
+    expect(fileEditsFoldState(16, false)).toEqual({ foldable: true, visibleCount: 6, hiddenCount: 10 });
+    expect(fileEditsFoldState(24, false, FILE_EDITS_TURN_LIST_LIMIT))
+      .toEqual({ foldable: false, visibleCount: 24, hiddenCount: 0 });
+    expect(fileEditsFoldState(30, false, FILE_EDITS_TURN_LIST_LIMIT))
+      .toEqual({ foldable: true, visibleCount: 24, hiddenCount: 6 });
+    // 展开后全部可见，再收起回到各自的一屏。
+    expect(fileEditsFoldState(30, true)).toEqual({ foldable: true, visibleCount: 30, hiddenCount: 0 });
+    expect(fileEditsFoldState(30, true, FILE_EDITS_TURN_LIST_LIMIT))
+      .toEqual({ foldable: true, visibleCount: 30, hiddenCount: 0 });
+  });
+
+  it("folds a running command card at six rows and the turn summary at 24", () => {
+    // 工具卡：一次命令最多 16 个文件，默认只展开 6 个。
+    const tool = renderToString(createElement(FileEditsPanel, { edits: many(16) }));
+    expect(tool.match(/class="file-edit-head/g)).toHaveLength(FILE_EDITS_TOOL_LIST_LIMIT);
+    expect(tool.match(/class="file-edits-more"/g)).toHaveLength(1);
+    expect(tool).toContain('aria-expanded="false"');
+    expect(tool).toContain("展开其余 10 个文件");
+    expect(component).toContain("t(\"tools.fileEditsShowLess\")");
+    expect(component).toContain("onClick={() => setShowAll(current => !current)}");
+    // 6 个文件正好一屏，不出现折叠控件。
+    const exact = renderToString(createElement(FileEditsPanel, { edits: many(FILE_EDITS_TOOL_LIST_LIMIT) }));
+    expect(exact).not.toContain("file-edits-more");
+    expect(exact.match(/class="file-edit-head/g)).toHaveLength(FILE_EDITS_TOOL_LIST_LIMIT);
+    // 总结卡：同一份 30 个文件按 24 的一屏折叠，剩余 6 个放在按钮里。
+    const summary = renderToString(createElement(TurnEditsSummaryBox, {
+      summary: { edits: many(30), overflowCount: 0 },
+    }));
+    expect(summary.match(/class="file-edit-head/g)).toHaveLength(FILE_EDITS_TURN_LIST_LIMIT);
+    expect(summary).toContain("展开其余 6 个文件");
+    // 总结卡不超过 24 个文件时不需要折叠控件。
+    const summaryExact = renderToString(createElement(TurnEditsSummaryBox, {
+      summary: { edits: many(FILE_EDITS_TURN_LIST_LIMIT), overflowCount: 0 },
+    }));
+    expect(summaryExact).not.toContain("file-edits-more");
+    // 上限由面板参数决定，总结卡显式传入自己的预算。
+    expect(component).toContain("<FileEditsPanel edits={summary.edits} listLimit={FILE_EDITS_TURN_LIST_LIMIT} />");
+  });
+
+  it("styles the fold control in both themes as a small quiet button", () => {
+    const start = styles.indexOf(".file-edits-more {");
+    expect(start).toBeGreaterThan(-1);
+    const block = styles.slice(start, styles.indexOf("}", start) + 1);
+    expect(block).toContain("border: 0;");
+    expect(block).toContain("justify-self: start;");
+    expect(block).toContain("font-size: 11px;");
+    expect(styles).toContain(":root[data-theme=\"light\"] .file-edits-more { color:");
+    expect(styles).toContain(".file-edits-more:hover { background:");
+    // 面板自身为 0 内边距的两种容器里，按钮与文件名行共用同一缩进。
+    expect(styles).toMatch(/\.stream-tool-row \.file-edits-more,\s*\.turn-edits-summary \.file-edits-more \{ margin-left: 10px; \}/);
+    // 用户反馈：折叠起来的工具行没有命令预览撑开时，行尾文件胶囊/元信息仍要靠右。
+    expect(styles).toMatch(/\.stream-tool-head > \.stream-tool-edits-chip,\s*\.stream-tool-head > \.stream-tool-meta \{ margin-left: auto; \}/);
   });
 });

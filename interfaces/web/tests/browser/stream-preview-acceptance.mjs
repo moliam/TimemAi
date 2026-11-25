@@ -1583,6 +1583,98 @@ async function main() {
         await browser.evaluate(`localStorage.removeItem("timem-web-tool-preview-during-work-v1")`);
         await browser.call("Emulation.clearDeviceMetricsOverride");
       }
+      // 用户反馈：工具执行中的中间卡片默认最多展开 6 个文件；最后的 diff 总结卡
+      // 一次最多 24 个。两处都用同一面板，由 listLimit 决定。
+      const editFiles = (count) => Array.from({ length: count }, (_, index) => editEntry(
+        `src/gen-${index}.rs`, `--- a/src/gen-${index}.rs\n+++ b/src/gen-${index}.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n`));
+      const toolManyAction = { ...editAction("completed"), action_id: "edit-many", edits: editFiles(16) };
+      const toolManyEvent = { event_id: "edit-many", source: "core_topic", created_at_ms: 5,
+        payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: toolManyAction } };
+      const toolBase = host.getSession();
+      const toolSession = { ...toolBase, turns: toolBase.turns.map(t => ({ ...t, state: "working",
+        events: [thoughtEvent("edit-thought", "Edit thought", 1), toolManyEvent] })) };
+      host.setSession(toolSession); host.send({ type: "hello", snapshot: makeSnapshot(toolSession) });
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-row .file-edit-section').length === 6`),
+        "running command diff list is not capped at 6 rows");
+      const toolFold = await browser.evaluate(`(() => { const button = document.querySelector('.stream-tool-row .file-edits-more');
+        return { rows: document.querySelectorAll('.stream-tool-row .file-edit-section').length,
+          text: button ? button.textContent : null,
+          expanded: button ? button.getAttribute('aria-expanded') : null }; })()`);
+      assert(toolFold.rows === 6 && toolFold.expanded === "false" && String(toolFold.text).includes("展开其余 10 个文件"),
+        `running command fold state wrong: ${JSON.stringify(toolFold)}`);
+      await browser.evaluate(`document.querySelector('.stream-tool-row .file-edits-more').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-row .file-edit-section').length === 16`),
+        "running command fold control did not expand all 16 files");
+      await browser.evaluate(`document.querySelector('.stream-tool-row .file-edits-more').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-row .file-edit-section').length === 6`),
+        "running command fold control did not collapse back to 6 rows");
+      // 用户反馈：折叠起来的工具行里文件胶囊有时不靠右——折叠状态不渲染命令预览，
+      // 没有 flex:1 的元素撑开行尾。行尾信息必须自己靠右。
+      if (await browser.evaluate(`document.querySelector('.stream-tool-head')?.getAttribute('aria-expanded') === 'true'`)) {
+        await browser.evaluate(`document.querySelector('.stream-tool-head').click()`);
+        await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-command-preview')`),
+          "collapsing the tool row did not hide its command preview");
+      }
+      const headAlign = await browser.evaluate(`(() => {
+        const head = document.querySelector('.stream-tool-head');
+        const last = head.lastElementChild;
+        const box = head.getBoundingClientRect();
+        const pad = parseFloat(getComputedStyle(head).paddingRight) || 0;
+        return { preview: !!head.querySelector('.stream-tool-command-preview'),
+          rightGap: Math.round((box.right - pad - last.getBoundingClientRect().right) * 10) / 10,
+          width: Math.round(box.width), last: last.className };
+      })()`);
+      assert(!headAlign.preview, `folded tool row still renders a command preview: ${JSON.stringify(headAlign)}`);
+      assert(Math.abs(headAlign.rightGap) <= 6,
+        `folded tool row trailing pill is not right aligned: ${JSON.stringify(headAlign)}`);
+
+      // 最后的 diff 总结卡：30 个文件按 24 的一屏折叠。
+      const turnFiles = editFiles(30);
+      const summaryBase = host.getSession();
+      const summarySession = { ...summaryBase, state: "ready", turns: [{
+        ...summaryBase.turns[0], state: "ready", final_answer: null, completion: null,
+        events: [thoughtEvent("edit-thought", "Edit thought", 1), toolEvent("edit-many", 2)],
+        file_changes: { edits: turnFiles, overflow_count: 0 },
+      }] };
+      host.setSession(summarySession);
+      await browser.call("Page.reload", { ignoreCache: true });
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.turn-edits-summary .file-edit-section').length === 24`),
+        "turn summary diff list is not capped at 24 rows");
+      const summaryFold = await browser.evaluate(`(() => { const panel = document.querySelector('.turn-edits-summary .file-edits-panel');
+        const button = document.querySelector('.turn-edits-summary .file-edits-more');
+        return { rows: document.querySelectorAll('.turn-edits-summary .file-edit-section').length,
+          text: button ? button.textContent : null,
+          expanded: button ? button.getAttribute('aria-expanded') : null,
+          tag: button ? button.tagName : null,
+          last: panel ? panel.lastElementChild === button : false }; })()`);
+      assert(summaryFold.rows === 24 && summaryFold.tag === "BUTTON" && summaryFold.expanded === "false" && summaryFold.last,
+        `turn summary fold state wrong: ${JSON.stringify(summaryFold)}`);
+      assert(String(summaryFold.text).includes("展开其余 6 个文件"),
+        `turn summary fold label misses the hidden count: ${summaryFold.text}`);
+      const moreStyle = await browser.evaluate(`(() => { const button = document.querySelector('.turn-edits-summary .file-edits-more');
+        if (!button) return null; const style = getComputedStyle(button);
+        return { fontSize: style.fontSize, border: style.borderTopWidth }; })()`);
+      assert(moreStyle && moreStyle.fontSize === "11px" && moreStyle.border === "0px",
+        `fold control is not a small quiet button: ${JSON.stringify(moreStyle)}`);
+      await browser.evaluate(`document.querySelector('.turn-edits-summary .file-edits-more').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.turn-edits-summary .file-edit-section').length === 30`),
+        "turn summary fold control did not expand the full file list");
+      assert(await browser.evaluate(`(() => { const button = document.querySelector('.turn-edits-summary .file-edits-more');
+        return !!button && button.getAttribute('aria-expanded') === 'true' && button.textContent === '收起'; })()`),
+        "expanded turn summary did not offer collapsing on the same control");
+      await browser.evaluate(`document.querySelector('.turn-edits-summary .file-edits-more').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelectorAll('.turn-edits-summary .file-edit-section').length === 24`),
+        "turn summary fold control did not collapse back to 24 rows");
+      assert(await browser.evaluate(`document.querySelector('.turn-edits-summary .file-edits-more').getAttribute('aria-expanded') === 'false'`),
+        "re-collapsed turn summary kept the expanded flag");
+      // 清理构造出来的轮次变更，后面的用例仍按原会话继续。
+      const cleanedTurns = host.getSession().turns.map(turnItem => { const rest = { ...turnItem }; delete rest.file_changes; return rest; });
+      const cleanedSession = { ...host.getSession(), turns: cleanedTurns };
+      host.setSession(cleanedSession);
+      host.send({ type: "hello", snapshot: makeSnapshot(cleanedSession) });
+      await waitFor(() => browser.evaluate(`!document.querySelector('.turn-edits-summary')`),
+        "diff summary stayed after the fold check");
+      console.log("PASS Chrome diff card fold: 6 rows for a running command, 24 for the turn summary, both expand and collapse back, folded pill stays right aligned");
       console.log("PASS Chrome edit evidence: diff priority over result preview, chip opens the diff, ordinal only for multiple files, frameless diff card, handoff absorbs one row");
     }
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");

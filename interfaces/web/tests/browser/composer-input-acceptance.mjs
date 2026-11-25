@@ -179,7 +179,12 @@ async function startHost() {
   });
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   const port = server.address().port;
-  return { url: `http://127.0.0.1:${port}/?token=ui`, commands, close: () => server.close() };
+  return {
+    url: `http://127.0.0.1:${port}/?token=ui`,
+    commands,
+    send: (event) => { for (const peer of peers) peer.send(event); },
+    close: () => server.close(),
+  };
 }
 
 async function readDevToolsPort(profile) {
@@ -362,6 +367,221 @@ async function main() {
     const submit = [...host.commands].reverse().find((c) => c.type === "turn_submit");
     assert(submit?.text === TYPED,
       `turn_submit inside throttle window missing live text: ${JSON.stringify(submit?.text ?? null)?.slice(0, 80)}`);
+
+    // 3. Hovering the previous-message arrow for 1s opens a scrollable list of
+    //    this Session's user inputs; clicking an entry jumps the viewport to
+    //    that bubble. Guards hover intent, the portal placement above the
+    //    composer, list scrolling, and index/anchoring consistency.
+    const arrow = await browser.evaluate(`(() => {
+      const button = document.querySelector(".user-message-navigation button");
+      if (!button || button.disabled) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    assert(arrow, "previous-message arrow is missing or disabled");
+
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 420, button: "none", buttons: 0 });
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: arrow.x, y: arrow.y, button: "none", buttons: 0 });
+    await sleep(500);
+    assert(!(await exists(".user-message-history")),
+      "history panel opened before the 1s hover intent elapsed");
+    await waitFor(() => exists(".user-message-history"),
+      "history panel did not open after hovering the arrow for 1s", 3000);
+
+    const history = await browser.evaluate(`(() => {
+      const panel = document.querySelector(".user-message-history");
+      const list = panel?.querySelector(".user-message-history-list");
+      const items = [...(list?.querySelectorAll(".user-message-history-item") ?? [])];
+      const composer = document.querySelector(".composer");
+      return {
+        count: items.length,
+        previews: items.map((item) => item.querySelector(".user-message-history-text")?.textContent ?? ""),
+        scrollable: Boolean(list) && list.scrollHeight > list.clientHeight + 1,
+        active: items.findIndex((item) => item.dataset.active === "true"),
+        panel: panel ? panel.getBoundingClientRect().toJSON() : null,
+        composer: composer ? composer.getBoundingClientRect().toJSON() : null,
+        role: panel?.getAttribute("role") ?? null,
+      };
+    })()`);
+    assert(history.role === "dialog", `history panel role must be dialog, got ${history.role}`);
+    assert(history.count === HEAVY_TURNS,
+      `history panel listed ${history.count} entries, expected ${HEAVY_TURNS}`);
+    assert(history.previews[0]?.includes("Archived task 1"),
+      `history list is not in Turn order: first preview ${JSON.stringify(history.previews[0])}`);
+    assert(history.previews[HEAVY_TURNS - 1]?.includes(`Archived task ${HEAVY_TURNS}`),
+      `history list misses the newest turn: last preview ${JSON.stringify(history.previews[HEAVY_TURNS - 1])}`);
+    assert(history.scrollable, "history list must scroll when entries exceed the panel height");
+    assert(history.active >= 0, "history panel should mark the user input being read");
+    assert(history.panel && history.composer && history.panel.bottom <= history.composer.top + 1,
+      "history panel must open above the composer");
+    assert(history.panel.left >= 0 && history.panel.right <= 1440,
+      `history panel overflows the viewport horizontally: ${history.panel.left}..${history.panel.right}`);
+
+    // Theme parity: the portal must not fall back to one theme's surface.
+    const themed = await browser.evaluate(`(() => {
+      const panel = document.querySelector(".user-message-history");
+      const item = panel?.querySelector(".user-message-history-item");
+      if (!panel || !item) return null;
+      const read = () => ({
+        surface: getComputedStyle(panel).backgroundColor,
+        text: getComputedStyle(item).color,
+      });
+      document.documentElement.dataset.theme = "light";
+      const light = read();
+      document.documentElement.dataset.theme = "dark";
+      const dark = read();
+      return { light, dark };
+    })()`);
+    assert(themed, "history panel or item disappeared during the theme check");
+    assert(themed.light.surface !== themed.dark.surface,
+      `history panel keeps one surface across themes: ${themed.light.surface}`);
+    assert(themed.light.surface.startsWith("rgba(255, 255, 255"),
+      `history panel light surface is not light: ${themed.light.surface}`);
+    assert(themed.light.text === "rgb(29, 53, 66)",
+      `history entry light text color is ${themed.light.text}`);
+
+    // Scroll the list, then click the first entry with a real pointer press.
+    const targetIndex = 2;
+    const target = await browser.evaluate(`(() => {
+      const list = document.querySelector(".user-message-history-list");
+      const item = list?.querySelectorAll(".user-message-history-item")[${targetIndex}];
+      if (!list || !item) return null;
+      const listRect = list.getBoundingClientRect();
+      const itemRect = item.getBoundingClientRect();
+      list.scrollTop += itemRect.top - listRect.top - 8;
+      const rect = item.getBoundingClientRect();
+      return { x: rect.left + Math.min(48, rect.width / 2), y: rect.top + rect.height / 2,
+        text: item.querySelector(".user-message-history-text")?.textContent ?? "" };
+    })()`);
+    assert(target, "history entry to click is missing");
+    assert(target.text.includes(`Archived task ${targetIndex + 1}`),
+      `history entry ${targetIndex} shows ${JSON.stringify(target.text)}`);
+
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
+    await sleep(120);
+    await browser.call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+    await waitFor(() => browser.evaluate(`!document.querySelector(".user-message-history")`),
+      "history panel did not close after selecting an entry", 2500);
+
+    // The jump is an eased 180ms scroll; wait for it to land instead of
+    // sampling the first animation frame.
+    const landed = () => browser.evaluate(`(() => {
+      const viewport = document.querySelector(".chat-scroll");
+      const anchor = [...document.querySelectorAll('[data-session-timeline-active="true"] [data-user-message-anchor]')][${targetIndex}];
+      if (!viewport || !anchor) return null;
+      const top = anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+      return { top, text: anchor.textContent ?? "" };
+    })()`);
+    await waitFor(async () => {
+      const state = await landed();
+      return Boolean(state) && state.top >= -2 && state.top <= 64;
+    }, async () => {
+      const state = await landed();
+      return `history jump did not land: top=${state?.top?.toFixed?.(1) ?? "missing"} ` +
+        `text=${JSON.stringify(state?.text?.slice(0, 60) ?? null)}`;
+    }, 3000);
+    const jumped = await landed();
+    assert(jumped, "target user bubble is missing after the jump");
+    assert(jumped.text.includes(`Archived task ${targetIndex + 1}`),
+      `jump landed on the wrong bubble: ${JSON.stringify(jumped.text?.slice(0, 60))}`);
+    console.log(`history hover jump: entries=${history.count} target_top=${jumped.top.toFixed(1)}px`);
+
+    // Re-entry regression: after a selection the pointer may travel from the
+    // panel back to the arrow. A pending close must not swallow that hover, and
+    // moving back must re-arm the 1s intent instead of staying suppressed.
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 420, button: "none", buttons: 0 });
+    await sleep(320);
+    assert(!(await exists(".user-message-history")), "history panel stayed open after the pointer left everything");
+    const arrowAgain = await browser.evaluate(`(() => {
+      const button = document.querySelector(".user-message-navigation button");
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+    assert(arrowAgain, "previous-message arrow disappeared");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: arrowAgain.x, y: arrowAgain.y, button: "none", buttons: 0 });
+    await waitFor(() => exists(".user-message-history"),
+      "history panel did not reopen after hovering the arrow again", 2500);
+    const reopened = await browser.evaluate(`document.querySelectorAll(".user-message-history-item").length`);
+    assert(reopened === HEAVY_TURNS,
+      `reopened history panel listed ${reopened} entries, expected ${HEAVY_TURNS}`);
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 700, y: 420, button: "none", buttons: 0 });
+    await waitFor(() => browser.evaluate(`!document.querySelector(".user-message-history")`),
+      "history panel did not close after the pointer left the arrows", 2500);
+
+    // 5. Streaming + slow scroll-up. While a Session is working the viewport
+    //    pins itself to the bottom; a slow upward wheel must detach immediately,
+    //    and the commits that follow must not pull the reader back down (the
+    //    old clamp compensation treated every upward step as a layout clamp).
+    await browser.evaluate(`(() => {
+      const viewport = document.querySelector(".chat-scroll");
+      viewport.scrollTop = viewport.scrollHeight;
+    })()`);
+    await sleep(150);
+
+    const workingSession = {
+      ...session(),
+      state: "working",
+      active_turn_id: `turn-${HEAVY_TURNS}`,
+      turns: session().turns.map((item, index) =>
+        index === HEAVY_TURNS - 1 ? { ...item, state: "working" } : item),
+    };
+    // The host advertises an event cursor, so authoritative state must ride the
+    // ordered semantic stream instead of a raw top-level event.
+    host.send({
+      type: "semantic_event",
+      event_seq: 1,
+      event: { type: "session_restart_cwd_resolved", session: workingSession },
+    });
+    await waitFor(
+      () => browser.evaluate(`!!document.querySelector(".user-message-navigation .thread-working-away.is-working")`),
+      "working Session state did not apply",
+    );
+
+    const scrollTopNow = () => browser.evaluate(`document.querySelector(".chat-scroll").scrollTop`);
+    const startTop = await scrollTopNow();
+    let typed = "";
+    for (let step = 0; step < 4; step += 1) {
+      const before = await scrollTopNow();
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseWheel", x: 700, y: 380, deltaX: 0, deltaY: -40,
+      });
+      await sleep(90);
+      const afterWheel = await scrollTopNow();
+      assert(afterWheel < before - 8,
+        `slow wheel-up did not move the viewport: ${before} -> ${afterWheel}`);
+      // Any commit (typing rerenders the thread) used to re-pin the reader.
+      typed += "s";
+      await browser.evaluate(`(() => {
+        const area = document.querySelector(".composer textarea");
+        if (!area) return;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")
+          .set.call(area, ${JSON.stringify("slow-scroll")} + ${JSON.stringify(typed)});
+        area.dispatchEvent(new Event("input", { bubbles: true }));
+      })()`);
+      await sleep(420);
+      const afterCommit = await scrollTopNow();
+      assert(afterCommit <= afterWheel + 2,
+        `a streaming-era commit pulled the viewport back: ${afterWheel} -> ${afterCommit}`);
+    }
+    const endTop = await scrollTopNow();
+    assert(endTop < startTop - 120,
+      `slow scroll-up only moved ${startTop - endTop}px in four steps`);
+    assert(await browser.evaluate(
+      `!!document.querySelector(".user-message-navigation .thread-working-away.away-from-bottom")`),
+      "working-away indicator missing after scrolling up during work");
+
+    // An explicit jump-to-latest re-attaches the follower.
+    await browser.evaluate(`document.querySelector(".user-message-navigation .thread-working-away")?.click()`);
+    await waitFor(async () => {
+      const viewport = await browser.evaluate(`(() => {
+        const node = document.querySelector(".chat-scroll");
+        return { top: node.scrollTop, max: node.scrollHeight - node.clientHeight };
+      })()`);
+      return viewport.max - viewport.top <= 2;
+    }, "jump-to-latest did not return to the bottom", 3000);
+    console.log(`slow scroll-up detached: ${startTop} -> ${endTop}`);
 
     console.log("composer input acceptance: all checks passed");
   } finally {

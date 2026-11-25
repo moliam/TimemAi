@@ -100,3 +100,37 @@ export function anchorScrollDelta(
   const delta = elementViewportTop - anchor.viewportTop;
   return Math.abs(delta) <= epsilon ? 0 : delta;
 }
+
+/**
+ * 贴底跟随时，一次提交后滚动位置上移的两种可能：浏览器因上方内容变矮把
+ * scrollTop 夹小（应补偿），或用户自己往上滚（必须立刻脱钩、不能拉回）。
+ * 用 scrollHeight 是否变矮区分：用户上滚不会让内容变矮。
+ */
+export type PinnedScrollChange = "none" | "user-scroll-up" | "layout-shrink";
+
+export function classifyPinnedScrollChange(
+  previous: ScrollMetrics,
+  current: ScrollMetrics,
+  epsilon = 1,
+): PinnedScrollChange {
+  const movedUp = previous.scrollTop - current.scrollTop;
+  if (movedUp <= epsilon) return "none";
+  return previous.scrollHeight - current.scrollHeight > epsilon
+    ? "layout-shrink"
+    : "user-scroll-up";
+}
+
+/**
+ * 是否继续贴底跟随。用户主动上滚会一直保持脱钩，哪怕仍在“底部附近”的阈值内；
+ * 只有真正回到底部（或显式点“跳到最新”）才恢复，避免流式内容把慢滚拉回去。
+ */
+export function resolveFollowLatest(params: {
+  holdOff: boolean;
+  nearBottom: boolean;
+  distanceToBottom: number;
+  bottomEpsilon?: number;
+}): { follow: boolean; holdOff: boolean } {
+  const bottomEpsilon = params.bottomEpsilon ?? 2;
+  const holdOff = params.holdOff && params.distanceToBottom > bottomEpsilon;
+  return { follow: !holdOff && params.nearBottom, holdOff };
+}

@@ -82,16 +82,66 @@ export function FileEditsChip({
 // and only an expanded diff renders as an inner box. The card header chip owns
 // the summed file count and +/- totals, so the panel renders no second head —
 // repeating the same numbers there only tripled the same reading three times.
-export function FileEditsPanel({ edits }: { edits: ReadonlyArray<TurnEditEntry> }) {
+// Two presentation budgets, because the two surfaces are read differently: the
+// card of one command while work is running is a glance ("what did this command
+// touch"), while the end-of-turn summary is the answer ("everything this task
+// changed"). The first stays very short, the second may use a screenful.
+export const FILE_EDITS_TOOL_LIST_LIMIT = 6;
+export const FILE_EDITS_TURN_LIST_LIMIT = 24;
+
+// Pure counting rule for the folded file list: the first screenful is always
+// visible and "show all" only adds the rest. Kept outside the component so the
+// rule can be tested without a DOM.
+export function fileEditsFoldState(
+  total: number,
+  showAll: boolean,
+  limit: number = FILE_EDITS_TOOL_LIST_LIMIT,
+): { foldable: boolean; visibleCount: number; hiddenCount: number } {
+  const foldable = total > limit;
+  const visibleCount = foldable && !showAll ? limit : total;
+  return { foldable, visibleCount, hiddenCount: total - visibleCount };
+}
+
+export function FileEditsPanel({
+  edits,
+  listLimit = FILE_EDITS_TOOL_LIST_LIMIT,
+}: {
+  edits: ReadonlyArray<TurnEditEntry>;
+  // Defaults to the running-command budget; the turn summary passes its own.
+  listLimit?: number;
+}) {
   const wrap = useBetaPreference("fileEditsWrap");
+  // A turn that touches a whole tree would push a wall of file rows into the
+  // reading column, so a long list shows its first screenful and offers the
+  // rest behind one small control.
+  const [showAll, setShowAll] = useState(false);
+  // A list that shrinks below the limit (session switch, refreshed projection)
+  // must not keep an expanded state that no longer means anything.
+  useEffect(() => {
+    if (edits.length <= listLimit) setShowAll(false);
+  }, [edits.length, listLimit]);
+  const { foldable, visibleCount, hiddenCount } = fileEditsFoldState(edits.length, showAll, listLimit);
+  const visible = foldable && !showAll ? edits.slice(0, visibleCount) : edits;
   // A single file needs no ordinal: "1." only repeats what the card already
   // says. The index appears only when the panel lists several files.
   const showIndex = edits.length > 1;
   return (
     <div className={`file-edits-panel${wrap ? " edits-wrap" : ""}`} aria-label={t("tools.fileEditsAria")}>
-      {edits.map((edit, index) => (
+      {visible.map((edit, index) => (
         <FileEditSection key={`${edit.path}:${index}`} edit={edit} index={index} showIndex={showIndex} />
       ))}
+      {foldable && (
+        <button
+          type="button"
+          className="file-edits-more"
+          aria-expanded={showAll}
+          onClick={() => setShowAll(current => !current)}
+        >
+          {showAll
+            ? t("tools.fileEditsShowLess")
+            : t("tools.fileEditsShowMore", { count: hiddenCount })}
+        </button>
+      )}
     </div>
   );
 }
@@ -135,7 +185,7 @@ export function TurnEditsSummaryBox({ summary }: { summary: TurnEditsSummary }) 
         <b>{t("tools.turnEditsTitle")}</b>
         <FileEditsChip edits={summary.edits} />
       </div>
-      <FileEditsPanel edits={summary.edits} />
+      <FileEditsPanel edits={summary.edits} listLimit={FILE_EDITS_TURN_LIST_LIMIT} />
       {summary.overflowCount > 0 && (
         <div className="file-edit-notice">
           {t("tools.turnEditsOverflow", { count: summary.overflowCount })}

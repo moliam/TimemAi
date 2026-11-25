@@ -18,6 +18,7 @@ import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
 import { CollapsibleSystemEntryText } from "./collapsible_system_entry";
 import { formatUserEntryTime } from "./user_entry_time";
+import { userMessageHistoryItems } from "./user_message_history";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -193,10 +194,12 @@ import {
 import {
   adjacentUserMessageIndex,
   anchorScrollDelta,
+  classifyPinnedScrollChange,
   canScrollInDirection,
   isNearScrollBottom,
   pickViewportTurnAnchor,
   preservePrependScrollTop,
+  resolveFollowLatest,
   restoreSessionScrollTop,
   scrollEdgeFades,
   ScrollMetrics,
@@ -8518,6 +8521,7 @@ function TimerPanel({
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
   const [queueTimeoutMinutes, setQueueTimeoutMinutes] = useState("");
+  const [allowAgentEdit, setAllowAgentEdit] = useState(true);
   useEffect(() => {
     setCreateOpen(false);
     setPrompt("");
@@ -8529,6 +8533,7 @@ function TimerPanel({
     setAtValue("");
     setIntervalMinutes("");
     setQueueTimeoutMinutes("");
+    setAllowAgentEdit(true);
     setEditingTimerId(null);
     setEditForm(null);
     setExpandedPrompts(new Set());
@@ -8617,6 +8622,7 @@ function TimerPanel({
     setAtValue("");
     setIntervalMinutes("");
     setQueueTimeoutMinutes("");
+    setAllowAgentEdit(true);
   };
   const submitCreate = (event: React.FormEvent) => {
     event.preventDefault();
@@ -8638,6 +8644,7 @@ function TimerPanel({
               : {}),
           }),
       queue_timeout_minutes: queueTimeoutMinutesFromInput(queueTimeoutMinutes),
+      allow_agent_edit: allowAgentEdit,
     };
     if (!sendCommand.current(command)) return;
     setCreateOpen(false);
@@ -8690,6 +8697,14 @@ function TimerPanel({
                     ? t("timer.createdByUser")
                     : t("timer.createdByModel")}
                 </span>
+                {timer.created_by === "user" && timer.allow_agent_edit === false && (
+                  <span
+                    className="timer-item-origin agent-readonly"
+                    title={t("timer.agentReadOnlyHint")}
+                  >
+                    {t("timer.agentReadOnly")}
+                  </span>
+                )}
                 <span className="timer-item-meta">
                   {timer.mode === "repeat"
                     ? t("timer.modeRepeat")
@@ -9153,6 +9168,14 @@ function TimerPanel({
             onChange={(event) => setQueueTimeoutMinutes(event.target.value)}
           />
           <span>{t("timer.queueLabel")}</span>
+        </label>
+        <label className="timer-allow-agent">
+          <input
+            type="checkbox"
+            checked={allowAgentEdit}
+            onChange={(event) => setAllowAgentEdit(event.target.checked)}
+          />
+          <span>{t("timer.allowAgentEdit")}</span>
         </label>
         {showInvalidHint && (
           <div className="timer-form-hint error">
@@ -10145,6 +10168,12 @@ function QueuedMessageTimerBadge({
   );
 }
 
+/** 输入框左侧上下箭头：悬停 1s 才展开用户输入历史（避免划过就打扰），
+ *  移入面板或离开时留一点宽限期，指针跨过按钮与面板之间的间隙不会闪断。 */
+const USER_MESSAGE_HISTORY_HOVER_DELAY_MS = 1000;
+const USER_MESSAGE_HISTORY_CLOSE_DELAY_MS = 240;
+const USER_MESSAGE_HISTORY_PANEL_ID = "user-message-history-panel";
+
 function TimemThread({
   activeSession,
   sessions,
@@ -10304,6 +10333,11 @@ function TimemThread({
   // 底部空槽把这段高度补回来并还原位置；这样滚动位置单调不减，正在读的内容只会
   // 往上走，不会先掉下去再弹回来。
   const pinnedScrollTopRef = useRef(0);
+  // 与 pinnedScrollTopRef 同帧的 scrollHeight：用来区分「浏览器把 scrollTop 夹小
+  // （上方内容变矮）」和「用户自己往上滚（高度没变）」。
+  const pinnedScrollHeightRef = useRef(0);
+  // 用户主动上滚后置位：回到底部或点“跳到最新”之前，不再自动贴底。
+  const followHoldOffRef = useRef(false);
   const streamFollowing = activeSession?.state === "working";
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -10313,18 +10347,78 @@ function TimemThread({
     // 那时补偿会留下整屏空白（验收里就抓到过），结束态由归档布局自己接管。
     if (!followThreadLatest.current || !streamFollowing) {
       pinnedScrollTopRef.current = viewport.scrollTop;
+      pinnedScrollHeightRef.current = viewport.scrollHeight;
       return;
     }
     const previous = pinnedScrollTopRef.current;
-    const clamped = previous - viewport.scrollTop;
-    if (clamped > 1) {
+    const previousHeight = pinnedScrollHeightRef.current;
+    const movedUp = previous - viewport.scrollTop;
+    const shrank = previousHeight - viewport.scrollHeight;
+    const change = classifyPinnedScrollChange(
+      { scrollTop: previous, scrollHeight: previousHeight },
+      { scrollTop: viewport.scrollTop, scrollHeight: viewport.scrollHeight },
+    );
+    if (change === "user-scroll-up") {
+      // 用户反馈：工作时空槽把画面往下拉。根因是这段补偿分不清「浏览器夹取」和
+      // 「用户自己上滚」——慢滚的每一小步都会被当成夹取还原，只有快速滚出贴底
+      // 邻域才能脱身。内容没有变矮却上移了，只能是用户主动上滚：立刻脱钩。
+      followHoldOffRef.current = true;
+      followThreadLatest.current = false;
+      setThreadAwayFromBottom(true);
+    } else if (change === "layout-shrink") {
       // 用户反馈：空槽不能越滚越大——补偿同样走 applyStreamScrollGap 的上限夹取，
-      // 不随提交次数累加成整屏空白。
-      applyStreamScrollGap(streamScrollGap + clamped);
+      // 不随提交次数累加成整屏空白；补偿高度不超过真实收拢高度。
+      applyStreamScrollGap(streamScrollGap + Math.min(movedUp, shrank));
       viewport.scrollTop = previous;
     }
     pinnedScrollTopRef.current = viewport.scrollTop;
+    pinnedScrollHeightRef.current = viewport.scrollHeight;
   });
+  // 滚轮/触控板/触摸/翻页键的“向上”意图在滚动发生前就脱钩：贴底跟随只在真正
+  // 回到底部时恢复。否则流式内容每帧变高，用户慢滚的那几像素会被一次次拉回底部。
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const detachFromLatest = () => {
+      if (followHoldOffRef.current) return;
+      if (!canScrollInDirection(viewport, -1)) return;
+      followHoldOffRef.current = true;
+      followThreadLatest.current = false;
+      setThreadAwayFromBottom(true);
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) detachFromLatest();
+    };
+    let touchStartY: number | null = null;
+    const onTouchStart = (event: TouchEvent) => {
+      touchStartY = event.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY;
+      // 手指下滑 = 内容上滚。
+      if (y !== undefined && touchStartY !== null && y - touchStartY > 6)
+        detachFromLatest();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!["PageUp", "ArrowUp", "Home"].includes(event.key)) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']"))
+        return;
+      detachFromLatest();
+    };
+    viewport.addEventListener("wheel", onWheel, { passive: true });
+    viewport.addEventListener("touchstart", onTouchStart, { passive: true });
+    viewport.addEventListener("touchmove", onTouchMove, { passive: true });
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      viewport.removeEventListener("wheel", onWheel);
+      viewport.removeEventListener("touchstart", onTouchStart);
+      viewport.removeEventListener("touchmove", onTouchMove);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+    // 滚动容器在会话切换时复用同一个节点，监听一次即可。
+  }, []);
+
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
   const workingMemoHideTimerRef = useRef<number | null>(null);
@@ -10679,6 +10773,21 @@ function TimemThread({
   const userMessageNavigationTaskRef = useRef<FrameTask | null>(null);
   const userMessageGeometryTaskRef = useRef<FrameTask | null>(null);
   const userMessageNavigationLayoutTaskRef = useRef<FrameTask | null>(null);
+  const [userMessageHistoryOpen, setUserMessageHistoryOpen] = useState(false);
+  const [userMessageHistoryPlacement, setUserMessageHistoryPlacement] =
+    useState<{ left: number; bottom: number } | null>(null);
+  const [userMessageHistoryActiveIndex, setUserMessageHistoryActiveIndex] =
+    useState(-1);
+  const userMessageHistoryOpenTimerRef = useRef<number | null>(null);
+  const userMessageHistoryCloseTimerRef = useRef<number | null>(null);
+  const userMessageHistoryDismissedRef = useRef(false);
+  const userMessageHistoryPanelRef = useRef<HTMLDivElement | null>(null);
+  // 列表只从权威 Turn 投影派生，顺序与 `[data-user-message-anchor]` 一一对应，
+  // 因此点击索引可以直接复用 anchor 滚动，不需要第二套导航状态。
+  const userMessageHistory = useMemo(
+    () => (activeSession ? userMessageHistoryItems(activeSession.turns) : []),
+    [activeSession],
+  );
 
   useLayoutEffect(() => {
     if (userMessageNavigationAnimationRef.current !== null) {
@@ -10691,6 +10800,18 @@ function TimemThread({
     setUserMessageNavigationHoverLocked(false);
     setUserMessageNavigation({ previous: false, next: false, bottom: false });
     setUserMessageNavigationLayout({ overlap: "none" });
+    if (userMessageHistoryOpenTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryOpenTimerRef.current);
+      userMessageHistoryOpenTimerRef.current = null;
+    }
+    if (userMessageHistoryCloseTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryCloseTimerRef.current);
+      userMessageHistoryCloseTimerRef.current = null;
+    }
+    userMessageHistoryDismissedRef.current = false;
+    setUserMessageHistoryOpen(false);
+    setUserMessageHistoryPlacement(null);
+    setUserMessageHistoryActiveIndex(-1);
     setComposerExpanded(false);
     setDraggedQueueMessageId(undefined);
     setQueuedMessageOverId(undefined);
@@ -10856,21 +10977,15 @@ function TimemThread({
     updateUserMessageNavigation();
   }, [updateUserMessageNavigation, userMessageAnchors]);
 
-  const navigateUserMessage = useCallback(
-    (direction: UserMessageNavigationDirection) => {
+  const scrollToUserMessageIndex = useCallback(
+    (index: number) => {
       const viewport = viewportRef.current;
       if (!viewport) return;
       const anchors = userMessageAnchors();
       if (userMessageAnchorOffsetsRef.current.length !== anchors.length)
         refreshUserMessageGeometry();
       const anchorOffsets = userMessageAnchorOffsetsRef.current;
-      const navigationTop = viewport.scrollTop + userMessageNavigationOffset;
-      const index = adjacentUserMessageIndex(
-        anchorOffsets,
-        navigationTop,
-        direction,
-      );
-      if (!anchors[index]) return;
+      if (!anchors[index] || anchorOffsets[index] === undefined) return;
       followThreadLatest.current = false;
       const targetTop = anchorOffsets[index] - userMessageNavigationOffset;
       if (userMessageNavigationAnimationRef.current !== null)
@@ -10907,6 +11022,178 @@ function TimemThread({
     ],
   );
 
+  const navigateUserMessage = useCallback(
+    (direction: UserMessageNavigationDirection) => {
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const anchors = userMessageAnchors();
+      if (userMessageAnchorOffsetsRef.current.length !== anchors.length)
+        refreshUserMessageGeometry();
+      const index = adjacentUserMessageIndex(
+        userMessageAnchorOffsetsRef.current,
+        viewport.scrollTop + userMessageNavigationOffset,
+        direction,
+      );
+      if (index < 0) return;
+      scrollToUserMessageIndex(index);
+    },
+    [
+      refreshUserMessageGeometry,
+      scrollToUserMessageIndex,
+      userMessageAnchors,
+      userMessageNavigationOffset,
+    ],
+  );
+
+  const userMessageHistoryPlacementForNavigation = useCallback(() => {
+    const navigation = userMessageNavigationRef.current;
+    if (!navigation) return null;
+    const rect = navigation.getBoundingClientRect();
+    const width = Math.min(360, window.innerWidth - 16);
+    return {
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      bottom: Math.max(8, window.innerHeight - rect.top + 8),
+    };
+  }, []);
+
+  const clearUserMessageHistoryTimers = useCallback(() => {
+    if (userMessageHistoryOpenTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryOpenTimerRef.current);
+      userMessageHistoryOpenTimerRef.current = null;
+    }
+    if (userMessageHistoryCloseTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryCloseTimerRef.current);
+      userMessageHistoryCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const openUserMessageHistory = useCallback(() => {
+    refreshUserMessageGeometry();
+    const placement = userMessageHistoryPlacementForNavigation();
+    if (!placement) return;
+    const viewport = viewportRef.current;
+    let activeIndex = -1;
+    if (viewport) {
+      const index = adjacentUserMessageIndex(
+        userMessageAnchorOffsetsRef.current,
+        viewport.scrollTop + userMessageNavigationOffset,
+        "previous",
+      );
+      activeIndex = index >= 0 ? index : 0;
+    }
+    setUserMessageHistoryPlacement(placement);
+    setUserMessageHistoryActiveIndex(activeIndex);
+    setUserMessageHistoryOpen(true);
+  }, [
+    refreshUserMessageGeometry,
+    userMessageHistoryPlacementForNavigation,
+    userMessageNavigationOffset,
+  ]);
+
+  const scheduleUserMessageHistoryOpen = useCallback(() => {
+    if (
+      userMessageHistoryDismissedRef.current ||
+      userMessageHistoryOpen ||
+      userMessageHistoryOpenTimerRef.current !== null
+    )
+      return;
+    userMessageHistoryOpenTimerRef.current = window.setTimeout(() => {
+      userMessageHistoryOpenTimerRef.current = null;
+      openUserMessageHistory();
+    }, USER_MESSAGE_HISTORY_HOVER_DELAY_MS);
+  }, [openUserMessageHistory, userMessageHistoryOpen]);
+
+  const scheduleUserMessageHistoryClose = useCallback(() => {
+    if (userMessageHistoryOpenTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryOpenTimerRef.current);
+      userMessageHistoryOpenTimerRef.current = null;
+    }
+    if (
+      !userMessageHistoryOpen ||
+      userMessageHistoryCloseTimerRef.current !== null
+    )
+      return;
+    userMessageHistoryCloseTimerRef.current = window.setTimeout(() => {
+      userMessageHistoryCloseTimerRef.current = null;
+      setUserMessageHistoryOpen(false);
+    }, USER_MESSAGE_HISTORY_CLOSE_DELAY_MS);
+  }, [userMessageHistoryOpen]);
+
+  const keepUserMessageHistoryOpen = useCallback(() => {
+    if (userMessageHistoryCloseTimerRef.current !== null) {
+      window.clearTimeout(userMessageHistoryCloseTimerRef.current);
+      userMessageHistoryCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const armUserMessageHistory = useCallback(() => {
+    userMessageHistoryDismissedRef.current = false;
+    keepUserMessageHistoryOpen();
+    scheduleUserMessageHistoryOpen();
+  }, [keepUserMessageHistoryOpen, scheduleUserMessageHistoryOpen]);
+
+  const selectUserMessageHistoryItem = useCallback(
+    (index: number) => {
+      clearUserMessageHistoryTimers();
+      // 选中后先收起，避免面板挡住刚跳到的内容；指针没离开箭头前不重新展开。
+      userMessageHistoryDismissedRef.current = true;
+      setUserMessageHistoryOpen(false);
+      setUserMessageHistoryActiveIndex(index);
+      scrollToUserMessageIndex(index);
+    },
+    [clearUserMessageHistoryTimers, scrollToUserMessageIndex],
+  );
+
+  useEffect(() => {
+    if (!userMessageHistoryOpen) return;
+    const reposition = () => {
+      const placement = userMessageHistoryPlacementForNavigation();
+      if (placement) setUserMessageHistoryPlacement(placement);
+    };
+    window.addEventListener("resize", reposition);
+    return () => window.removeEventListener("resize", reposition);
+  }, [userMessageHistoryOpen, userMessageHistoryPlacementForNavigation]);
+
+  useEffect(() => {
+    if (!userMessageHistoryOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      clearUserMessageHistoryTimers();
+      userMessageHistoryDismissedRef.current = true;
+      setUserMessageHistoryOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => window.removeEventListener("keydown", closeOnEscape, true);
+  }, [clearUserMessageHistoryTimers, userMessageHistoryOpen]);
+
+  useEffect(() => {
+    if (!userMessageHistoryOpen) return;
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    // 面板开着时用滚轮/触控板浏览会话，高亮跟着走，不落后于真实阅读位置。
+    const syncActive = () => {
+      const index = adjacentUserMessageIndex(
+        userMessageAnchorOffsetsRef.current,
+        viewport.scrollTop + userMessageNavigationOffset,
+        "previous",
+      );
+      const next = index >= 0 ? index : 0;
+      setUserMessageHistoryActiveIndex((current) =>
+        current === next ? current : next,
+      );
+    };
+    viewport.addEventListener("scroll", syncActive, { passive: true });
+    return () => viewport.removeEventListener("scroll", syncActive);
+  }, [userMessageHistoryOpen, userMessageNavigationOffset]);
+
+  useLayoutEffect(() => {
+    if (!userMessageHistoryOpen) return;
+    // 打开时把「当前读到哪条」滚进可视区，长会话里不必手动找。
+    userMessageHistoryPanelRef.current
+      ?.querySelector<HTMLElement>('[data-active="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [userMessageHistoryOpen, userMessageHistoryActiveIndex]);
+
   const navigateToThreadBottom = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -10914,6 +11201,7 @@ function TimemThread({
       cancelAnimationFrame(userMessageNavigationAnimationRef.current);
       userMessageNavigationAnimationRef.current = null;
     }
+    followHoldOffRef.current = false;
     followThreadLatest.current = true;
     viewport.scrollTo({
       top: viewport.scrollHeight,
@@ -10926,6 +11214,7 @@ function TimemThread({
     if (!viewport) return;
     if (userMessageNavigationAnimationRef.current !== null)
       cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+    followHoldOffRef.current = false;
     followThreadLatest.current = true;
     const targetTop = viewport.scrollHeight;
     if (prefersReducedMotion()) {
@@ -11083,6 +11372,7 @@ function TimemThread({
     if (!viewport || !activeSessionId) return;
     const position = sessionScrollPositionsRef.current.get(activeSessionId);
     followThreadLatest.current = position?.followLatest ?? true;
+    followHoldOffRef.current = !followThreadLatest.current;
     // Only a Session that already has a Turn needs the next turn-id effect to
     // treat this render as restoration. Leaving this marker on an empty Session
     // would incorrectly suppress its first real Turn's start scroll.
@@ -11556,6 +11846,17 @@ function TimemThread({
             const contentTop = streamContentScrollTop(event.currentTarget);
             if (event.currentTarget.scrollTop > contentTop + 1) {
               event.currentTarget.scrollTop = contentTop;
+              // 用户滚进内容底边的预留空槽就是「回到最新内容」。这里必须恢复
+              // 跟随：此前提前 return 会把 followThreadLatest 留在 false，之后
+              // 新内容到达时不再自动贴底（表现为滚到底也不跟）。
+              followHoldOffRef.current = false;
+              followThreadLatest.current = true;
+              setThreadAwayFromBottom(false);
+              if (activeSessionId)
+                sessionScrollPositionsRef.current.set(activeSessionId, {
+                  scrollTop: event.currentTarget.scrollTop,
+                  followLatest: true,
+                });
               return;
             }
             if (
@@ -11564,8 +11865,19 @@ function TimemThread({
             )
               resetStreamScrollGap();
           }
-          followThreadLatest.current = nearBottom;
-          setThreadAwayFromBottom(!nearBottom);
+          const distanceToBottom =
+            event.currentTarget.scrollHeight -
+            streamScrollGap -
+            event.currentTarget.scrollTop -
+            event.currentTarget.clientHeight;
+          const follow = resolveFollowLatest({
+            holdOff: followHoldOffRef.current,
+            nearBottom,
+            distanceToBottom,
+          });
+          followHoldOffRef.current = follow.holdOff;
+          followThreadLatest.current = follow.follow;
+          setThreadAwayFromBottom(!follow.follow);
           if (activeSessionId)
             sessionScrollPositionsRef.current.set(activeSessionId, {
               scrollTop: event.currentTarget.scrollTop,
@@ -12347,20 +12659,34 @@ function TimemThread({
         ref={userMessageNavigationRef}
         className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`}
         aria-label={t("messageNav.userMessages")}
-        onPointerEnter={lockUserMessageNavigationLayout}
-        onPointerLeave={unlockUserMessageNavigationLayout}
+        onPointerEnter={() => {
+          lockUserMessageNavigationLayout();
+          keepUserMessageHistoryOpen();
+        }}
+        onPointerLeave={() => {
+          unlockUserMessageNavigationLayout();
+          userMessageHistoryDismissedRef.current = false;
+          scheduleUserMessageHistoryClose();
+        }}
       >
         <button
           type="button"
           title={t("messageNav.previousMessage")}
           aria-label={t("messageNav.previousMessage")}
+          aria-haspopup="dialog"
+          aria-expanded={userMessageHistoryOpen}
+          aria-controls={
+            userMessageHistoryOpen ? USER_MESSAGE_HISTORY_PANEL_ID : undefined
+          }
           disabled={!userMessageNavigation.previous}
+          onPointerEnter={armUserMessageHistory}
           onClick={() => navigateUserMessage("previous")}
         >
           <ChevronUp size={13} strokeWidth={1.7} aria-hidden="true" />
         </button>
         <button
           type="button"
+          onPointerEnter={armUserMessageHistory}
           title={
             userMessageNavigation.next ? t("messageNav.nextMessage") : t("messageNav.jumpToBottom")
           }
@@ -12453,6 +12779,65 @@ function TimemThread({
             />
           )}
       </nav>
+      {userMessageHistoryOpen &&
+        userMessageHistoryPlacement &&
+        createPortal(
+          <div
+            id={USER_MESSAGE_HISTORY_PANEL_ID}
+            className="user-message-history"
+            role="dialog"
+            aria-label={t("messageNav.historyTitle")}
+            ref={userMessageHistoryPanelRef}
+            style={{
+              left: userMessageHistoryPlacement.left,
+              bottom: userMessageHistoryPlacement.bottom,
+            }}
+            onPointerEnter={keepUserMessageHistoryOpen}
+            onPointerLeave={scheduleUserMessageHistoryClose}
+          >
+            <div className="user-message-history-head">
+              <span>{t("messageNav.historyTitle")}</span>
+              <span className="user-message-history-count">
+                {t("messageNav.historyCount", {
+                  count: userMessageHistory.length,
+                })}
+              </span>
+            </div>
+            {userMessageHistory.length === 0 && (
+              <p className="user-message-history-empty">
+                {t("messageNav.historyEmpty")}
+              </p>
+            )}
+            <ol className="user-message-history-list">
+              {userMessageHistory.map((item, index) => (
+                <li key={item.turnId} className="user-message-history-row">
+                  <button
+                    type="button"
+                    className="user-message-history-item"
+                    data-active={index === userMessageHistoryActiveIndex}
+                    title={item.text}
+                    onClick={() => selectUserMessageHistoryItem(index)}
+                  >
+                    <span className="user-message-history-time">
+                      {formatUserEntryTime(item.createdAtMs)}
+                    </span>
+                    <span className="user-message-history-text">
+                      {item.preview}
+                    </span>
+                    {item.entryCount > 1 && (
+                      <span className="user-message-history-more">
+                        {t("messageNav.historyMore", {
+                          count: item.entryCount - 1,
+                        })}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </div>,
+          document.body,
+        )}
           </div>
       </div>
     </div>

@@ -1286,9 +1286,51 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试看护：`file_edits_tests` 覆盖 1 MiB 截断、metadata 无 diff、payload 预算降级；`web_host_tests` 覆盖 final response 只带一次 full net、metadata 借用 per-call diff、恢复时不误标 slimmed；`file_edits.test.ts` 覆盖 1.1M 字符边界。验证：core `file_edits` 39、core lib 1052、timem lib 547、web 1100、tsc/build 通过。
 - 预算分配（2026-11-25 追加）：17 MiB 不再按声明顺序先到先得；Core 先为所有路径保留 metadata，再把剩余额度按 diff 文本字节从小到大分配给完整 diff。放不下的路径仍保留在总结里，只是 `diff=null`、`skip_reason=budget_exhausted`；输出顺序仍按原声明顺序。Host 总结仍保留 128 条路径硬上限，超过部分计入 overflow。测试 `payload_budget_spends_on_smallest_diffs_first` 把大文件放在数组最前，断言小/中 diff 仍先被保留、大 diff 被省略，防止大文件抢占额度。
 
+## 2026-11-25 timer 拆分为四个窄工具
+
+- 用户反馈：模型在单一 `timer` 工具上反复混用 `mode="repeat"` 与 `trigger="after_compression"`；补示例和文字互斥说明仍会犯同类错误。决定把接口拆成四个只接受自身参数的工具：`timer_after`（`delay_ms` 或 `at` 二选一）、`timer_every`（`interval_ms`）、`timer_on`（`event`）、`timer_cancel`（`name`）。非法组合不再有合法工具能表达。
+- 语义边界：`TimerSpec`、宿主调度、`timers.json`、timer topic 和 Web 定时器面板均不变；旧 `timer` 不再出现在工具目录，也不保留模型侧调用兼容。模型工具不再暴露 `queue_timeout`，模型创建的定时器按默认 0（立即投递）；用户通过 Web 面板创建/编辑的定时器仍保留排队超时能力。
+- 展示：四个工具共用同一个时钟图标和同一条 `TimerInvocation` 渲染路径；Shell 仍通过统一的 `CoreActionKind::Timer` 输出创建/删除状态行，不为四个工具复制 UI 状态机。
+- 测试看护：Core 新增四个工具的创建、绝对时间、周期首次延迟、事件校验、按名删除、自动命名、容量上限、topic 发布、快照恢复、确认行及清单样例执行测试；新增“模型 JSON 响应 → 解析 → Core 分派 → timer topic”端到端测试。Web 新增四工具投影与渲染、共用图标、投影到活动行的测试；旧 `timer` 工具行不再有专用渲染，按通用工具行回落（模型不再产生该形状）。验证：`cargo test -p agent_core --lib timer` 14 通过；Core lib 全量 1055 通过 / 2 ignored；`pnpm exec vitest run tests/tool_presentation.test.tsx tests/view_model.test.ts` 323 通过；`cargo check -p timem`、`pnpm exec tsc --noEmit`、`pnpm build`（dist 产物已更新）通过；`cargo fmt -p agent_core -- --check`、`git diff --check`、架构守卫 self-test、模块边界与测试契约检查均通过。未运行全 workspace CI 与真实 provider 端到端。
+
+## 2026-11-25 用户定时器允许 agent 删除/修改（默认允许）
+
+- 背景：用户创建的定时器此前无法被 agent 删除——Core 工具虽然能移除，但 Host 合并 `core.timer` 全量集合时把所有“Core 未报告”的用户定时器都当成仍在途创建的陈旧投影重新加回，删除被静默撤销。本次让删除显式生效，并提供创建时的授权开关。
+- 数据：`TimerSpec` 新增 `allow_agent_edit`（serde 默认 true），旧 `timers.json` 无该字段时按允许加载；模型自建的定时器恒为 true。Host 的 `timer_create` 命令透传该字段（缺省 true），Web 创建表单新增「允许 agent 删除或修改这个定时器」勾选，默认勾选，随命令下发；列表对关闭该开关的用户定时器显示「agent 只读」徽标。
+- 行为：`timer_cancel` 删除用户定时器前检查开关，关闭时失败关闭且不改变任何状态；Host 合并时以 topic 里的 `target` 识别“这一条被删除”，仅当目标是用户定时器且允许 agent 修改时移除，其余“Core 未报告”的用户定时器仍按在途创建保留；即使收到越权的删除事件，Host 也拒绝移除只读定时器。
+- 范围：agent 目前只有创建/删除工具，没有原地修改工具；开关先约束删除，后续若新增 agent 编辑工具须复用同一开关。
+- 测试看护：Core 新增“用户定时器只读时删除被拒、允许时删除成功”与“旧 JSON 缺字段默认允许”测试；Host 新增“显式删除移除允许的用户定时器 / 保留只读定时器 / 非删除事件仍保留在途用户定时器”测试，并把真实 worker 的模型工具调用用例改为 `timer_after`；Web timer 面板 e2e 增加“授权勾选默认选中”断言。
+- 验证：Core lib 1057 通过 / 2 ignored（timer 窄测 16）；Host timer 相关 25 通过；Web vitest 1115 通过、`tsc --noEmit`、`pnpm build` 通过；`timer-ui-acceptance` 明暗 × 1440/900/390 全过；`cargo fmt -p agent_core -- --check`、`git diff --check`、架构守卫 self-test、模块边界、测试契约通过。未运行全 workspace CI 与真实 provider 端到端。
+
 ## 2026-11-25 WebUI 本地文件链接临时预览
 
 - 行为：模型输出中的 `file:///...`、Session CWD 绝对路径和可解析相对文件路径会在点击时换取短期票据，在新标签页打开只读预览；普通站内路由和外部 URL 不受影响。
 - 安全：票据 10 分钟 TTL、最多 128 个、仅内存；只允许 Session CWD/配置 workspace 内的常规文件，签发与访问均 canonicalize 防 `..` 与 symlink 逃逸；HTML/SVG 按文本转义，严格 CSP，不把长期 access token 放进预览 URL。
 - 预览：文本最多 1 MiB、图片 16 MiB、下载 64 MiB；位图可内嵌显示，二进制/超限内容提供受控下载或明确拒绝。
 - 测试看护：Rust `file_preview` 单测（边界/TTL/类型/文件名）、`web_host_tests` 的票据签发与 401 集成测试、bridge 方法约束测试、Web `file_links` 与 Markdown provider 单测。
+
+## 2026-11-25 diff 卡片文件过多时折叠为一屏
+
+- 背景：一次任务改动几十个文件时，diff 卡片会把整列文件名铺开，后面的对话被推到很远。用户要求分两档：工具执行中的中间卡片默认最多 6 个文件，最后轮次的 diff 总结卡最多 24 个，其余折叠。
+- 行为：`FileEditsPanel` 的折叠窗口由 `listLimit` 决定，默认 6（工具卡）并由总结卡传入 24。超过窗口时只渲染前 N 行，末尾给出「展开其余 N 个文件」小按钮；点击展开全部，再点同一按钮（此时文案为「收起」）回到各自的窗口。折叠状态由面板自己持有，工具卡的 diff 面板与「本次任务文件变更」总结卡行为一致；列表回落到窗口以内（切换会话、投影刷新）时自动退出展开态，避免留下无意义的已展开状态。
+- 归属：计数规则抽成纯函数 `fileEditsFoldState(total, showAll)`，两个常量 `FILE_EDITS_TOOL_LIST_LIMIT = 6` / `FILE_EDITS_TURN_LIST_LIMIT = 24`，视图只负责渲染；i18n 新增 `fileEditsShowMore` / `fileEditsShowLess`（中英同步），样式新增 `.file-edits-more` 明暗两套（无框小按钮，与文件名行同缩进）。
+- 测试看护：`file_edits.test.ts` 新增 3 例——折叠计数边界（6/24 两档不折叠、7 隐藏 1、16 隐藏 10、30 在 24 档隐藏 6、展开后隐藏 0）、SSR 渲染（工具卡 16 个文件只出 6 行、总结卡 30 个文件只出 24 行 + 一枚折叠按钮、`aria-expanded="false"`、剩余数量文案；窗口内文件数不出现控件）、明暗样式契约；`web_ui_matrix_check` 的「Scroll and bounded rendering」行补充该行为与证据。
+- 验证：`pnpm --dir interfaces/web exec vitest run tests/file_edits.test.ts` 41 通过；Web 全量 vitest、`tsc --noEmit`、`pnpm build` 见本轮汇总；`web_ui_matrix_check: ok`、`git diff --check` 通过；`interfaces/web/dist` 已重建。
+
+## 2026-11-25 折叠工具行的文件胶囊靠右
+
+- 问题：用户反馈折叠状态下的工具行里，「N 个文件 · +x −y」小胶囊有时贴在工具名后面而不是靠右。
+- 根因：行头是 flex 布局，靠右对齐依赖命令预览（`.stream-tool-command-preview` 等）的 `flex: 1` 撑开剩余空间；折叠行（`open=false`）不渲染命令预览，行尾就没有可伸缩元素，胶囊只跟着工具名排列。展开态或带结构化预览的行因此看起来是正常的，表现为"有时候"。
+- 修复：`.stream-tool-head > .stream-tool-edits-chip, .stream-tool-head > .stream-tool-meta { margin-left: auto; }`。展开态预览已占满剩余空间时 auto margin 解析为 0，不改变现有布局；无预览时由行尾自己吃下剩余空间。
+- 测试看护：`file_edits.test.ts` 断言该规则存在；`stream-preview-acceptance.mjs` 在折叠行上量测行尾元素右缘与行头内容右缘差值 ≤6px，并断言此时没有命令预览。
+
+## 2026-11-25 流式预览改为文本增量下发
+
+- 背景：预览节流帧（约 150ms 一帧）此前每帧都重发「到目前为止的整段文本」，一段 256 KiB 的回答在 WebSocket 上累计约 O(n²) 字节，同时每帧还要做一次大 JSON 的序列化与解析。
+- 服务端（`applications/timem/src/server/response_preview.rs`）：`PreviewThrottleState` 新增水位 `sent: SentPreview`（attempt / 文本字节数 / UTF-16 长度 / status / 连续增量帧数），记录**真正广播出去**的帧；`encode_preview_payload` 在广播前重写 payload —— 一个 attempt 的首帧、status 变化、文本回退时仍带全量 `text` 作为客户端新基准，其余帧删除 `text`，只带 `text_delta` 与 `text_base_len`（UTF-16 码元偏移）。编码只发生在真正发送前（`publish` 的 due 帧与 `flush_pending`），避免给被节流扣住的帧推进水位。
+- 自愈：基准链最长 `MAX_DELTA_RUN = 16` 帧，之后强制重发一次全量。中途重连或漏掉一帧的客户端因此能在约两秒内重新对齐，而不是一直丢掉增量等到回合结束；整体仍是线性成本。
+- 客户端（`interfaces/web/src/view_model.ts`）：新增 `resolvePreviewDelta`，带 `text` 的帧直接作为基准，增量帧用 `text_base_len` 校验本地副本（JS 字符串长度同为 UTF-16 码元）后拼成累积 `text`，下游渲染继续只读一个累积字段；基准不匹配、跨 attempt、既无 text 又无 delta 的帧直接丢弃，宁可不渲染也不拼出坏前缀。
+- 协议（`interfaces/web/src/protocol.ts`）：`ResponsePreview.response.text` 变为「仅基准帧携带」，新增可选 `text_delta` / `text_base_len`。协议两端必须同版本上线。
+- 测试看护：`response_preview.rs` 内 6 例——首帧基准与后续纯增量、256 KiB 下 wire 体积低于全量语义的 1/10、CJK/emoji 的 UTF-16 偏移不漂移、settled/新 attempt 重新取基准、撤回清水位、漏帧客户端在 `MAX_DELTA_RUN` 内自愈并追平文本；`interfaces/web/tests/preview_delta.test.ts` 6 例覆盖基准帧、正常增量、空增量、基准不匹配、跨 attempt、空帧丢弃。
+- 验证：`cargo test -p timem --lib response_preview` 7 通过；`cargo fmt -p timem -- --check`、`git diff --check` 通过；Web `preview_delta.test.ts` 6 通过、`tsc --noEmit` 与 `pnpm build` 通过。
+

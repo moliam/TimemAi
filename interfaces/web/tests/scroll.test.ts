@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjacentUserMessageIndex, anchorScrollDelta, canScrollInDirection, isNearScrollBottom, pickViewportTurnAnchor, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
+import { adjacentUserMessageIndex, anchorScrollDelta, canScrollInDirection, classifyPinnedScrollChange, isNearScrollBottom, pickViewportTurnAnchor, preservePrependScrollTop, resolveFollowLatest, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -137,5 +137,62 @@ describe("hydration scroll anchoring", () => {
     // Growth at or below the anchor leaves it in place: no correction.
     expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20)).toBe(0);
     expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20.5)).toBe(0);
+  });
+});
+
+describe("streaming follow-latest detachment", () => {
+  it("separates a user scroll-up from a layout shrink", () => {
+    // Content height unchanged and the viewport moved up: the user scrolled.
+    expect(
+      classifyPinnedScrollChange(
+        { scrollTop: 1000, scrollHeight: 4000 },
+        { scrollTop: 968, scrollHeight: 4000 },
+      ),
+    ).toBe("user-scroll-up");
+    // Content above collapsed; the browser clamped scrollTop while the reader
+    // was pinned to the bottom.
+    expect(
+      classifyPinnedScrollChange(
+        { scrollTop: 1000, scrollHeight: 4000 },
+        { scrollTop: 870, scrollHeight: 3870 },
+      ),
+    ).toBe("layout-shrink");
+    // Downward movement and sub-pixel jitter are neither.
+    expect(
+      classifyPinnedScrollChange(
+        { scrollTop: 1000, scrollHeight: 4000 },
+        { scrollTop: 1040, scrollHeight: 4040 },
+      ),
+    ).toBe("none");
+    expect(
+      classifyPinnedScrollChange(
+        { scrollTop: 1000, scrollHeight: 4000 },
+        { scrollTop: 999.5, scrollHeight: 4000 },
+      ),
+    ).toBe("none");
+  });
+
+  it("keeps a slow scroll-up detached even inside the near-bottom band", () => {
+    // 10px from the bottom is still "near bottom" by threshold, but the user
+    // asked to read: do not re-attach and pull the viewport back.
+    expect(
+      resolveFollowLatest({ holdOff: true, nearBottom: true, distanceToBottom: 10 }),
+    ).toEqual({ follow: false, holdOff: true });
+    // Slow steps never cross the band, so the hold must survive them.
+    expect(
+      resolveFollowLatest({ holdOff: true, nearBottom: true, distanceToBottom: 71 }),
+    ).toEqual({ follow: false, holdOff: true });
+  });
+
+  it("re-attaches only at the real bottom or through an explicit jump", () => {
+    expect(
+      resolveFollowLatest({ holdOff: true, nearBottom: true, distanceToBottom: 0 }),
+    ).toEqual({ follow: true, holdOff: false });
+    expect(
+      resolveFollowLatest({ holdOff: false, nearBottom: true, distanceToBottom: 12 }),
+    ).toEqual({ follow: true, holdOff: false });
+    expect(
+      resolveFollowLatest({ holdOff: false, nearBottom: false, distanceToBottom: 900 }),
+    ).toEqual({ follow: false, holdOff: false });
   });
 });
