@@ -106,10 +106,10 @@ describe("settings category regroup", () => {
     expect(styles).toContain(".file-edits-panel.edits-wrap .file-edit-code { white-space: pre-wrap; overflow-wrap: anywhere; }");
   });
 
-  it("keeps add/delete sign and code colors without row tint bands", () => {
-    // 用户反馈：增删行不再有整行色带，+/− 号与代码文字仍保留语义色。
-    expect(styles).not.toContain(".file-edit-row-add { background");
-    expect(styles).not.toContain(".file-edit-row-del { background");
+  it("keeps add/delete tint bands with sign and code colors", () => {
+    // 用户反馈（修正）：增删行保留第一版的浅色带，只有未变更行不着色。
+    expect(styles).toContain(".file-edit-row-add { background: rgba(94, 160, 215, 0.15); }");
+    expect(styles).toContain(".file-edit-row-del { background: rgba(214, 92, 84, 0.17); }");
     expect(styles).toContain(".file-edit-row-add .file-edit-sign { color: #8fc4e8; font-weight: 600; }");
     expect(styles).toContain(".file-edit-row-add .file-edit-code { color: #c2dcf1; }");
     expect(styles).toContain(".file-edit-row-del .file-edit-code { color: #f6b9b2; }");

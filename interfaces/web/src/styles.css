@@ -7479,7 +7479,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
    同色系加深一点、底部一条细线，不引入新颜色；负外边距让横幅铺满色块顶边。 */
 .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
   margin: -6px -9px 0;
-  padding: 6px 9px;
+  padding: 3px 9px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 9px 9px 0 0;
   background: rgba(255, 255, 255, 0.04);
@@ -7650,8 +7650,10 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-sign { user-select: none; text-align: center; }
 .file-edit-code { white-space: pre; min-width: 0; }
+.file-edit-row-add { background: rgba(94, 160, 215, 0.15); }
 .file-edit-row-add .file-edit-sign { color: #8fc4e8; font-weight: 600; }
 .file-edit-row-add .file-edit-code { color: #c2dcf1; }
+.file-edit-row-del { background: rgba(214, 92, 84, 0.17); }
 .file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
 .file-edit-row-del .file-edit-code { color: #f6b9b2; }
 .file-edit-row-hunk {
@@ -7723,7 +7725,9 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-gutter { color: #a59b85; }
+:root[data-theme="light"] .file-edit-row-add { background: #e4eef9; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c62a8; }
+:root[data-theme="light"] .file-edit-row-del { background: #fbe5e3; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1e4e79; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-code { color: #7e2d26; }

@@ -45,6 +45,7 @@ describe("file edit block spacing", () => {
     expect(head).toContain("background: rgba(255, 255, 255, 0.04);");
     expect(head).toContain("border-bottom: 1px solid rgba(255, 255, 255, 0.07);");
     expect(head).toContain("border-radius: 9px 9px 0 0;");
+    expect(head).toContain("padding: 3px 9px;");
     const light = ruleBody(
       ':root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head',
     );
