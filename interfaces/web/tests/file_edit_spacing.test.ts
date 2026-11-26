@@ -32,23 +32,23 @@ describe("file edit block spacing", () => {
 
   it("renders each edit block as a warm bordered card", () => {
     const body = ruleBody(".stream-tool-row:has(.file-edits-panel)");
-    expect(body).toContain("border: 1px solid rgba(255, 201, 120, 0.14);");
-    expect(body).toContain("background: rgba(255, 213, 140, 0.05);");
+    expect(body).toContain("border: 1px solid rgba(255, 255, 255, 0.08);");
+    expect(body).toContain("background: rgba(255, 244, 224, 0.04);");
     const light = ruleBody(':root[data-theme="light"] .stream-tool-row:has(.file-edits-panel)');
-    expect(light).toContain("border-color: rgba(200, 158, 80, 0.30);");
-    expect(light).toContain("background: #f9f4e8;");
-    expect(light).toContain("box-shadow: 0 1px 2px rgba(124, 94, 38, 0.07);");
+    expect(light).toContain("border-color: rgba(0, 0, 0, 0.10);");
+    expect(light).toContain("background: #f7f5ef;");
+    expect(light).toContain("box-shadow: 0 1px 2px rgba(70, 60, 40, 0.08);");
   });
 
   it("renders the command line as a banner above the diff rows", () => {
     const head = ruleBody(".stream-tool-row:has(.file-edits-panel) > .stream-tool-head");
-    expect(head).toContain("background: rgba(255, 213, 140, 0.06);");
-    expect(head).toContain("border-bottom: 1px solid rgba(255, 201, 120, 0.13);");
+    expect(head).toContain("background: rgba(255, 244, 224, 0.05);");
+    expect(head).toContain("border-bottom: 1px solid rgba(255, 255, 255, 0.07);");
     expect(head).toContain("border-radius: 9px 9px 0 0;");
     const light = ruleBody(
       ':root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head',
     );
-    expect(light).toContain("background: rgba(200, 158, 80, 0.11);");
+    expect(light).toContain("background: rgba(140, 120, 90, 0.10);");
   });
 
   it("gives the diff body a faint warm inset layer without any border line", () => {
@@ -56,7 +56,7 @@ describe("file edit block spacing", () => {
     expect(body).toContain("padding: 2px 8px;");
     expect(body).not.toContain("border:");
     expect(body).not.toContain("border-left");
-    expect(body).toContain("background: rgba(255, 213, 140, 0.04);");
+    expect(body).toContain("background: rgba(255, 244, 224, 0.04);");
     expect(body).toContain("border-radius: 8px;");
     const light = ruleBody(':root[data-theme="light"] .file-edit-diff');
     expect(light).toContain("background: rgba(253, 246, 230, 0.6);");
@@ -64,10 +64,10 @@ describe("file edit block spacing", () => {
 
   it("keeps the archived details command line on the same banner contract", () => {
     const summary = ruleBody(".tool-activity:has(.file-edits-panel) > summary");
-    expect(summary).toContain("background: rgba(255, 213, 140, 0.06);");
-    expect(summary).toContain("border-bottom: 1px solid rgba(255, 201, 120, 0.13);");
+    expect(summary).toContain("background: rgba(255, 244, 224, 0.05);");
+    expect(summary).toContain("border-bottom: 1px solid rgba(255, 255, 255, 0.07);");
     expect(summary).toContain("border-radius: 7px 7px 0 0;");
     const light = ruleBody(':root[data-theme="light"] .tool-activity:has(.file-edits-panel) > summary');
-    expect(light).toContain("background: rgba(200, 158, 80, 0.11);");
+    expect(light).toContain("background: rgba(140, 120, 90, 0.10);");
   });
 });

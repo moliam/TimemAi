@@ -185,9 +185,9 @@ describe("file edits surfaces", () => {
     expect(styles).toMatch(/\.stream-tool-row \.file-edit-head,\s*\.turn-edits-summary \.file-edit-head \{\s*padding-left: 10px;\s*padding-right: 10px;/);
     // 用户反馈：带 diff 的命令和它的 diff 卡片共用一个色块，相邻命令靠色块分开；
     // 卡片自己那层底色必须去掉，否则又是色块套色块。
-    expect(styles).toMatch(/\.stream-tool-row:has\(\.file-edits-panel\) \{[^}]*background: rgba\(255, 213, 140, 0\.05\);/);
+    expect(styles).toMatch(/\.stream-tool-row:has\(\.file-edits-panel\) \{[^}]*background: rgba\(255, 244, 224, 0\.04\);/);
     expect(styles).toMatch(/\.stream-tool-row:has\(\.file-edits-panel\) \.file-edits-panel \{[^}]*background: transparent;/);
-    expect(styles).toMatch(/:root\[data-theme="light"\] \.stream-tool-row:has\(\.file-edits-panel\) \{[^}]*background: #f9f4e8;/);
+    expect(styles).toMatch(/:root\[data-theme="light"\] \.stream-tool-row:has\(\.file-edits-panel\) \{[^}]*background: #f7f5ef;/);
     expect(styles).toMatch(/:root\[data-theme="light"\] \.stream-tool-row:has\(\.file-edits-panel\) \.file-edits-panel \{ background: transparent; \}/);
     const lightPanelStart = styles.indexOf(':root[data-theme="light"] .file-edits-panel {');
     const lightPanel = styles.slice(lightPanelStart, styles.indexOf("}", lightPanelStart) + 1);
@@ -235,7 +235,7 @@ describe("file edits surfaces", () => {
     // 不要任何描边线（含左侧线）——层级只由暖纸内衬底表达，不回到整圈内框。
     expect(diff).not.toContain("border:");
     expect(diff).not.toContain("border-left");
-    expect(diff).toContain("background: rgba(255, 213, 140, 0.04);");
+    expect(diff).toContain("background: rgba(255, 244, 224, 0.04);");
     expect(diff).toContain("padding: 2px 8px;");
     expect(diff).toContain("border-radius: 8px;");
     expect(diff).toContain("overflow: auto;");

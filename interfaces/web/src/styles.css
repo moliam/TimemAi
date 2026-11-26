@@ -85,7 +85,7 @@ button:disabled { cursor: not-allowed; }
 .work-collapse-toggle { border: 0; border-radius: 5px; padding: 4px 7px; background: transparent; color: #7f98a5; font-size: 11px; font-weight: 650; }
 .work-collapse-toggle:hover { background: #ffffff0d; color: #c6d8df; }
 .turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
-.turn-work-scroll { max-height: min(720px, 82vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px 10px; border-left: 2px solid rgba(255, 201, 120, 0.20); }
+.turn-work-scroll { max-height: min(720px, 82vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px 14px; border-left: 2px solid rgba(255, 255, 255, 0.16); }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
 /* 阅读区底部的临时空槽：吸收「工具结果收拢」带来的变矮，让 scrollTop 不被浏览器
    夹到新的 max（否则贴底跟随时整列内容会被迫下移）。高度由 main.tsx 逐帧写入。 */
@@ -258,8 +258,9 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 720px) { .app-shell { grid-template-columns: 1fr; }.brand { grid-template-columns: 41px minmax(0, 1fr) 30px; }.sidebar { display: flex; visibility: hidden; position: fixed; z-index: 12; inset: 0 auto 0 0; width: min(290px, 84vw); transform: translateX(-105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: 18px 0 42px #0008; }.sidebar.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; }.mobile-sidebar-backdrop { display: block; position: fixed; z-index: 11; inset: 0; width: 100%; border: 0; background: #02060999; }.mobile-sidebar-close { display: grid; place-items: center; width: 30px; height: 30px; margin-left: auto; border: 0; border-radius: 5px; background: transparent; color: #9aabb8; }.icon-button.mobile-session-button { display: grid; }.chat-header { padding: 14px 17px; }.chat-scroll { padding: 24px 17px 17px 57px; }.composer-wrap { padding: 12px 17px 16px; }.runtime-card { margin: 9px 17px 0; overflow-x: auto; }.runtime-card .runtime-summary > span + span { display: none; }.runtime-options { grid-template-columns: 1fr; }.message.user .message-content { max-width: 90%; } }
+:root[data-theme="light"] .turn-work-scroll { border-left-color: rgba(0, 0, 0, 0.14); }
 @media (max-width: 720px) { .turn-user-frame { max-width: 94%; }.turn-work-scroll { max-height: 78vh; }
-:root[data-theme="light"] .turn-work-scroll { border-left-color: rgba(200, 158, 80, 0.36); }.turn-assistant-heading { padding-inline: 11px; } }
+:root[data-theme="light"] .turn-work-scroll { border-left-color: rgba(0, 0, 0, 0.14); }.turn-assistant-heading { padding-inline: 11px; } }
 
 /* Syntax-aware Markdown and the compact final turn telemetry card. */
 .message-content pre .hljs { display: block; padding: 0; background: transparent; }
@@ -899,7 +900,7 @@ button:disabled { cursor: not-allowed; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
 .turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; animation: stream-working-grow 1.2s ease-in-out infinite; }
 @keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
-.turn-work-scroll { max-height: min(630px, 75vh); padding: 0 0 0 10px; scrollbar-gutter: auto; }
+.turn-work-scroll { max-height: min(630px, 75vh); padding: 0 0 0 14px; scrollbar-gutter: auto; }
 .turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px; }
 .turn-work-item + .turn-work-item { border: 0; }
 .turn-work-item strong { color: #c8c8c8; font-weight: 550; }
@@ -1442,13 +1443,13 @@ button:disabled { cursor: not-allowed; }
   right: 10px;
   bottom: 0;
   height: 1px;
-  background: rgba(255, 201, 120, 0.24);
+  background: rgba(255, 255, 255, 0.10);
   pointer-events: none;
 }
 :root[data-theme="light"] .turn-work-panel:not(.has-live-usage)::after {
-  background: rgba(200, 158, 80, 0.32);
+  background: rgba(0, 0, 0, 0.12);
 }
-.turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px; }
+.turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px 14px; }
 .turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #ffffff14; background: transparent; }
 .turn-work-panel.has-live-usage > .turn-new-updates { bottom: 42px; }
 .turn-work-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); }
@@ -7443,18 +7444,18 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
    相邻命令由下方独立间距分开。卡片自身那层底色去掉，避免色块套色块。 */
 .stream-tool-row:has(.file-edits-panel) {
   padding: 6px 9px 9px;
-  border: 1px solid rgba(255, 201, 120, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
-  background: rgba(255, 213, 140, 0.05);
+  background: rgba(255, 244, 224, 0.04);
 }
 .stream-tool-row:has(.file-edits-panel) .file-edits-panel {
   padding-top: 2px;
   background: transparent;
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) {
-  border-color: rgba(200, 158, 80, 0.30);
-  background: #f9f4e8;
-  box-shadow: 0 1px 2px rgba(124, 94, 38, 0.07);
+  border-color: rgba(0, 0, 0, 0.10);
+  background: #f7f5ef;
+  box-shadow: 0 1px 2px rgba(70, 60, 40, 0.08);
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) .file-edits-panel { background: transparent; }
 /* 用户反馈：连续命令各自的 edit 卡片不能贴成一个长条。每条命令的 edit 色块
@@ -7475,22 +7476,22 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
   margin: -6px -9px 0;
   padding: 6px 9px;
-  border-bottom: 1px solid rgba(255, 201, 120, 0.13);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 9px 9px 0 0;
-  background: rgba(255, 213, 140, 0.06);
+  background: rgba(255, 244, 224, 0.05);
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
-  border-bottom-color: rgba(200, 158, 80, 0.25);
-  background: rgba(200, 158, 80, 0.11);
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  background: rgba(140, 120, 90, 0.10);
 }
 .tool-activity:has(.file-edits-panel) > summary {
-  border-bottom: 1px solid rgba(255, 201, 120, 0.13);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 7px 7px 0 0;
-  background: rgba(255, 213, 140, 0.06);
+  background: rgba(255, 244, 224, 0.05);
 }
 :root[data-theme="light"] .tool-activity:has(.file-edits-panel) > summary {
-  border-bottom-color: rgba(200, 158, 80, 0.25);
-  background: rgba(200, 158, 80, 0.11);
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  background: rgba(140, 120, 90, 0.10);
 }
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
@@ -7613,7 +7614,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   margin: 2px 0 6px;
   padding: 2px 8px;
   border-radius: 8px;
-  background: rgba(255, 213, 140, 0.04);
+  background: rgba(255, 244, 224, 0.04);
   overflow: auto;
   max-height: 420px;
 }
