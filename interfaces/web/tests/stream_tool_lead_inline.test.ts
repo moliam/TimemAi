@@ -10,10 +10,15 @@ describe("stream tool lead capsule", () => {
   it("merges the adjacent remark into the following tool group", () => {
     expect(main).toContain("next.lead = source.entries[source.entries.length - 1];");
     expect(main).toContain("source.entries = source.entries.slice(0, -1);");
-    // 用户反馈（修正）：remark 优先于 thought 预览——回溯先找 free_talk。
-    expect(main).toContain("if (isRemarkGroup(renderedGroups[back])) { leadSource = back; break; }");
-    expect(main).toContain("if (leadSource === -1) {");
-    expect(main).toContain("if (isThoughtGroup(renderedGroups[back])) { leadSource = back; break; }");
+    // 用户反馈（修正）：remark 优先于 thought 预览——单次从近到远扫描，
+    // 命中最近 remark 即用，否则用扫描中最近的 thought。
+    expect(main).toContain("if (remarkSource === -1 && isRemarkGroup(candidate)) remarkSource = back;");
+    expect(main).toContain("if (thoughtSource === -1 && isThoughtGroup(candidate)) thoughtSource = back;");
+    expect(main).toContain("const leadSource = remarkSource !== -1 ? remarkSource : thoughtSource;");
+    // 缺陷看护：已消费的空文本组必须截断回溯——否则 [remark1][remark2][动作][间隔][动作]
+    // 会让 remark1（或 thought1）被更靠后的动作组重复消费，同段文本渲染两遍。
+    expect(main).toContain("if (candidate.consumed) break;");
+    expect(main).toContain("if (source.entries.length === 0) source.consumed = true;");
     expect(main).toContain("const visibleGroups = renderedGroups.filter(group => group.entries.length > 0);");
     // 时序语义不变：并入组内的 free_talk 章节仍算「回复位置」。
     expect(main).toContain("const leadChapter = group.lead?.activity?.kind === \"free_talk\"");

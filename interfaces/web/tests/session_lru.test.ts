@@ -32,5 +32,8 @@ describe("session LRU snapshot and selection persistence", () => {
     expect(main).toContain('{ type: "session_turns_load", session_id: activeSessionId }');
     expect(main).toContain("{ ...session, turns: event.turns, turns_omitted: false }");
     expect(main).toContain("sessionTurnsLoadInFlightRef.current.delete(event.session_id);");
+    // 缺陷看护：在途拉取标记必须在重连（hello 基线）时清空，否则断线丢失的
+    // session_turns 响应会让该会话永远不再重拉。
+    expect(main).toContain("sessionTurnsLoadInFlightRef.current.clear();");
   });
 });

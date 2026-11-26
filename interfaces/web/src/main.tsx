@@ -2503,6 +2503,9 @@ function TimemApp() {
       if (event.type === "hello") {
         turnHistoryPagesRef.current.clear();
         turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
+        // 重连即新基线：在途的按需拉取作废清空，否则断线时丢失的
+        // session_turns 响应会让该会话永远不再重拉（选中后空白）。
+        sessionTurnsLoadInFlightRef.current.clear();
         // Hello carries the complete authoritative baseline. Adopt its exact
         // sequence before any later semantic event is reduced; reconnecting to
         // a Host that has already emitted events must not look like a gap from
@@ -14051,7 +14054,7 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   // 紧邻动作组的纯文本条目并进该动作组作「领先文本」，由 StreamToolRun 在
   // 文本末尾内联渲染胶囊（同一按钮负责展开/收起）；多行或含标记的富文本
   // 保持块级渲染，胶囊跟在最后一段后（阅读层级不变）。
-  const renderedGroups: { entries: typeof entries; lead?: (typeof entries)[number] }[] =
+  const renderedGroups: { entries: typeof entries; lead?: (typeof entries)[number]; consumed?: boolean }[] =
     groups.map(entries => ({ entries }));
   // 用户反馈：工具胶囊必须跟在「最近的 remark」后面。thought 预览与系统行
   // 不算 remark——从动作组向前回溯，优先取最近的有文本 free_talk 作 lead
@@ -14073,19 +14076,23 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   for (let index = 0; index < renderedGroups.length; index++) {
     const next = renderedGroups[index];
     if (next.lead || !isFoldableActionGroup(next)) continue;
-    let leadSource = -1;
+    let remarkSource = -1;
+    let thoughtSource = -1;
     for (let back = index - 1; back >= 0; back--) {
-      if (isRemarkGroup(renderedGroups[back])) { leadSource = back; break; }
+      const candidate = renderedGroups[back];
+      // 已消费的空组截断回溯：更早文本已配给前面动作组，再向前会重复消费、
+      // 同段文本渲染两遍（[remark1][remark2][动作][间隔][动作] 场景）。
+      if (candidate.consumed) break;
+      if (remarkSource === -1 && isRemarkGroup(candidate)) remarkSource = back;
+      if (thoughtSource === -1 && isThoughtGroup(candidate)) thoughtSource = back;
+      if (remarkSource !== -1) break;
     }
-    if (leadSource === -1) {
-      for (let back = index - 1; back >= 0; back--) {
-        if (isThoughtGroup(renderedGroups[back])) { leadSource = back; break; }
-      }
-    }
+    const leadSource = remarkSource !== -1 ? remarkSource : thoughtSource;
     if (leadSource === -1) continue;
     const source = renderedGroups[leadSource];
     next.lead = source.entries[source.entries.length - 1];
     source.entries = source.entries.slice(0, -1);
+    if (source.entries.length === 0) source.consumed = true;
   }
   const visibleGroups = renderedGroups.filter(group => group.entries.length > 0);
   // One reverse scan, rather than rescanning the suffix for every tool group.
