@@ -14244,7 +14244,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview ? <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span> : (!open || editsAutoOpen) && activity.edits?.length ? <span className="stream-tool-command-preview tool-invocation-preview">{activity.edits[0]?.path.split("/").pop()}</span> : null}
         {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} onActivate={revealDiffOnly} /> : null}
         {((running
           ? liveElapsedMs
@@ -16063,11 +16063,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview ? (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}{multilineCommand ? " …" : ""}
         </code>
-      )}
+      ) : (!open || editsAutoOpen) && activity.edits?.length ? (
+        <code className="tool-activity-command tool-invocation-preview">{activity.edits[0]?.path.split("/").pop()}</code>
+      ) : null}
       {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}
       {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined ||
         activity.tool_output_bytes !== undefined) && (

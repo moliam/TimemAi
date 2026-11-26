@@ -267,7 +267,7 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).toContain("const hasExpandableDetail = !!code || !!detail || !!activity.edits?.length;");
   // Edits auto-open is the documented exception: preview stays visible while
   // the fold shows only the diff panel, never the command detail.
-  expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview && <span");
+  expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview ? <span");
   expect(stream).toContain('{!editsAutoOpen && code && (');
   expect(stream).toContain('<div className="stream-tool-command-shell">');
   expect(stream).toContain('<pre className="stream-tool-command">{code}</pre>');
@@ -276,7 +276,7 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).not.toContain("const command =");
   expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
 
-  expect(ordinary).toContain(": (!open || editsAutoOpen) && invocationPreview && (");
+  expect(ordinary).toContain(": (!open || editsAutoOpen) && invocationPreview ? (");
   expect(ordinary).toContain("{!editsAutoOpen && detail && (");
   expect(ordinary).toContain("{!editsAutoOpen && code && (");
   expect(ordinary).not.toContain(": invocationPreview && (");

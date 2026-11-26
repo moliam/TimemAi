@@ -17,6 +17,14 @@ describe("thought/action scroll edge", () => {
     expect(body).toContain("position: absolute;");
     expect(body).toContain("bottom: 0;");
     expect(body).toContain("height: 1px;");
-    expect(body).toContain("rgba(255, 255, 255, 0.16)");
+    expect(body).toContain("background: rgba(255, 201, 120, 0.24);");
+  });
+
+  it("draws a left rail on the work scroll window", () => {
+    const body = ruleBody(".turn-work-scroll");
+    expect(body).toContain("border-left: 2px solid rgba(255, 201, 120, 0.20);");
+    expect(body).toContain("padding: 7px 0 10px 10px;");
+    const light = styles.indexOf(':root[data-theme="light"] .turn-work-scroll { border-left-color: rgba(200, 158, 80, 0.36); }');
+    expect(light).toBeGreaterThanOrEqual(0);
   });
 });

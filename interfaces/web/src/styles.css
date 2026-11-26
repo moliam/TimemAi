@@ -85,7 +85,7 @@ button:disabled { cursor: not-allowed; }
 .work-collapse-toggle { border: 0; border-radius: 5px; padding: 4px 7px; background: transparent; color: #7f98a5; font-size: 11px; font-weight: 650; }
 .work-collapse-toggle:hover { background: #ffffff0d; color: #c6d8df; }
 .turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
-.turn-work-scroll { max-height: min(720px, 82vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px; }
+.turn-work-scroll { max-height: min(720px, 82vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px 10px; border-left: 2px solid rgba(255, 201, 120, 0.20); }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
 /* 阅读区底部的临时空槽：吸收「工具结果收拢」带来的变矮，让 scrollTop 不被浏览器
    夹到新的 max（否则贴底跟随时整列内容会被迫下移）。高度由 main.tsx 逐帧写入。 */
@@ -258,7 +258,8 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 720px) { .app-shell { grid-template-columns: 1fr; }.brand { grid-template-columns: 41px minmax(0, 1fr) 30px; }.sidebar { display: flex; visibility: hidden; position: fixed; z-index: 12; inset: 0 auto 0 0; width: min(290px, 84vw); transform: translateX(-105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: 18px 0 42px #0008; }.sidebar.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; }.mobile-sidebar-backdrop { display: block; position: fixed; z-index: 11; inset: 0; width: 100%; border: 0; background: #02060999; }.mobile-sidebar-close { display: grid; place-items: center; width: 30px; height: 30px; margin-left: auto; border: 0; border-radius: 5px; background: transparent; color: #9aabb8; }.icon-button.mobile-session-button { display: grid; }.chat-header { padding: 14px 17px; }.chat-scroll { padding: 24px 17px 17px 57px; }.composer-wrap { padding: 12px 17px 16px; }.runtime-card { margin: 9px 17px 0; overflow-x: auto; }.runtime-card .runtime-summary > span + span { display: none; }.runtime-options { grid-template-columns: 1fr; }.message.user .message-content { max-width: 90%; } }
-@media (max-width: 720px) { .turn-user-frame { max-width: 94%; }.turn-work-scroll { max-height: 78vh; }.turn-assistant-heading { padding-inline: 11px; } }
+@media (max-width: 720px) { .turn-user-frame { max-width: 94%; }.turn-work-scroll { max-height: 78vh; }
+:root[data-theme="light"] .turn-work-scroll { border-left-color: rgba(200, 158, 80, 0.36); }.turn-assistant-heading { padding-inline: 11px; } }
 
 /* Syntax-aware Markdown and the compact final turn telemetry card. */
 .message-content pre .hljs { display: block; padding: 0; background: transparent; }
@@ -898,7 +899,7 @@ button:disabled { cursor: not-allowed; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
 .turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; animation: stream-working-grow 1.2s ease-in-out infinite; }
 @keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
-.turn-work-scroll { max-height: min(630px, 75vh); padding: 0; scrollbar-gutter: auto; }
+.turn-work-scroll { max-height: min(630px, 75vh); padding: 0 0 0 10px; scrollbar-gutter: auto; }
 .turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px; }
 .turn-work-item + .turn-work-item { border: 0; }
 .turn-work-item strong { color: #c8c8c8; font-weight: 550; }
@@ -1441,11 +1442,11 @@ button:disabled { cursor: not-allowed; }
   right: 10px;
   bottom: 0;
   height: 1px;
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 201, 120, 0.24);
   pointer-events: none;
 }
 :root[data-theme="light"] .turn-work-panel:not(.has-live-usage)::after {
-  background: rgba(20, 40, 50, 0.18);
+  background: rgba(200, 158, 80, 0.32);
 }
 .turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px; }
 .turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #ffffff14; background: transparent; }
@@ -7442,49 +7443,54 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
    相邻命令由下方独立间距分开。卡片自身那层底色去掉，避免色块套色块。 */
 .stream-tool-row:has(.file-edits-panel) {
   padding: 6px 9px 9px;
+  border: 1px solid rgba(255, 201, 120, 0.14);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(255, 213, 140, 0.05);
 }
 .stream-tool-row:has(.file-edits-panel) .file-edits-panel {
   padding-top: 2px;
   background: transparent;
 }
-:root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) { background: #f1f5f4; }
+:root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) {
+  border-color: rgba(200, 158, 80, 0.30);
+  background: #f9f4e8;
+  box-shadow: 0 1px 2px rgba(124, 94, 38, 0.07);
+}
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) .file-edits-panel { background: transparent; }
 /* 用户反馈：连续命令各自的 edit 卡片不能贴成一个长条。每条命令的 edit 色块
    独立成块，相邻命令之间留出可见间距；单条命令内部仍保持紧凑。 */
 .stream-tool-merged-item:has(.file-edits-panel) + .stream-tool-merged-item:has(.file-edits-panel) {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 /* 同一条规则要覆盖全部三种 DOM 形状：相邻折叠组、归档详情里相邻命令。
    只有前后两块都带 diff 时才让位；中间隔着普通命令行时天然有分隔。 */
 .stream-tool-run:has(.file-edits-panel) + .stream-tool-run:has(.file-edits-panel) {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 .tool-activity:has(.file-edits-panel) + .tool-activity:has(.file-edits-panel) {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 /* 用户反馈：块内要能一眼分清「命令行」和「文件修改」。命令行做成低调横幅：
    同色系加深一点、底部一条细线，不引入新颜色；负外边距让横幅铺满色块顶边。 */
 .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
   margin: -6px -9px 0;
   padding: 6px 9px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 10px 10px 0 0;
-  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 201, 120, 0.13);
+  border-radius: 9px 9px 0 0;
+  background: rgba(255, 213, 140, 0.06);
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
-  border-bottom-color: rgba(20, 40, 50, 0.10);
-  background: rgba(20, 40, 50, 0.045);
+  border-bottom-color: rgba(200, 158, 80, 0.25);
+  background: rgba(200, 158, 80, 0.11);
 }
 .tool-activity:has(.file-edits-panel) > summary {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 201, 120, 0.13);
   border-radius: 7px 7px 0 0;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 213, 140, 0.06);
 }
 :root[data-theme="light"] .tool-activity:has(.file-edits-panel) > summary {
-  border-bottom-color: rgba(20, 40, 50, 0.10);
-  background: rgba(20, 40, 50, 0.045);
+  border-bottom-color: rgba(200, 158, 80, 0.25);
+  background: rgba(200, 158, 80, 0.11);
 }
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
@@ -7601,21 +7607,18 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
 /* 用户反馈：diff 框要与文本一样宽——内层独立框取消，diff 行直接铺满
    外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。
-   用户反馈：文件标题行和 diff 内容要有细微层级——内容整体垫一层极淡的
-   内衬底，左侧一条 2px 同色系细描边，读起来「标题在上、内容在下」；
-   不引入新颜色，明度差保持在刚可感知的程度。 */
+   用户反馈：diff 内容不要任何描边线（含左侧线）；标题与内容的层级改用
+   暖纸内衬底表达，读起来「标题在上、内容在下」且更明亮精致。 */
 .file-edit-diff {
   margin: 2px 0 6px;
-  padding: 2px 0 2px 8px;
-  border-left: 2px solid rgba(255, 255, 255, 0.09);
-  border-radius: 0 6px 6px 0;
-  background: rgba(255, 255, 255, 0.025);
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(255, 213, 140, 0.04);
   overflow: auto;
   max-height: 420px;
 }
 :root[data-theme="light"] .file-edit-diff {
-  border-left-color: rgba(20, 40, 50, 0.12);
-  background: rgba(20, 40, 50, 0.035);
+  background: rgba(253, 246, 230, 0.6);
 }
 .file-edit-diff-table {
   font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;
@@ -7632,7 +7635,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   align-items: baseline;
 }
 .file-edit-gutter {
-  color: #5c6f7c;
+  color: #867c68;
   text-align: right;
   padding-right: 7px;
   min-width: max-content;
@@ -7648,15 +7651,15 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-row-del { background: rgba(214, 92, 84, 0.17); }
 .file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
 .file-edit-row-del .file-edit-code { color: #f6b9b2; }
-.file-edit-row-ctx .file-edit-code { color: #8fa3b0; }
+.file-edit-row-ctx .file-edit-code { color: #9a9080; }
 .file-edit-row-hunk {
-  background: rgba(88, 152, 201, 0.08);
-  color: #79a7c7;
+  background: rgba(214, 164, 88, 0.10);
+  color: #cfa763;
   font-weight: 600;
   margin: 3px 0;
 }
 .file-edit-row-hunk .file-edit-code { white-space: pre-wrap; }
-.file-edit-row-meta { color: #5c6f7c; }
+.file-edit-row-meta { color: #847b68; }
 /* About pane project row. */
 .about-project-row { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 12px; color: #8fa3ad; }
 .about-project-row a { overflow-wrap: anywhere; }
@@ -7717,16 +7720,16 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-success { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
-:root[data-theme="light"] .file-edit-gutter { color: #9aa7b0; }
+:root[data-theme="light"] .file-edit-gutter { color: #a59b85; }
 :root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c7a4e; }
 :root[data-theme="light"] .file-edit-row-del { background: #fbe5e3; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1f5c40; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-code { color: #7e2d26; }
-:root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #6b7f8c; }
-:root[data-theme="light"] .file-edit-row-hunk { background: #e8f1f8; color: #4d7ba3; }
-:root[data-theme="light"] .file-edit-row-meta { color: #9aa7b0; }
+:root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #7d7466; }
+:root[data-theme="light"] .file-edit-row-hunk { background: #f3ead6; color: #8a6c28; }
+:root[data-theme="light"] .file-edit-row-meta { color: #a59b85; }
 :root[data-theme="light"] .file-edit-notice { color: #8a6d1f; }
 :root[data-theme="light"] .file-edits-more { color: #5c6f7a; }
 :root[data-theme="light"] .file-edits-more:hover { background: rgba(20, 40, 50, 0.06); color: #24333a; }

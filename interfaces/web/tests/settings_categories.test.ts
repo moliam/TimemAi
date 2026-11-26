@@ -102,7 +102,7 @@ describe("settings category regroup", () => {
   it("aligns the work stream and diff cards with the assistant reply column", () => {
     // 阅读列、工具行与 diff 卡跟随输入框宽度（不再单独收窄居中）。
     expect(styles).toMatch(/\.turn-interaction \{[^}]*max-width: none;/);
-    expect(styles).toContain("padding: 7px 0 10px;");
+    expect(styles).toContain("padding: 7px 0 10px 10px;");
     expect(styles).toContain(".file-edits-panel.edits-wrap .file-edit-code { white-space: pre-wrap; overflow-wrap: anywhere; }");
   });
 
