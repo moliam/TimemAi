@@ -7456,6 +7456,36 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .stream-tool-merged-item:has(.file-edits-panel) + .stream-tool-merged-item:has(.file-edits-panel) {
   margin-top: 8px;
 }
+/* 同一条规则要覆盖全部三种 DOM 形状：相邻折叠组、归档详情里相邻命令。
+   只有前后两块都带 diff 时才让位；中间隔着普通命令行时天然有分隔。 */
+.stream-tool-run:has(.file-edits-panel) + .stream-tool-run:has(.file-edits-panel) {
+  margin-top: 8px;
+}
+.tool-activity:has(.file-edits-panel) + .tool-activity:has(.file-edits-panel) {
+  margin-top: 8px;
+}
+/* 用户反馈：块内要能一眼分清「命令行」和「文件修改」。命令行做成低调横幅：
+   同色系加深一点、底部一条细线，不引入新颜色；负外边距让横幅铺满色块顶边。 */
+.stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
+  margin: -6px -9px 0;
+  padding: 6px 9px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px 10px 0 0;
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
+  border-bottom-color: rgba(20, 40, 50, 0.10);
+  background: rgba(20, 40, 50, 0.045);
+}
+.tool-activity:has(.file-edits-panel) > summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px 7px 0 0;
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-theme="light"] .tool-activity:has(.file-edits-panel) > summary {
+  border-bottom-color: rgba(20, 40, 50, 0.10);
+  background: rgba(20, 40, 50, 0.045);
+}
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
 .stream-tool-row .file-edit-head,
@@ -7570,11 +7600,22 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-copy.copy-failed { color: #e59a94; }
 .file-edit-chevron { color: #7f929e; display: inline-flex; flex: none; }
 /* 用户反馈：diff 框要与文本一样宽——内层独立框取消，diff 行直接铺满
-   外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。 */
+   外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。
+   用户反馈：文件标题行和 diff 内容要有细微层级——内容整体垫一层极淡的
+   内衬底，左侧一条 2px 同色系细描边，读起来「标题在上、内容在下」；
+   不引入新颜色，明度差保持在刚可感知的程度。 */
 .file-edit-diff {
   margin: 2px 0 6px;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0 6px 6px 0;
+  background: rgba(255, 255, 255, 0.025);
   overflow: auto;
   max-height: 420px;
+}
+:root[data-theme="light"] .file-edit-diff {
+  border-left-color: rgba(20, 40, 50, 0.12);
+  background: rgba(20, 40, 50, 0.035);
 }
 .file-edit-diff-table {
   font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;

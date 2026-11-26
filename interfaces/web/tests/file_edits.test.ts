@@ -230,12 +230,21 @@ describe("file edits surfaces", () => {
     }
     const diffStart = styles.indexOf(".file-edit-diff {");
     const diff = styles.slice(diffStart, styles.indexOf("}", diffStart) + 1);
-    // 用户反馈：diff 框与文本同宽——内层框取消，滚动行为保留。
+    // 用户反馈：diff 框与文本同宽——内层整框取消，滚动行为保留。
+    // 用户反馈（演进）：文件标题行和 diff 内容要有细微层级——内容只保留
+    // 「左侧 2px 细描边 + 极淡内衬底」这一种装饰，仍然不许回到整圈内框。
     expect(diff).not.toContain("border:");
-    expect(diff).not.toContain("background:");
-    expect(diff).not.toContain("border-radius");
+    expect(diff).not.toContain("border: 1px");
+    expect(diff).toContain("border-left: 2px solid rgba(255, 255, 255, 0.09);");
+    expect(diff).toContain("background: rgba(255, 255, 255, 0.025);");
+    expect(diff).toContain("padding: 2px 0 2px 8px;");
+    expect(diff).toContain("border-radius: 0 6px 6px 0;");
     expect(diff).toContain("overflow: auto;");
     expect(diff).toContain("max-height: 420px;");
+    const lightDiffStart = styles.indexOf(':root[data-theme="light"] .file-edit-diff {');
+    const lightDiff = styles.slice(lightDiffStart, styles.indexOf("}", lightDiffStart) + 1);
+    expect(lightDiff).toContain("border-left-color: rgba(20, 40, 50, 0.12);");
+    expect(lightDiff).toContain("background: rgba(20, 40, 50, 0.035);");
     const embeddedStart = styles.indexOf(".turn-edits-summary .file-edits-panel {");
     const embedded = styles.slice(embeddedStart, styles.indexOf("}", embeddedStart) + 1);
     expect(embedded).toContain("border: none;");
