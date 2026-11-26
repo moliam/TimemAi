@@ -14156,7 +14156,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
   }, [absorbed, settledAbsorbed]);
   // 折叠行头保留单行预览与省略号；展开后的命令体始终展示完整代码。
   const multilineCommand = commandHasMoreLines(activity);
-  const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
+  // 用户反馈：run_bash 编辑行的标题曾只显示文件路径（与下方修改行重复），
+  // 看起来像「没有标题」。命令文本存在时优先作为横幅标题。
+  const invocationPreview = !structuredInvocation || !!activity.run_bash_edit ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
@@ -14244,7 +14246,8 @@ const StreamToolRow = memo(function StreamToolRow({ activity, absorbed, previewL
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview ? <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span> : (!open || editsAutoOpen) && activity.edits?.length ? <span className="stream-tool-command-preview tool-invocation-preview">{activity.edits[0]?.path.split("/").pop()}</span> : null}
+        {/* 标题层级：命令文本 > run_bash 编辑路径（无命令文本时）> 结构化调用 > 首个文件名回退。 */}
+        {(!open || editsAutoOpen) && invocationPreview ? <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}{multilineCommand ? " …" : ""}</span> : activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && activity.edits?.length ? <span className="stream-tool-command-preview tool-invocation-preview">{activity.edits[0]?.path.split("/").pop()}</span> : null}
         {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} onActivate={revealDiffOnly} /> : null}
         {((running
           ? liveElapsedMs
@@ -16029,7 +16032,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
   const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
-  const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
+  // 同流式行：run_bash 编辑行优先用命令文本作标题（路径仅在无命令文本时回退）。
+  const invocationPreview = activity.tool_name === "sub_answer" || (structuredInvocation && !activity.run_bash_edit) ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
   // 折叠标题保留单行预览；展开后的命令体始终展示完整代码。
@@ -16063,11 +16067,12 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && invocationPreview ? (
+      {/* 标题层级同流式行：命令文本 > 编辑路径 > 结构化调用 > 文件名回退。 */}
+        {(!open || editsAutoOpen) && invocationPreview ? (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}{multilineCommand ? " …" : ""}
         </code>
-      ) : (!open || editsAutoOpen) && activity.edits?.length ? (
+      ) : activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : (!open || editsAutoOpen) && activity.edits?.length ? (
         <code className="tool-activity-command tool-invocation-preview">{activity.edits[0]?.path.split("/").pop()}</code>
       ) : null}
       {!running && activity.edits?.length ? <FileEditsChip edits={activity.edits} /> : null}

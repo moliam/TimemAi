@@ -254,8 +254,8 @@ it("uses structured memory and self-tool summaries in ordinary and stream rows",
     expect(section).toContain('<SelfToolInvocation operation={activity.self_tool} />');
     expect(section).toContain('<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />');
   }
-  expect(stream).toContain('const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;');
-  expect(ordinary).toContain('activity.tool_name === "sub_answer" || structuredInvocation ? undefined');
+  expect(stream).toContain('const invocationPreview = !structuredInvocation || !!activity.run_bash_edit ? toolInvocationPreview(activity) : undefined;');
+  expect(ordinary).toContain('activity.tool_name === "sub_answer" || (structuredInvocation && !activity.run_bash_edit) ? undefined');
 });
 
 it("shows generic tool arguments as a collapsed preview or expanded detail, never both", () => {
@@ -263,11 +263,11 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
 
   expect(stream).toContain("const code = activity.code?.trim();");
-  expect(stream).toContain("const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;");
+  expect(stream).toContain("const invocationPreview = !structuredInvocation || !!activity.run_bash_edit ? toolInvocationPreview(activity) : undefined;");
   expect(stream).toContain("const hasExpandableDetail = !!code || !!detail || !!activity.edits?.length;");
   // Edits auto-open is the documented exception: preview stays visible while
   // the fold shows only the diff panel, never the command detail.
-  expect(stream).toContain(": (!open || editsAutoOpen) && invocationPreview ? <span");
+  expect(stream).toContain("(!open || editsAutoOpen) && invocationPreview ? <span");
   expect(stream).toContain('{!editsAutoOpen && code && (');
   expect(stream).toContain('<div className="stream-tool-command-shell">');
   expect(stream).toContain('<pre className="stream-tool-command">{code}</pre>');
@@ -276,7 +276,7 @@ it("shows generic tool arguments as a collapsed preview or expanded detail, neve
   expect(stream).not.toContain("const command =");
   expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
 
-  expect(ordinary).toContain(": (!open || editsAutoOpen) && invocationPreview ? (");
+  expect(ordinary).toContain("(!open || editsAutoOpen) && invocationPreview ? (");
   expect(ordinary).toContain("{!editsAutoOpen && detail && (");
   expect(ordinary).toContain("{!editsAutoOpen && code && (");
   expect(ordinary).not.toContain(": invocationPreview && (");
