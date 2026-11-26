@@ -216,6 +216,9 @@ struct AppState {
     model_endpoint_health: Arc<Mutex<BTreeMap<String, ModelEndpointHealthState>>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
+    /// 客户端上报的会话选中时间（ms）。仅视图排序元数据——供快照 LRU 排序与
+    /// turns 预算使用，绝不承载领域状态；持久化为 mem 目录下的有界 JSON。
+    session_view_focus: Arc<Mutex<BTreeMap<String, u64>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
     semantic_delivery: Arc<SemanticEventDelivery>,
     web_instance: Arc<Mutex<WebInstanceLease>>,
@@ -764,6 +767,10 @@ struct WebSession {
     consumed_attachment_ids: BTreeSet<String>,
     messages: Vec<WebChatMessage>,
     turns: Vec<WebTurn>,
+    /// 仅快照投影：turns 被 hello 预算省略时为 true，可经 `session_turns_load`
+    /// 取回；权威内存会话中恒为 false。
+    #[serde(skip_serializing_if = "is_false")]
+    turns_omitted: bool,
     history_before_cursor: Option<String>,
     history_has_more: bool,
     #[serde(skip)]
@@ -1293,9 +1300,97 @@ struct WebChatMessage {
     completion: Option<Value>,
 }
 
+/// Snapshot turns budget (8MiB, 用户反馈)：会话按 LRU 排序装进 hello，
+/// 瘦身后的 turns 在预算内随帧携带；超出预算的会话带 `turns_omitted` 置空，
+/// 由客户端选中时用 `session_turns_load` 按需拉取。
+const SNAPSHOT_TURNS_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+/// 持久化 view-focus 条目硬上限；每次写入都先剪枝到存活会话。
+const SESSION_VIEW_FOCUS_ENTRY_LIMIT: usize = 512;
+
+fn session_view_focus_path(memory_dir: &std::path::Path) -> std::path::PathBuf {
+    memory_dir.join("session_view_focus.json")
+}
+
+fn load_session_view_focus(memory_dir: &std::path::Path) -> BTreeMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(session_view_focus_path(memory_dir)) else {
+        return BTreeMap::new();
+    };
+    match serde_json::from_str::<BTreeMap<String, u64>>(&text) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("[session_view_focus] ignoring unreadable file: {error}");
+            BTreeMap::new()
+        }
+    }
+}
+
+/// 剪枝到存活会话与条目上限，按时间新到旧排。
+fn prune_session_view_focus(
+    focus: &BTreeMap<String, u64>,
+    live: &BTreeSet<String>,
+) -> BTreeMap<String, u64> {
+    let mut entries: Vec<(String, u64)> = focus
+        .iter()
+        .filter(|(id, _)| live.contains(*id))
+        .map(|(id, ms)| (id.clone(), *ms))
+        .collect();
+    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    entries.truncate(SESSION_VIEW_FOCUS_ENTRY_LIMIT);
+    entries.into_iter().collect()
+}
+
+fn save_session_view_focus(state: &AppState) {
+    let live: BTreeSet<String> = match state.sessions.lock() {
+        Ok(sessions) => sessions.keys().cloned().collect(),
+        Err(_) => return,
+    };
+    let pruned = match state.session_view_focus.lock() {
+        Ok(focus) => prune_session_view_focus(&focus, &live),
+        Err(_) => return,
+    };
+    let Ok(memory_dir) = state.mem.lock().map(|mem| mem.layout.memory_dir()) else {
+        return;
+    };
+    let payload = match serde_json::to_vec(&pruned) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("[session_view_focus] encode failed: {error}");
+            return;
+        }
+    };
+    let path = session_view_focus_path(&memory_dir);
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, payload)
+        .and_then(|_| std::fs::rename(&temp, &path))
+        .is_err()
+    {
+        eprintln!("[session_view_focus] persist failed: {}", path.display());
+    }
+}
+
+/// 快照 LRU 排序键：客户端上报的 view-focus 与最后 turn 活动时间的较大者。
+fn session_view_recency(view_focus: &BTreeMap<String, u64>, session: &WebSession) -> u128 {
+    let focus = view_focus
+        .get(&session.session_id)
+        .copied()
+        .map(u128::from)
+        .unwrap_or(0);
+    let last_turn_at = session
+        .turns
+        .last()
+        .map(|turn| turn.created_at_ms)
+        .unwrap_or(0);
+    focus.max(last_turn_at)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireEvent {
+    SessionTurns {
+        session_id: String,
+        turns: Vec<WebTurn>,
+    },
     MailboxUpdated {
         session_id: String,
         mailbox: MailboxSnapshot,
@@ -1797,6 +1892,15 @@ enum ClientCommand {
         #[serde(default)]
         env: BTreeMap<String, String>,
     },
+    /// 视图提示：用户在 WebUI 选中了某会话。仅参与快照 LRU 排序与 turns
+    /// 预算；不承载任何领域状态。
+    SessionFocus {
+        session_id: String,
+    },
+    /// 拉取被快照省略 turns 的会话的（瘦身）turns。
+    SessionTurnsLoad {
+        session_id: String,
+    },
     SessionRename {
         session_id: String,
         display_name: String,
@@ -2209,7 +2313,8 @@ impl ClientCommand {
             | Self::McpServerSecretsReveal { .. }
             | Self::ModelEndpointSecretReveal { .. }
             | Self::ModelEndpointShareExport { .. }
-            | Self::MemTemporaryItemsList => None,
+            | Self::MemTemporaryItemsList
+            | Self::SessionTurnsLoad { .. } => None,
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
@@ -2237,7 +2342,8 @@ impl ClientCommand {
             | Self::WorkerRoleGroupCreate { .. }
             | Self::WorkerRoleGroupUpdate { .. }
             | Self::WorkerRoleGroupDelete { .. }
-            | Self::WorkerRoleLibraryReorder { .. } => Some("global".to_string()),
+            | Self::WorkerRoleLibraryReorder { .. }
+            | Self::SessionFocus { .. } => Some("global".to_string()),
             Self::FavoriteCreate { .. }
             | Self::FavoriteDelete { .. }
             | Self::FavoriteCapacityUpdate { .. } => Some("chat-library".to_string()),
@@ -2513,6 +2619,10 @@ pub async fn run(
         runtime_log.record("process_started", json!({}));
         println!("Timem Web runtime log: {}", path.display());
     }
+    let session_view_focus_memory_dir = mem
+        .lock()
+        .map(|mem| mem.layout.memory_dir())
+        .unwrap_or_default();
     let state = AppState {
         token: token.clone().unwrap_or_default(),
         listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
@@ -2525,6 +2635,9 @@ pub async fn run(
         model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
         events: events.clone(),
         sessions,
+        session_view_focus: Arc::new(Mutex::new(load_session_view_focus(
+            &session_view_focus_memory_dir,
+        ))),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
         semantic_delivery: Arc::new(SemanticEventDelivery::new(events.clone())),
         web_instance: Arc::new(Mutex::new(web_instance)),
@@ -5682,6 +5795,53 @@ fn handle_command_with_id(
             let capacity = ChatLibrary::new(memory_dir).update_capacity_limit(max_bytes)?;
             return Ok(Some(WireEvent::FavoriteCapacityUpdated { capacity }));
         }
+        ClientCommand::SessionFocus { session_id } => {
+            let known = state
+                .sessions
+                .lock()
+                .map(|sessions| sessions.contains_key(&session_id))
+                .unwrap_or(false);
+            if known {
+                if let Ok(mut focus) = state.session_view_focus.lock() {
+                    focus.insert(session_id, u64::try_from(now_ms()).unwrap_or(u64::MAX));
+                    drop(focus);
+                    save_session_view_focus(state);
+                }
+            }
+            return Ok(None);
+        }
+        ClientCommand::SessionTurnsLoad { session_id } => {
+            let turns = state
+                .sessions
+                .lock()
+                .map(|sessions| {
+                    sessions
+                        .get(&session_id)
+                        .map(|session| {
+                            let active_turn_id = session.active_turn_id.clone();
+                            let cancelling = session.cancelling_turn_id.clone();
+                            session
+                                .turns
+                                .iter()
+                                .map(|turn| {
+                                    let is_live = Some(turn.turn_id.clone()) == active_turn_id
+                                        || Some(turn.turn_id.clone()) == cancelling
+                                        || turn.state == "working";
+                                    let mut projected = if is_live {
+                                        turn.clone()
+                                    } else {
+                                        slim_restored_turn_for_snapshot(turn)
+                                    };
+                                    slim_turn_for_snapshot_transport(&mut projected);
+                                    projected
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            return Ok(Some(WireEvent::SessionTurns { session_id, turns }));
+        }
         ClientCommand::TurnHistoryPage {
             session_id,
             turn_id,
@@ -7622,6 +7782,7 @@ fn create_session_in_group(
             WebSession {
                 preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: session_id.clone(),
+                turns_omitted: false,
                 group_id,
                 display_name: session_display_name,
                 ordinal,
@@ -8613,6 +8774,7 @@ fn restore_stored_session(
             WebSession {
                 preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: stored.session_id.clone(),
+                turns_omitted: false,
                 group_id: stored.group_id.clone(),
                 display_name: stored.display_name.clone(),
                 ordinal,
@@ -19875,12 +20037,23 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
         .lock()
         .map(|sessions| sessions.values().cloned().collect())
         .unwrap_or_default();
+    // LRU 排序（用户反馈）：view-focus / 最后 turn 活动新到旧，同刻按新会话优先。
+    let view_focus = state
+        .session_view_focus
+        .lock()
+        .map(|focus| focus.clone())
+        .unwrap_or_default();
     sessions.sort_by(|left, right| {
-        left.ordinal
-            .cmp(&right.ordinal)
-            .then_with(|| left.session_id.cmp(&right.session_id))
+        session_view_recency(&view_focus, right)
+            .cmp(&session_view_recency(&view_focus, left))
+            .then_with(|| right.ordinal.cmp(&left.ordinal))
     });
+    // 8MB turns 预算：LRU 头号会话始终完整携带（落地视图可用），其余在预算内
+    // 依次携带；超限会话置空 turns 并标记 `turns_omitted`，选中时按需拉取。
+    let mut turns_budget_bytes = 0usize;
+    let mut turns_budget_exhausted = false;
     for session in sessions.iter_mut() {
+        session.turns_omitted = false;
         let active_turn_id = session.active_turn_id.clone();
         let cancelling = session.cancelling_turn_id.clone();
         for turn in session.turns.iter_mut() {
@@ -19891,6 +20064,23 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 *turn = slim_restored_turn_for_snapshot(turn);
             }
             slim_turn_for_snapshot_transport(turn);
+        }
+        if turns_budget_exhausted {
+            session.turns = Vec::new();
+            session.turns_omitted = true;
+            continue;
+        }
+        let turns_bytes = serde_json::to_vec(&session.turns)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        let within_budget = turns_budget_bytes == 0
+            || turns_budget_bytes.saturating_add(turns_bytes) <= SNAPSHOT_TURNS_BUDGET_BYTES;
+        if within_budget {
+            turns_budget_bytes = turns_budget_bytes.saturating_add(turns_bytes);
+        } else {
+            session.turns = Vec::new();
+            session.turns_omitted = true;
+            turns_budget_exhausted = true;
         }
     }
     let runtime_options = state

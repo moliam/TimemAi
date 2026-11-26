@@ -211,6 +211,8 @@ export type Session = {
   roles: WorkerRole[];
   messages: ChatMessage[];
   turns: WebTurn[];
+  /** True when the hello turns budget omitted this session's turns. */
+  turns_omitted?: boolean;
   history_before_cursor?: string | null;
   history_has_more?: boolean;
   active_turn_id?: string | null;
@@ -913,6 +915,11 @@ export type WireEvent =
       next_offset: number | null;
     }
   | {
+      type: "session_turns";
+      session_id: string;
+      turns: WebTurn[];
+    }
+  | {
       type: "history_page";
       session_id: string;
       records: ChatHistoryRecord[];
@@ -1076,6 +1083,8 @@ export type ClientCommand =
       turn_id: string;
       offset: number;
     }
+  | { type: "session_focus"; session_id: string }
+  | { type: "session_turns_load"; session_id: string }
   | {
       type: "history_page";
       session_id: string;

@@ -472,6 +472,26 @@ function useDialogFocusTrap() {
   }, []);
 }
 
+function readStoredActiveSessionId(): string {
+  try {
+    return window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeActiveSessionId(sessionId: string): void {
+  try {
+    if (sessionId) {
+      window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+    } else {
+      window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    /* Storage unavailable: per-device restore stays best-effort. */
+  }
+}
+
 function initialAccessToken() {
   const query = new URLSearchParams(window.location.search).get("token") ?? "";
   if (query) {
@@ -536,6 +556,7 @@ function makeMessage(
 
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
 const THINKING_CHAIN_STORAGE_KEY = "timem.thinking-chain.v1";
+const ACTIVE_SESSION_STORAGE_KEY = "timem.active-session.v1";
 const THINKING_CHAIN_CHANGE_EVENT = "timem:thinking-chain-change";
 
 // Instance-wide display preference: whether the inline thinking window is
@@ -922,6 +943,7 @@ function TimemApp() {
   const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteCommandRef = useRef("");
   const turnHistoryPagesRef = useRef(new Map<string, { records: ChatHistoryRecord[]; offset: number }>());
+  const sessionTurnsLoadInFlightRef = useRef(new Set<string>());
   const turnHydrationQueueRef = useRef(createTurnHistoryHydrationQueue());
   const turnHydrationMissingRef = useRef(new Set<string>());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
@@ -2098,9 +2120,33 @@ function TimemApp() {
       ),
     );
     setActiveSessionId((current) =>
-      resolveActiveSessionId(current, snapshot.sessions),
+      resolveActiveSessionId(
+        // 用户反馈：重开 WebUI 保持上次查看的 session（每设备 localStorage）。
+        current || readStoredActiveSessionId(),
+        snapshot.sessions,
+      ),
     );
   }, []);
+
+  // 用户反馈：选中即持久化（localStorage）并上报 view-focus，供 Host 的快照
+  // LRU 排序与 8MB turns 预算使用；纯视图元数据，不承载领域状态。
+  useEffect(() => {
+    if (!activeSessionId) return;
+    storeActiveSessionId(activeSessionId);
+    sendCommandRef.current({ type: "session_focus", session_id: activeSessionId });
+  }, [activeSessionId]);
+
+  // 用户反馈：超出 8MB 预算的 session 在快照里省略 turns，选中时按需拉取。
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const session = sessionsRef.current.find(
+      (item) => item.session_id === activeSessionId,
+    );
+    if (!session?.turns_omitted) return;
+    if (sessionTurnsLoadInFlightRef.current.has(activeSessionId)) return;
+    sessionTurnsLoadInFlightRef.current.add(activeSessionId);
+    sendCommandRef.current({ type: "session_turns_load", session_id: activeSessionId });
+  }, [activeSessionId, sessions]);
 
   const receive = useCallback(
     function receiveWireEvent(event: WireEvent, fromSemantic = false) {
@@ -3110,6 +3156,17 @@ function TimemApp() {
           current.map((session) =>
             session.session_id === event.session_id
               ? removePendingAttachment(session, event.attachment_id)
+              : session,
+          ),
+        );
+        return;
+      }
+      if (event.type === "session_turns") {
+        sessionTurnsLoadInFlightRef.current.delete(event.session_id);
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, turns: event.turns, turns_omitted: false }
               : session,
           ),
         );

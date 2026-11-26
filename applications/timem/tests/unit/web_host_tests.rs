@@ -9149,6 +9149,7 @@ fn routing_test_state() -> AppState {
         mem: Arc::new(Mutex::new(
             WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),
         )),
+        session_view_focus: Arc::new(Mutex::new(BTreeMap::new())),
         template: Arc::new(template),
         model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
         model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
@@ -9360,6 +9361,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
     };
     WebSession {
         session_id: session_id.to_string(),
+        turns_omitted: false,
         group_id: None,
         display_name,
         ordinal,
@@ -27176,4 +27178,138 @@ fn restored_sessions_keep_work_instruction_selection() {
 
     std::env::remove_var("TIMEM_WORK_INSTRUCTION_HOME");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn snapshot_orders_sessions_by_lru_and_omits_turns_over_budget() {
+    // 用户反馈：hello 按 session LRU 排序装载，8MiB turns 预算内的随帧携带，
+    // 超限会话置空 turns 并标记 `turns_omitted`，客户端选中时按需拉取。
+    // LRU 头号会话永远完整携带，保证落地视图可用。
+    let state = routing_test_state();
+    let big_answer = "x".repeat(3 * 1024 * 1024);
+    let mk_turn = |turn_id: &str, created_at_ms: u128, answer: Option<String>| WebTurn {
+        preview: None,
+        turn_id: turn_id.to_string(),
+        state: "finished".to_string(),
+        created_at_ms,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        final_answer: answer,
+        completion: None,
+        events_slimmed: false,
+        history_event_count: 0,
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
+    };
+    let mk_session = |id: &str, ordinal: u32, created_at_ms: u128, answer: Option<String>| {
+        let mut session = test_web_session(id, ordinal, format!("Session {id}"));
+        session.turns = vec![mk_turn(&format!("turn_{id}"), created_at_ms, answer)];
+        session
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        // ordinal 越大越"新"，但 focus 才是 LRU 头：focus_top 必须排最前。
+        sessions.insert(
+            "zz_ordinal_top".to_string(),
+            mk_session("zz_ordinal_top", 900, 9_000, Some(big_answer.clone())),
+        );
+        sessions.insert(
+            "zz_big_keep".to_string(),
+            mk_session("zz_big_keep", 800, 8_000, Some(big_answer.clone())),
+        );
+        sessions.insert(
+            "zz_big_omit".to_string(),
+            mk_session("zz_big_omit", 700, 7_000, Some(big_answer)),
+        );
+        sessions.insert(
+            "zz_empty".to_string(),
+            mk_session("zz_empty", 600, 6_000, None),
+        );
+    }
+    state
+        .session_view_focus
+        .lock()
+        .unwrap()
+        .insert("zz_empty".to_string(), 10_000);
+
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    let ids: Vec<&str> = snapshot
+        .sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect();
+    assert_eq!(ids.first(), Some(&"zz_empty"), "view-focus 必须排到 LRU 头");
+    let find = |id: &str| {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.session_id == id)
+            .expect("session must ship in the snapshot")
+    };
+    assert!(
+        !find("zz_empty").turns_omitted,
+        "LRU 头号会话永远携带完整（瘦身）turns"
+    );
+    assert!(
+        !find("zz_big_keep").turns_omitted && !find("zz_big_keep").turns.is_empty(),
+        "预算内的后续会话照常携带 turns"
+    );
+    let omitted = find("zz_big_omit");
+    assert!(
+        omitted.turns_omitted && omitted.turns.is_empty(),
+        "超预算会话置空 turns 并标记 turns_omitted"
+    );
+    assert!(
+        !find("zz_ordinal_top").turns_omitted,
+        "预算耗尽前装入的会话保持完整"
+    );
+    // 权威内存态不被投影污染：省略只发生在快照克隆里。
+    let memory = state.sessions.lock().unwrap();
+    assert!(!memory.get("zz_big_omit").unwrap().turns_omitted);
+    assert_eq!(memory.get("zz_big_omit").unwrap().turns.len(), 1);
+}
+
+#[test]
+fn session_view_recency_prefers_the_latest_of_focus_and_turn_activity() {
+    let mut focus = BTreeMap::new();
+    focus.insert("a".to_string(), 300u64);
+    focus.insert("b".to_string(), 9_000u64);
+    let mut session = test_web_session("a", 0, "Session a".to_string());
+    session.turns = vec![WebTurn {
+        preview: None,
+        turn_id: "turn_a".to_string(),
+        state: "finished".to_string(),
+        created_at_ms: 5_000,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        final_answer: None,
+        completion: None,
+        events_slimmed: false,
+        history_event_count: 0,
+        file_changes: None,
+        file_change_state: TurnFileChangeAccumulator::default(),
+    }];
+    assert_eq!(session_view_recency(&focus, &session), 5_000);
+    let mut session_b = test_web_session("b", 1, "Session b".to_string());
+    session_b.turns = session.turns.clone();
+    assert_eq!(session_view_recency(&focus, &session_b), 9_000);
+    let silent = test_web_session("c", 2, "Session c".to_string());
+    assert_eq!(session_view_recency(&focus, &silent), 0);
+}
+
+#[test]
+fn prune_session_view_focus_drops_dead_sessions_and_caps_entries() {
+    let mut focus = BTreeMap::new();
+    focus.insert("live_new".to_string(), 3_000u64);
+    focus.insert("dead".to_string(), 9_999u64);
+    focus.insert("live_old".to_string(), 1_000u64);
+    let mut live = BTreeSet::new();
+    live.insert("live_new".to_string());
+    live.insert("live_old".to_string());
+    let pruned = prune_session_view_focus(&focus, &live);
+    assert_eq!(pruned.len(), 2);
+    assert_eq!(pruned.get("live_new"), Some(&3_000));
+    assert_eq!(pruned.get("live_old"), Some(&1_000));
 }

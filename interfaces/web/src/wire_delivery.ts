@@ -12,6 +12,7 @@ const DIRECT_EVENT_TYPES: ReadonlySet<WireEvent["type"]> = new Set([
   "runtime_notice",
   "history_page",
   "turn_history_page",
+  "session_turns",
   "mem_temporary_items",
   "chat_search_result",
   "favorites_list",

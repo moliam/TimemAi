@@ -4,6 +4,8 @@ const UNCORRELATED_REQUESTS = new Set<ClientCommand["type"]>([
   "session_api_key_reveal",
   "history_page",
   "turn_history_page",
+  "session_focus",
+  "session_turns_load",
   "tool_repo_search",
   "tool_repo_detail",
   "tool_repo_open_terminal",

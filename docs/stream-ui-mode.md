@@ -52,6 +52,11 @@ oldest-first order made the most visible directory wait behind every older
 turn's chained pages. Classic folded mode keeps slim
 previews and hydrates on expand as before; hidden timeline panes wait until
 they become active.
+Session-wise the hello itself is budgeted: sessions ship in
+LRU order (view-focus hints + last turn activity) and slimmed turns stop being
+embedded once the running total passes 8 MiB — over-budget sessions arrive with
+`turns_omitted` and hydrate their whole timeline through `session_turns_load`
+when the user opens them.
 
 Sibling hydration and history prepends move portaled outlines without resizing
 their owners, so the timeline broadcasts `markdown-outline-layout-change` from
