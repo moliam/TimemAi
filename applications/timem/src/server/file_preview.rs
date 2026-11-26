@@ -518,8 +518,17 @@ mod tests {
             root.join("inside.txt").canonicalize().unwrap()
         );
         assert!(resolve_preview_target(&roots, "sub/deep.txt").is_ok());
+        // 绝对路径必须真实存在才能走到 roots 检查（canonicalize 失败先报
+        // not_found）；按平台取一个 workspace 之外必然存在的系统文件。
+        let absolute_escape = if cfg!(windows) {
+            std::env::var("SystemRoot")
+                .map(|root| format!(r"{root}\System32\drivers\etc\hosts"))
+                .unwrap_or_else(|_| r"C:\Windows\System32\drivers\etc\hosts".to_string())
+        } else {
+            "/etc/passwd".to_string()
+        };
         assert_eq!(
-            resolve_preview_target(&roots, "/etc/passwd").unwrap_err(),
+            resolve_preview_target(&roots, &absolute_escape).unwrap_err(),
             "file_preview_outside_workspace"
         );
         assert_eq!(
