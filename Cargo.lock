@@ -1817,6 +1817,7 @@ name = "timem_http_websocket"
 version = "3.0.2"
 dependencies = [
  "axum",
+ "flate2",
  "futures-util",
  "serde",
  "serde_json",
