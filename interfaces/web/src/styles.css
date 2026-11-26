@@ -7650,9 +7650,9 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-sign { user-select: none; text-align: center; }
 .file-edit-code { white-space: pre; min-width: 0; }
-.file-edit-row-add { background: rgba(64, 180, 120, 0.17); }
-.file-edit-row-add .file-edit-sign { color: #7fd6a4; font-weight: 600; }
-.file-edit-row-add .file-edit-code { color: #b9eccc; }
+.file-edit-row-add { background: rgba(94, 160, 215, 0.15); }
+.file-edit-row-add .file-edit-sign { color: #8fc4e8; font-weight: 600; }
+.file-edit-row-add .file-edit-code { color: #c2dcf1; }
 .file-edit-row-del { background: rgba(214, 92, 84, 0.17); }
 .file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
 .file-edit-row-del .file-edit-code { color: #f6b9b2; }
@@ -7726,11 +7726,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-gutter { color: #a59b85; }
-:root[data-theme="light"] .file-edit-row-add { background: #e5f5ec; }
-:root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c7a4e; }
+:root[data-theme="light"] .file-edit-row-add { background: #e4eef9; }
+:root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c62a8; }
 :root[data-theme="light"] .file-edit-row-del { background: #fbe5e3; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
-:root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1f5c40; }
+:root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1e4e79; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-code { color: #7e2d26; }
 :root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #7d7466; }
 :root[data-theme="light"] .file-edit-row-hunk { background: #f3ead6; color: #8a6c28; }
