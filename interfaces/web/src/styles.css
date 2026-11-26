@@ -85,7 +85,7 @@ button:disabled { cursor: not-allowed; }
 .work-collapse-toggle { border: 0; border-radius: 5px; padding: 4px 7px; background: transparent; color: #7f98a5; font-size: 11px; font-weight: 650; }
 .work-collapse-toggle:hover { background: #ffffff0d; color: #c6d8df; }
 .turn-assistant-frame.collapsed-work { border-left-color: #34434b; }
-.turn-work-scroll { max-height: min(480px, 55vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px; }
+.turn-work-scroll { max-height: min(720px, 82vh); min-height: 0; overflow-y: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; scrollbar-gutter: stable; padding: 7px 0 10px; }
 .turn-work-scroll.has-pending-updates { padding-bottom: 46px; }
 /* 阅读区底部的临时空槽：吸收「工具结果收拢」带来的变矮，让 scrollTop 不被浏览器
    夹到新的 max（否则贴底跟随时整列内容会被迫下移）。高度由 main.tsx 逐帧写入。 */
@@ -258,7 +258,7 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 720px) { .app-shell { grid-template-columns: 1fr; }.brand { grid-template-columns: 41px minmax(0, 1fr) 30px; }.sidebar { display: flex; visibility: hidden; position: fixed; z-index: 12; inset: 0 auto 0 0; width: min(290px, 84vw); transform: translateX(-105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: 18px 0 42px #0008; }.sidebar.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; }.mobile-sidebar-backdrop { display: block; position: fixed; z-index: 11; inset: 0; width: 100%; border: 0; background: #02060999; }.mobile-sidebar-close { display: grid; place-items: center; width: 30px; height: 30px; margin-left: auto; border: 0; border-radius: 5px; background: transparent; color: #9aabb8; }.icon-button.mobile-session-button { display: grid; }.chat-header { padding: 14px 17px; }.chat-scroll { padding: 24px 17px 17px 57px; }.composer-wrap { padding: 12px 17px 16px; }.runtime-card { margin: 9px 17px 0; overflow-x: auto; }.runtime-card .runtime-summary > span + span { display: none; }.runtime-options { grid-template-columns: 1fr; }.message.user .message-content { max-width: 90%; } }
-@media (max-width: 720px) { .turn-user-frame { max-width: 94%; }.turn-work-scroll { max-height: 52vh; }.turn-assistant-heading { padding-inline: 11px; } }
+@media (max-width: 720px) { .turn-user-frame { max-width: 94%; }.turn-work-scroll { max-height: 78vh; }.turn-assistant-heading { padding-inline: 11px; } }
 
 /* Syntax-aware Markdown and the compact final turn telemetry card. */
 .message-content pre .hljs { display: block; padding: 0; background: transparent; }
@@ -898,7 +898,7 @@ button:disabled { cursor: not-allowed; }
 .working-chip .pulse { width: 5px; height: 5px; background: #aaa; }
 .turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; animation: stream-working-grow 1.2s ease-in-out infinite; }
 @keyframes toolgen-turn { 0%, 100% { transform: rotate(-8deg); opacity: .7; } 50% { transform: rotate(16deg); opacity: 1; } }
-.turn-work-scroll { max-height: min(420px, 50vh); padding: 0; scrollbar-gutter: auto; }
+.turn-work-scroll { max-height: min(630px, 75vh); padding: 0; scrollbar-gutter: auto; }
 .turn-work-item { grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 6px; color: #aaa; font-size: 12px; }
 .turn-work-item + .turn-work-item { border: 0; }
 .turn-work-item strong { color: #c8c8c8; font-weight: 550; }
@@ -1441,11 +1441,11 @@ button:disabled { cursor: not-allowed; }
   right: 10px;
   bottom: 0;
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.16);
   pointer-events: none;
 }
 :root[data-theme="light"] .turn-work-panel:not(.has-live-usage)::after {
-  background: rgba(20, 40, 50, 0.10);
+  background: rgba(20, 40, 50, 0.18);
 }
 .turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px; }
 .turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #ffffff14; background: transparent; }
@@ -1708,7 +1708,7 @@ button:disabled { cursor: not-allowed; }
   .turn-user-frame { max-width: 96%; }
   .turn-user-entry { padding: 9px 13px; }
   .turn-assistant-heading { min-height: 32px; padding-block: 6px; }
-  .turn-work-scroll { max-height: min(390px, 48vh); }
+  .turn-work-scroll { max-height: min(585px, 72vh); }
   .turn-work-item { padding-block: 5px; }
   .composer-wrap { padding: 9px 12px 12px; }
   .composer-cwd { width: calc(100% - 18px); padding-block: 5px; font-size: 10px; }

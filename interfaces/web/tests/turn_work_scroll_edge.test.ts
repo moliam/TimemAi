@@ -17,6 +17,6 @@ describe("thought/action scroll edge", () => {
     expect(body).toContain("position: absolute;");
     expect(body).toContain("bottom: 0;");
     expect(body).toContain("height: 1px;");
-    expect(body).toContain("rgba(255, 255, 255, 0.08)");
+    expect(body).toContain("rgba(255, 255, 255, 0.16)");
   });
 });
