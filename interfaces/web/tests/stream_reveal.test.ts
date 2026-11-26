@@ -87,7 +87,9 @@ describe("stream reveal integration", () => {
     expect(mainSource).toContain(
       'provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"',
     );
-    expect(mainSource.match(/<StreamText /g)?.length).toBe(2);
+    // 三处：provisional 预览、最终交付、以及工作流「领先文本」的纯文本回退
+    // （工具胶囊并入 remark 末尾后，多行 thought 续写在组内仍走 StreamText）。
+    expect(mainSource.match(/<StreamText /g)?.length).toBe(3);
   });
 
   it("marks actively streaming containers and drops the marker on interruption", () => {

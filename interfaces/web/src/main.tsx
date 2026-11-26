@@ -13961,10 +13961,31 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);
     else groups.push([entry]);
   }
+  // 用户反馈：工具胶囊不该独占一行——它是前面那段 remark 的收尾。
+  // 紧邻动作组的纯文本条目并进该动作组作「领先文本」，由 StreamToolRun 在
+  // 文本末尾内联渲染胶囊（同一按钮负责展开/收起）；多行或含标记的富文本
+  // 保持块级渲染，胶囊跟在最后一段后（阅读层级不变）。
+  const renderedGroups: { entries: typeof entries; lead?: (typeof entries)[number] }[] =
+    groups.map(entries => ({ entries }));
+  for (let index = 0; index + 1 < renderedGroups.length; index++) {
+    const current = renderedGroups[index];
+    const next = renderedGroups[index + 1];
+    if (current.entries.length !== 1 || next.lead) continue;
+    const entry = current.entries[0];
+    if (entry.activity?.kind === "free_talk" && !(entry.activity.detail ?? "").trim()) continue;
+    if (!entry.activity && !entry.thoughtText.trim()) continue;
+    if (next.entries[0]?.activity?.tone !== "action" || next.entries[0].activity.timer) continue;
+    next.lead = entry;
+    current.entries = [];
+  }
+  const visibleGroups = renderedGroups.filter(group => group.entries.length > 0);
   // One reverse scan, rather than rescanning the suffix for every tool group.
+  // 并入组内的 free_talk 章节同样算「回复位置」：随它到来的工具属于新时序。
   let lastReplyIndex = -1;
-  for (let index = groups.length - 1; index >= 0; index--) {
-    if (groups[index].some(entry => entry.activity?.kind === "free_talk" && !!entry.activity.detail)) {
+  for (let index = visibleGroups.length - 1; index >= 0; index--) {
+    const group = visibleGroups[index];
+    const leadChapter = group.lead?.activity?.kind === "free_talk" && !!(group.lead.activity.detail ?? "").trim();
+    if (leadChapter || group.entries.some(entry => entry.activity?.kind === "free_talk" && !!entry.activity.detail)) {
       lastReplyIndex = index;
       break;
     }
@@ -13974,8 +13995,8 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   // blocks that carry text, so the index here matches streamProcessOutlineSections.
   let streamChapterIndex = 0;
   return <section className="turn-stream-tools" aria-label="Live model activity">
-    {groups.map((group, index) => {
-      const { key, activity } = group[0];
+    {visibleGroups.map((group, index) => {
+      const { key, activity } = group.entries[0];
       if (activity?.tone === "action") {
         if (activity.timer)
           return (
@@ -13987,9 +14008,17 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
         // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
-        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
+        const leadEntry = group.lead;
+        const leadText = leadEntry
+          ? (leadEntry.activity ? (leadEntry.activity.detail ?? "") : leadEntry.thoughtText)
+          : "";
+        const leadChapterIndex = leadEntry?.activity?.kind === "free_talk" && leadText.trim()
+          ? streamChapterIndex++
+          : -1;
+        return <StreamToolRun key={key} activities={group.entries.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds}
+          lead={leadEntry ? { text: leadText, markdown: !!leadEntry.activity, chapterIndex: leadChapterIndex } : undefined} />;
       }
-      const previewText = group[0].thoughtText;
+      const previewText = group.entries[0].thoughtText;
       if (previewText)
         return <div key={key} className="stream-thought-text" aria-label="Model thought preview"><StreamText text={previewText} /></div>;
       const isProcessChapter = activity?.kind === "free_talk" && !!(activity.detail ?? "").trim();
@@ -14001,7 +14030,12 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   </section>;
 }
 
-function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
+function StreamToolRun({ activities, superseded, handoffIds, lead }: {
+  activities: Activity[];
+  superseded: boolean;
+  handoffIds: Set<string>;
+  lead?: { text: string; markdown: boolean; chapterIndex: number };
+}) {
   const showResults = useToolResultStatus();
   const [expanded, setExpanded] = useState(false);
   // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
@@ -14080,10 +14114,25 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 控件契约：视觉收起（含双击选中展开等交互保持）显示 + tools xN，
   // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
-  return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}`}>
-    {mergeableCount > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
+  const toggleButton = mergeableCount > 0 ? (
+    <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
       <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={9} strokeWidth={1.5} /> : <Minus size={9} strokeWidth={1.5} />}</span><Wrench size={10.5} strokeWidth={1.45} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: mergeableCount }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${mergeableCount}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
-    </button>}
+    </button>
+  ) : null;
+  // 用户反馈：胶囊是 remark 的收尾、不是独立一行——单行纯文本才内联拼到句末；
+  // 含换行、列表、代码、表格或强调标记的富文本保持块级渲染（胶囊靠右另起一行），
+  // 避免把 markdown 段落结构压成一行。
+  const leadInline = !!lead && !/[\n*_\[\]`|]|^\s*(?:[-+]|\d+\.)\s/.test(lead.text.trim());
+  return <div ref={runRef} className={`stream-tool-run${folded ? " merged" : ""}`}>
+    {lead ? (
+      <div className={`stream-thought-text stream-tool-lead${leadInline ? " inline" : ""}`} {...(lead.chapterIndex >= 0 ? { "data-stream-chapter": lead.chapterIndex } : {})}>
+        {leadInline
+          ? <span className="stream-tool-lead-text">{lead.text}</span>
+          : lead.markdown ? <StreamMarkdown text={lead.text} /> : <StreamText text={lead.text} />}
+        {leadInline ? toggleButton : null}
+      </div>
+    ) : null}
+    {leadInline ? null : toggleButton}
     {activities.map((activity, index) => {
       const mergeable = completedIds.has(activity.id);
       return <div key={activity.id} className={`stream-tool-merged-item${mergeable ? " stream-tool-mergeable" : ""}${merged && mergeable ? " merged" : ""}`} inert={merged && mergeable}>

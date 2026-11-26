@@ -6017,6 +6017,10 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* 用户反馈：徽章左侧的 +/− 不要单独底色，直接并进胶囊底色里。 */
 .stream-tool-run-sign { display: inline-flex; align-items: center; justify-content: center; flex: none; color: inherit; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
+/* 用户反馈：工具胶囊并到 remark 末尾、按正常文本流内联显示（点击展开工具行），
+   不再独占一行。单行纯文本 remark 拼在句末；富文本回退为块级 + 靠右胶囊。 */
+.stream-tool-lead.inline .stream-tool-lead-text { white-space: pre-wrap; }
+.stream-tool-lead.inline .stream-tool-run-toggle { display: inline-flex; margin-left: 6px; vertical-align: 1px; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
 /* 折叠组：徽章这一行保留高度（约一行），折叠行自身 0fr 已无高度，
