@@ -745,6 +745,124 @@ fn snapshot_trimming_keeps_the_turn_file_change_summary() {
 }
 
 #[test]
+fn snapshot_transport_trim_keeps_duplicated_ledger_and_huge_diffs_out_of_hello() {
+    // 首屏 hello 帧只用于渲染：`turn_edits` 已经被折叠进 turn 的
+    // `file_changes`，打包产物/JSON 转储的整份 diff 也只会显示成静态摘要行。
+    // 两者都必须在快照投影里裁掉，而内存里的实时 turn 必须原样保留。
+    let ledger_row = json!({
+        "path": "src/lib.rs",
+        "op": "modified",
+        "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-let a = 1;\n+let a = 2;\n",
+    });
+    let action_payload = json!({
+        "context_id": "context_1",
+        "payload": {
+            "action": "run_bash",
+            "turn_edits": [ledger_row.clone()],
+        },
+        "topic": { "name": "core.action", "attributes": { "name": "run_bash" } },
+    });
+    let oversized = "x".repeat(SNAPSHOT_FILE_CHANGE_DIFF_BYTES + 1);
+    let small_diff = "--- a/small.rs\n+++ b/small.rs\n@@ -1 +1 @@\n-1\n+2\n".to_string();
+    let file_changes = WebTurnFileChanges {
+        edits: vec![
+            WebTurnFileChange {
+                path: "dist/bundle.js".to_string(),
+                op: "modified".to_string(),
+                diff: Some(oversized.clone()),
+                added_lines: 1,
+                removed_lines: 0,
+                truncated: false,
+                skip_reason: None,
+                size_bytes: None,
+            },
+            WebTurnFileChange {
+                path: "src/small.rs".to_string(),
+                op: "modified".to_string(),
+                diff: Some(small_diff.clone()),
+                added_lines: 1,
+                removed_lines: 1,
+                truncated: false,
+                skip_reason: None,
+                size_bytes: None,
+            },
+        ],
+        overflow_count: 0,
+    };
+    let live_turn = WebTurn {
+        preview: None,
+        turn_id: "turn_live".to_string(),
+        state: "working".to_string(),
+        created_at_ms: 1,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events: vec![WebTurnEvent {
+            event_id: "event_1".to_string(),
+            source: "core_topic".to_string(),
+            payload: action_payload.clone(),
+            created_at_ms: 1,
+            timeline_seq: Some(1),
+        }],
+        final_answer: None,
+        completion: None,
+        events_slimmed: false,
+        history_event_count: 0,
+        file_changes: Some(file_changes),
+        file_change_state: TurnFileChangeAccumulator::default(),
+    };
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.state = "working".to_string();
+        session.active_turn_id = Some("turn_live".to_string());
+        session.turns = vec![live_turn];
+    }
+
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    let shipped = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session_a")
+        .and_then(|session| session.turns.first())
+        .expect("the live turn must be part of the snapshot");
+    assert!(
+        shipped.events[0].payload["payload"]
+            .get("turn_edits")
+            .is_none(),
+        "the folded ledger rows must not be duplicated into the hello frame"
+    );
+    let edits = &shipped
+        .file_changes
+        .as_ref()
+        .expect("the file-change summary stays a projection of its own")
+        .edits;
+    assert_eq!(edits.len(), 2);
+    assert!(
+        edits[0].diff.is_none(),
+        "an oversized diff ships as metadata"
+    );
+    assert!(
+        edits[0].truncated,
+        "the client renders its static summary row"
+    );
+    assert_eq!(edits[1].diff.as_deref(), Some(small_diff.as_str()));
+    assert!(!edits[1].truncated);
+
+    // Live delivery and every later snapshot build again start from the full
+    // in-memory turn: the trim belongs to the projection, not the session.
+    let memory = state.sessions.lock().unwrap();
+    let turn = &memory.get("session_a").unwrap().turns[0];
+    assert_eq!(
+        turn.events[0].payload["payload"]["turn_edits"],
+        json!([ledger_row])
+    );
+    let memory_edits = &turn.file_changes.as_ref().unwrap().edits;
+    assert_eq!(memory_edits[0].diff.as_deref(), Some(oversized.as_str()));
+    assert!(!memory_edits[0].truncated);
+}
+
+#[test]
 fn restored_long_turns_keep_every_file_in_the_turn_summary() {
     // 用户反馈：重启后「本轮文件修改」只剩最后一个文件。恢复时先在完整历史上折叠出
     // turn 级总结，再裁剪事件窗口，所以窗口变短不会让早改过的文件消失；非文本修改

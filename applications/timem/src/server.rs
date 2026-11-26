@@ -19788,6 +19788,54 @@ fn trim_restored_turn_events(events: &mut Vec<WebTurnEvent>) -> bool {
     true
 }
 
+/// A turn's file-change summary is what the client draws as file rows, and a
+/// reader looks at one expanded diff at a time. Restored turns already bound
+/// each event's diff, but the folded summary did not: one generated bundle or
+/// JSON dump diff can reach a megabyte, and the hello frame ships every turn of
+/// every session. Oversized diffs therefore degrade to the static "diff too
+/// large" row instead of inflating the connect payload.
+const SNAPSHOT_FILE_CHANGE_DIFF_BYTES: usize = 32 * 1024;
+
+/// `turn_edits` rows are the ledger's authoritative net evidence. The host
+/// folds them into `WebTurn::file_changes` the moment they arrive (and again
+/// from raw history on restore), so the snapshot copy is pure duplication — and
+/// every mid-turn action event carries the whole cumulative ledger, which makes
+/// that duplication the dominant cost of a long turn's snapshot.
+fn strip_snapshot_turn_edits(payload: &mut Value) {
+    let topic = payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str);
+    if topic != Some(CORE_TOPIC_ACTION) && topic != Some(CORE_TOPIC_MODEL_RESPONSE) {
+        return;
+    }
+    if let Some(inner) = payload.get_mut("payload").and_then(Value::as_object_mut) {
+        inner.remove("turn_edits");
+    }
+}
+
+/// Snapshot-only trim of data that exists for the live wire alone: the
+/// duplicated ledger rows and full-size diffs. It runs on the session clone
+/// taken by `snapshot_for`, so live delivery and the in-memory turn keep full
+/// fidelity.
+fn slim_turn_for_snapshot_transport(turn: &mut WebTurn) {
+    for event in turn.events.iter_mut() {
+        strip_snapshot_turn_edits(&mut event.payload);
+    }
+    let Some(summary) = turn.file_changes.as_mut() else {
+        return;
+    };
+    for edit in summary.edits.iter_mut() {
+        let Some(diff) = edit.diff.as_ref() else {
+            continue;
+        };
+        if diff.len() > SNAPSHOT_FILE_CHANGE_DIFF_BYTES {
+            edit.diff = None;
+            edit.truncated = true;
+        }
+    }
+}
+
 /// Snapshot-only projection: terminal (non-working) turns are rendered
 /// collapsed first, so their events only need the preview skeleton. The
 /// in-memory WebSession keeps full events for live delivery; this clone is
@@ -19842,6 +19890,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             if !is_live {
                 *turn = slim_restored_turn_for_snapshot(turn);
             }
+            slim_turn_for_snapshot_transport(turn);
         }
     }
     let runtime_options = state
