@@ -627,7 +627,7 @@ fn payload_budget_spends_on_smallest_diffs_first() {
     assert!(row("medium.txt").diff.is_some());
     let large = row("large.txt");
     assert!(large.diff.is_none());
-    assert_eq!(large.skip_reason.as_deref(), Some(SKIP_BUDGET));
+    assert_eq!(large.skip_reason, Some(SKIP_BUDGET));
     let serialized = edits_payload(&FileEditsEvidence { edits: bounded }).to_string();
     assert!(serialized.len() <= budget);
 }
