@@ -13948,6 +13948,9 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     return true;
   });
   uniqueEntries.sort(compareTurnStreamItems);
+  // 非流式工作面板也复用这份呈现：空活动流必须不渲染 stream-only 的
+  // turn-stream-tools 容器，否则非流式验收会看到泄漏的 provisional UI。
+  if (uniqueEntries.length === 0) return null;
   const groups: (typeof entries)[] = [];
   // Timer lifecycle rows are standalone system-status lines in stream mode
   // too: they never merge into the foldable tool runs.
