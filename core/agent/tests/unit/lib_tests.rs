@@ -3824,8 +3824,12 @@ fn model_prompt_job_started_between_scans_is_reported_as_still_running() {
     );
 
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
+    // elapsed 由真实时钟计算（快照创建→prompt 构建之间的调度延迟会把 0.0s
+    // 舍入成 0.1s），按行匹配固定列，不锚定易漂移的时间单元格。
     assert!(
-        prompt.contains("| 151 | `0.0s` | `call_151` | `job-151` |  |"),
+        prompt.lines().any(|line| {
+            line.starts_with("| 151 | `") && line.ends_with("` | `call_151` | `job-151` |  |")
+        }),
         "{prompt}"
     );
     assert!(!prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
