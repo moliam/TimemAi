@@ -27,7 +27,9 @@ fn terminal_foreground_child_entry() {
         return;
     };
     match scenario.as_str() {
-        #[cfg(unix)]
+        // macOS tcsetpgrp 拒绝无存活成员的进程组（EPERM），「已死组抢占前台」
+        // 场景在 macos 上不可构造——与产品 reclaim 语义无冲突，仅门控该场景。
+        #[cfg(all(unix, not(target_os = "macos")))]
         "dead_group_hijack" => run_dead_group_hijack_scenario(),
         #[cfg(unix)]
         "already_owner" => run_already_owner_scenario(),
@@ -51,7 +53,7 @@ fn claim_stdin_pty_session() {
 
 /// The incident shape: a command-side group takes the terminal foreground
 /// and then dies, leaving the foreground group dead; the host reclaims it.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_dead_group_hijack_scenario() {
     claim_stdin_pty_session();
     let grand = unsafe { libc::fork() };
@@ -188,7 +190,8 @@ fn run_pty_child(scenario: &str) -> (String, std::process::ExitStatus) {
 /// The incident regression: a background command group steals the terminal
 /// foreground, dies, and the host must reclaim it from its own background
 /// group with SIGTTOU blocked.
-#[cfg(unix)]
+// macOS tcsetpgrp 拒绝已死进程组，hijack 前提不可构造，场景仅在 linux 语义下运行。
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn restore_reclaims_foreground_from_dead_hijacking_group() {
     let (output, status) = run_pty_child("dead_group_hijack");

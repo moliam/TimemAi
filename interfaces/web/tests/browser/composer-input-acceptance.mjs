@@ -547,16 +547,34 @@ async function main() {
         text: anchor.textContent,
       };
     })()`);
-    const setTheme = async (theme) => {
+    const LINK_PROBE = ".turn-final-delivery .markdown-body a.markdown-external-link";
+    const CHIP_PROBE = ".turn-final-delivery .markdown-body a.markdown-address-link";
+    // Anchor colors transition; slow runners starve the animation timeline
+    // with background work, so poll the probe color until it settles (two
+    // equal consecutive reads, bounded fallback) instead of a fixed sleep
+    // that can sample a mid-flight frame on loaded machines.
+    const setTheme = async (theme, probe) => {
       await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
-      // Anchor colors transition; read the settled value, not a mid-flight frame.
-      await sleep(260);
+      await browser.evaluate(`new Promise(resolve => {
+        const selector = ${JSON.stringify(probe)};
+        let last = null;
+        const started = Date.now();
+        const tick = () => {
+          const element = document.querySelector(selector);
+          const value = element ? getComputedStyle(element).color : "";
+          if (value && value === last) { resolve(); return; }
+          last = value;
+          if (Date.now() - started > 4000) { resolve(); return; }
+          setTimeout(tick, 80);
+        };
+        setTimeout(tick, 80);
+      })`);
     };
-    await setTheme("dark");
+    await setTheme("dark", LINK_PROBE);
     const darkLink = await readLink();
-    await setTheme("light");
+    await setTheme("light", LINK_PROBE);
     const lightLink = await readLink();
-    await setTheme("dark");
+    await setTheme("dark", LINK_PROBE);
     const links = { dark: darkLink, light: lightLink };
     assert(links.dark && links.light, "no outbound link rendered inside a model reply");
     const parseColor = (value) => {
@@ -671,11 +689,11 @@ async function main() {
         })(),
       };
     })()`);
-    await setTheme("dark");
+    await setTheme("dark", CHIP_PROBE);
     const darkChip = await readChip();
-    await setTheme("light");
+    await setTheme("light", CHIP_PROBE);
     const lightChip = await readChip();
-    await setTheme("dark");
+    await setTheme("dark", CHIP_PROBE);
     const chips = { dark: darkChip, light: lightChip };
     assert(chips.dark && chips.light, "no address-link chip rendered inside a model reply");
     for (const theme of ["dark", "light"]) {

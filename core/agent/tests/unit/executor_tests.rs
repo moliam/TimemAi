@@ -604,7 +604,9 @@ fn windows_command_action_merges_stderr_with_output() {
     )
     .unwrap();
 
-    let result = execute_command_action("local_tool", &script, &json!({}), 1000);
+    // GitHub windows runner 的 PowerShell 冷启动（Defender 实扫）远超本地耗时；
+    // 本测试覆盖 stderr 合并语义而非超时边界，超时预算放宽到 30s。
+    let result = execute_command_action("local_tool", &script, &json!({}), 30_000);
 
     assert!(result.contains("status: 3"), "{result}");
     assert!(result.contains("out"), "{result}");
@@ -654,7 +656,7 @@ fn windows_powershell_command_action_receives_json_payload() {
         "local_echo",
         &script,
         &json!({"args":{"message":"windows payload ok"}}),
-        5000,
+        30_000,
     );
 
     assert!(result.contains("status: 0"), "{result}");
