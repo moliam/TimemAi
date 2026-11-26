@@ -7450,7 +7450,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   padding: 6px 9px 9px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
-  background: rgba(255, 244, 224, 0.04);
+  background: rgba(255, 255, 255, 0.03);
 }
 .stream-tool-row:has(.file-edits-panel) .file-edits-panel {
   padding-top: 2px;
@@ -7458,8 +7458,8 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) {
   border-color: rgba(0, 0, 0, 0.10);
-  background: #f7f5ef;
-  box-shadow: 0 1px 2px rgba(70, 60, 40, 0.08);
+  background: #f8f9fa;
+  box-shadow: 0 1px 2px rgba(30, 40, 50, 0.08);
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) .file-edits-panel { background: transparent; }
 /* 用户反馈：连续命令各自的 edit 卡片不能贴成一个长条。每条命令的 edit 色块
@@ -7482,20 +7482,20 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   padding: 6px 9px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 9px 9px 0 0;
-  background: rgba(255, 244, 224, 0.05);
+  background: rgba(255, 255, 255, 0.04);
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) > .stream-tool-head {
   border-bottom-color: rgba(0, 0, 0, 0.08);
-  background: rgba(140, 120, 90, 0.10);
+  background: rgba(0, 0, 0, 0.035);
 }
 .tool-activity:has(.file-edits-panel) > summary {
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 7px 7px 0 0;
-  background: rgba(255, 244, 224, 0.05);
+  background: rgba(255, 255, 255, 0.04);
 }
 :root[data-theme="light"] .tool-activity:has(.file-edits-panel) > summary {
   border-bottom-color: rgba(0, 0, 0, 0.08);
-  background: rgba(140, 120, 90, 0.10);
+  background: rgba(0, 0, 0, 0.035);
 }
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
@@ -7613,17 +7613,17 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 /* 用户反馈：diff 框要与文本一样宽——内层独立框取消，diff 行直接铺满
    外层卡片（卡片与文本列同宽）；滚动与高度上限行为保留在本容器。
    用户反馈：diff 内容不要任何描边线（含左侧线）；标题与内容的层级改用
-   暖纸内衬底表达，读起来「标题在上、内容在下」且更明亮精致。 */
+   中性内衬底表达，读起来「标题在上、内容在下」且更明亮精致。 */
 .file-edit-diff {
   margin: 2px 0 6px;
   padding: 2px 8px;
   border-radius: 8px;
-  background: rgba(255, 244, 224, 0.04);
+  background: rgba(255, 255, 255, 0.03);
   overflow: auto;
   max-height: 420px;
 }
 :root[data-theme="light"] .file-edit-diff {
-  background: rgba(253, 246, 230, 0.6);
+  background: #ffffff;
 }
 .file-edit-diff-table {
   font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;
@@ -7650,14 +7650,12 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 .file-edit-sign { user-select: none; text-align: center; }
 .file-edit-code { white-space: pre; min-width: 0; }
-.file-edit-row-add { background: rgba(94, 160, 215, 0.15); }
 .file-edit-row-add .file-edit-sign { color: #8fc4e8; font-weight: 600; }
 .file-edit-row-add .file-edit-code { color: #c2dcf1; }
-.file-edit-row-del { background: rgba(214, 92, 84, 0.17); }
 .file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
 .file-edit-row-del .file-edit-code { color: #f6b9b2; }
 .file-edit-row-hunk {
-  background: rgba(214, 164, 88, 0.10);
+  background: rgba(255, 255, 255, 0.05);
   color: #cfa763;
   font-weight: 600;
   margin: 3px 0;
@@ -7725,13 +7723,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-copy.copy-failed { color: #b23a31; }
 :root[data-theme="light"] .file-edit-chevron { color: #6b7f8c; }
 :root[data-theme="light"] .file-edit-gutter { color: #a59b85; }
-:root[data-theme="light"] .file-edit-row-add { background: #e4eef9; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-sign { color: #1c62a8; }
-:root[data-theme="light"] .file-edit-row-del { background: #fbe5e3; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1e4e79; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-code { color: #7e2d26; }
-:root[data-theme="light"] .file-edit-row-hunk { background: #f3ead6; color: #8a6c28; }
+:root[data-theme="light"] .file-edit-row-hunk { background: #f5f6f8; color: #8a6c28; }
 :root[data-theme="light"] .file-edit-row-meta { color: #a59b85; }
 :root[data-theme="light"] .file-edit-notice { color: #8a6d1f; }
 :root[data-theme="light"] .file-edits-more { color: #5c6f7a; }
