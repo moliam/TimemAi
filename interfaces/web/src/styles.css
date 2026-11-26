@@ -7656,7 +7656,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .file-edit-row-del { background: rgba(214, 92, 84, 0.17); }
 .file-edit-row-del .file-edit-sign { color: #e59a94; font-weight: 600; }
 .file-edit-row-del .file-edit-code { color: #f6b9b2; }
-.file-edit-row-ctx .file-edit-code { color: #9a9080; }
 .file-edit-row-hunk {
   background: rgba(214, 164, 88, 0.10);
   color: #cfa763;
@@ -7732,7 +7731,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .file-edit-row-del .file-edit-sign { color: #b23a31; }
 :root[data-theme="light"] .file-edit-row-add .file-edit-code { color: #1e4e79; }
 :root[data-theme="light"] .file-edit-row-del .file-edit-code { color: #7e2d26; }
-:root[data-theme="light"] .file-edit-row-ctx .file-edit-code { color: #7d7466; }
 :root[data-theme="light"] .file-edit-row-hunk { background: #f3ead6; color: #8a6c28; }
 :root[data-theme="light"] .file-edit-row-meta { color: #a59b85; }
 :root[data-theme="light"] .file-edit-notice { color: #8a6d1f; }
