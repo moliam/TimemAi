@@ -6548,9 +6548,9 @@ fn memo_finish_guard_blocks_consecutive_finishes_then_allows_through() {
     // Guard intercepts each consecutive finish attempt until the token
     // budget is exhausted (cap 3); only the attempt after exhaustion is
     // allowed through so the turn cannot loop forever.
-    for i in 2..=4 {
+    for (i, prompt) in model.prompts.iter().enumerate().skip(2).take(3) {
         assert!(
-            model.prompts[i].contains("still memo active"),
+            prompt.contains("still memo active"),
             "guard reminder missing in prompt[{i}]"
         );
     }

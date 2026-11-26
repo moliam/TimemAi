@@ -8,6 +8,14 @@
 use crate::api::restore_terminal_foreground_to_current_group;
 #[cfg(unix)]
 use crate::api::{restore_terminal_foreground_to_current_group, terminal_foreground_pgid};
+// libc 0.2 未给 apple 提供 ptsname 绑定：linux 走 libc::ptsname_r，
+// macos 直接声明 libSystem 的同签名 C 函数（macOS 10.13+ 提供）。
+#[cfg(all(unix, not(target_os = "macos")))]
+use libc::ptsname_r;
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn ptsname_r(fd: libc::c_int, buf: *mut libc::c_char, len: libc::size_t) -> libc::c_int;
+}
 
 const CHILD_SCENARIO_ENV: &str = "TIMEM_TERMINAL_FG_CHILD_SCENARIO";
 const CHILD_RESULT_MARKER: &str = "CHILD_RESULT";
@@ -32,7 +40,11 @@ fn terminal_foreground_child_entry() {
 fn claim_stdin_pty_session() {
     unsafe {
         libc::setsid();
-        assert_eq!(libc::ioctl(0, libc::TIOCSCTTY, 0), 0, "TIOCSCTTY failed");
+        assert_eq!(
+            libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0),
+            0,
+            "TIOCSCTTY failed"
+        );
         assert_eq!(libc::tcsetpgrp(0, libc::getpgrp()), 0, "tcsetpgrp failed");
     }
 }
@@ -89,7 +101,7 @@ fn spawn_child_on_pty(scenario: &str) -> (std::process::Child, std::fs::File) {
         assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt failed");
         let mut name = [0 as libc::c_char; 128];
         assert_eq!(
-            libc::ptsname_r(master_fd, name.as_mut_ptr(), name.len()),
+            ptsname_r(master_fd, name.as_mut_ptr(), name.len()),
             0,
             "ptsname_r failed"
         );

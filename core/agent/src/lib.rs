@@ -1568,7 +1568,9 @@ impl<'a> RunningOutputBridge<'a> {
         }
     }
 
-    #[cfg(test)]
+    // 调用方（run_bash 输出桥接测试模块）是 all(test, unix)：方法 cfg 与之对齐，
+    // windows 的 lib test 才不会把无调用方法当 dead code 拒绝。
+    #[cfg(all(test, unix))]
     fn with_min_interval(mut self, min_interval: Duration) -> Self {
         self.min_interval = min_interval;
         self
