@@ -168,7 +168,9 @@ fn command_action_contains_script_sigsegv_and_executor_remains_usable() {
     fs::write(dir.join("crash.sh"), "#!/bin/sh\nkill -SEGV $$\n").unwrap();
     fs::write(dir.join("ok.sh"), "#!/bin/sh\nprintf still_alive\n").unwrap();
 
-    let crashed = execute_command_action("crash_tool", &dir.join("crash.sh"), &json!({}), 1000);
+    // 慢 runner 上 fork/exec sh + 信号递送 + 收尸可超 1s；测试覆盖信号分类语义
+    // 而非超时边界（超时边界有专项测试），预算放宽到 30s。
+    let crashed = execute_command_action("crash_tool", &dir.join("crash.sh"), &json!({}), 30_000);
     assert!(crashed.contains("error: terminated_by_signal"), "{crashed}");
     assert!(crashed.contains("signal: 11"), "{crashed}");
 
