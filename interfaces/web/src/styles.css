@@ -1748,6 +1748,10 @@ button:disabled { cursor: not-allowed; }
   --link-rest-wash: #6fe0cb2e;
   --link-hover-ink: #b9f7ea;
   --link-hover-wash: #6fe0cb38;
+  --link-chip-bg: #6fe0cb1a;
+  --link-chip-border: #6fe0cb4d;
+  --link-chip-bg-hover: #6fe0cb2e;
+  --link-chip-border-hover: #6fe0cb80;
 }
 
 :root[data-theme="light"] {
@@ -1771,6 +1775,10 @@ button:disabled { cursor: not-allowed; }
   --link-rest-wash: #08695b24;
   --link-hover-ink: #04463d;
   --link-hover-wash: #08695b38;
+  --link-chip-bg: #08695b12;
+  --link-chip-border: #08695b40;
+  --link-chip-bg-hover: #08695b24;
+  --link-chip-border-hover: #08695b73;
 }
 
 /* Link affordance. A link never relies on color alone: the underline is
@@ -1808,6 +1816,29 @@ a:focus-visible {
   outline: 2px solid var(--link-ink);
   outline-offset: 2px;
   text-decoration-color: currentColor;
+}
+
+/* A link whose label is the address is a destination the reader may want to
+   copy or open, not a word inside a sentence: give it a real chip (padding,
+   rounded corners, 1px keyline) so it reads as a clickable block. The chip
+   keeps `clone` so a wrapped URL stays one continuous bordered band, and the
+   border takes over the affordance from the underline, which would only cut
+   through the chip. */
+.markdown-body a.markdown-address-link {
+  padding: .1em .42em;
+  border: 1px solid var(--link-chip-border);
+  border-radius: 6px;
+  background-color: var(--link-chip-bg);
+  text-decoration: none;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.markdown-body a.markdown-address-link:hover {
+  border-color: var(--link-chip-border-hover);
+  background-color: var(--link-chip-bg-hover);
+  color: var(--link-hover-ink);
+  text-decoration: none;
 }
 
 /* An outbound link opens a new tab, so it carries a small arrow. Links whose

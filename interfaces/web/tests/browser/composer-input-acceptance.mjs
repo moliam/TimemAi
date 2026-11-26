@@ -45,7 +45,7 @@ const heavyAnswer = (index) => {
   const parts = [];
   let size = 0;
   while (size < 8 * 1024) { parts.push(line); size += line.length; }
-  return `# Archived final answer ${index}\n\n${parts.join("\n\n")}\n`;
+  return `# Archived final answer ${index}\n\n${parts.join("\n\n")}\n\nhttps://example.com/raw/${index}\n`;
 };
 const turn = (index) => ({
   turn_id: `turn-${index}`, state: "finished", created_at_ms: now - (HEAVY_TURNS - index) * 1000,
@@ -630,6 +630,71 @@ async function main() {
       `outbound marker changes the reply line box: ${markerLayout.withoutMarker}px -> ${markerLayout.withMarker}px`);
     assert(Math.abs(markerLayout.restored - markerLayout.withMarker) <= 1,
       "reply paragraph height does not settle after the marker returns");
+
+    // A URL label becomes a chip: padding, a keyline and rounded corners carry
+    // the affordance instead of an underline.
+    const readChip = () => browser.evaluate(`(() => {
+      const anchor = document.querySelector(".turn-final-delivery .markdown-body a.markdown-address-link");
+      if (!anchor) return null;
+      const style = getComputedStyle(anchor);
+      let node = anchor.parentElement;
+      let surface = "rgba(0, 0, 0, 0)";
+      while (node) {
+        const background = getComputedStyle(node).backgroundColor;
+        if (background && background !== "rgba(0, 0, 0, 0)" && background !== "transparent") {
+          surface = background;
+          break;
+        }
+        node = node.parentElement;
+      }
+      return {
+        color: style.color,
+        wash: style.backgroundColor,
+        surface,
+        line: style.textDecorationLine,
+        borderWidth: style.borderTopWidth,
+        borderStyle: style.borderTopStyle,
+        borderColor: style.borderTopColor,
+        radius: style.borderTopLeftRadius,
+        paddingTop: style.paddingTop,
+        paddingLeft: style.paddingLeft,
+        text: anchor.textContent,
+        copied: (() => {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(anchor);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const value = selection.toString();
+          selection.removeAllRanges();
+          return value;
+        })(),
+      };
+    })()`);
+    await setTheme("dark");
+    const darkChip = await readChip();
+    await setTheme("light");
+    const lightChip = await readChip();
+    await setTheme("dark");
+    const chips = { dark: darkChip, light: lightChip };
+    assert(chips.dark && chips.light, "no address-link chip rendered inside a model reply");
+    for (const theme of ["dark", "light"]) {
+      const chip = chips[theme];
+      assert(chip.line === "none", `${theme} address chip is still underlined: ${chip.line}`);
+      assert(parseFloat(chip.paddingLeft) > 0 && parseFloat(chip.paddingTop) > 0,
+        `${theme} address chip has no padding: ${chip.paddingTop} ${chip.paddingLeft}`);
+      assert(chip.borderStyle === "solid" && parseFloat(chip.borderWidth) >= 1,
+        `${theme} address chip has no keyline: ${chip.borderWidth} ${chip.borderStyle}`);
+      assert(parseFloat(chip.radius) > 0, `${theme} address chip has no radius: ${chip.radius}`);
+      const ink = parseColor(chip.color);
+      const band = over(parseColor(chip.wash), parseColor(chip.surface));
+      const onBand = ratio(ink, band);
+      assert(onBand >= 4.5,
+        `${theme} address chip contrast is ${onBand.toFixed(2)}:1 on ${chip.wash}`);
+      assert(chip.copied.trim() === chip.text.trim(),
+        `${theme} address chip leaks markup into copied text: ${JSON.stringify(chip.copied)}`);
+      console.log(`address chip ${theme}: ${chip.color} on ${chip.wash}, contrast ${onBand.toFixed(2)}:1, radius ${chip.radius}`);
+    }
 
     // Hover must add a second, non-color cue: thicker underline + a wash.
     // The reply sits far down the history, so bring the link into the viewport

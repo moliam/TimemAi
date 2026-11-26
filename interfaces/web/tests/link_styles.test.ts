@@ -47,6 +47,16 @@ function luminance(hex: string): number {
   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
 }
 
+// A translucent token is composited over the surface it sits on before the
+// contrast is judged: that is the colour the reader actually sees.
+function composite(top: string, bottom: string): string {
+  const alpha = Number.parseInt(top.slice(7, 9), 16) / 255;
+  const [red, green, blue] = rgb(top).map((channel, index) =>
+    Math.round(channel * alpha + rgb(bottom)[index] * (1 - alpha)),
+  );
+  return `#${[red, green, blue].map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function contrast(foreground: string, background: string): number {
   const [lighter, darker] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
   return (lighter + 0.05) / (darker + 0.05);
@@ -87,6 +97,39 @@ describe("link affordance styling", () => {
     const wash = token(block, "--link-rest-wash");
     expect(wash).toHaveLength(9);
     expect(wash.slice(1, 7)).toBe(token(block, "--link-ink").slice(1));
+  });
+
+  it.each(["dark", "light"])(
+    "%s theme keeps the address-link chip legible and outlined",
+    (theme) => {
+      const block = theme === "dark" ? dark : light;
+      const surface = REPLY_SURFACE[theme];
+      const chip = composite(token(block, "--link-chip-bg"), surface);
+      expect(contrast(token(block, "--link-ink"), chip)).toBeGreaterThanOrEqual(4.5);
+      // The keyline is the affordance that replaces the underline, so it must
+      // not be so faint that the chip dissolves into the page.
+      const border = token(block, "--link-chip-border");
+      expect(border).toHaveLength(9);
+      expect(Number.parseInt(border.slice(7, 9), 16) / 255).toBeGreaterThanOrEqual(0.25);
+    },
+  );
+
+  it("turns address labels into a clickable chip", () => {
+    const body = ruleBody(".markdown-body a.markdown-address-link");
+    expect(body).toContain("padding: .1em .42em;");
+    expect(body).toContain("border: 1px solid var(--link-chip-border);");
+    expect(body).toContain("border-radius: 6px;");
+    expect(body).toContain("background-color: var(--link-chip-bg);");
+    // The underline would cut through the chip; the keyline takes over.
+    expect(body).toContain("text-decoration: none;");
+    // A wrapped URL stays one bordered band instead of one box per line.
+    expect(body).toContain("box-decoration-break: clone;");
+    expect(body).toContain("-webkit-box-decoration-break: clone;");
+    const hover = ruleBody(".markdown-body a.markdown-address-link:hover");
+    expect(hover).toContain("border-color: var(--link-chip-border-hover);");
+    expect(hover).toContain("background-color: var(--link-chip-bg-hover);");
+    expect(hover).toContain("color: var(--link-hover-ink);");
+    expect(hover).toContain("text-decoration: none;");
   });
 
   it("marks every anchor with an always-on underline", () => {
