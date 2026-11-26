@@ -686,11 +686,21 @@ async function main() {
         const badge = document.querySelector('.stream-tool-run-toggle');
         const live = document.querySelector('.stream-tool-row.running');
         const prev = run?.previousElementSibling;
-        const g=badge?.getBoundingClientRect(),b=live?.getBoundingClientRect(),r=run?.getBoundingClientRect(),p=prev?.getBoundingClientRect();
-        return {ok:!!g&&!!b&&!!r&&!!p&&r.height>=18&&r.height<=24&&Math.abs(g.right-r.right)<1&&Math.abs(g.top-r.top)<1&&Math.abs(g.bottom-r.bottom)<1&&g.top>=p.bottom-0.5&&g.bottom<b.top&&g.left>b.left+4,
-          badge:g&&{left:g.left,right:g.right,top:g.top,bottom:g.bottom,h:g.height},live:b&&{left:b.left,top:b.top},run:r&&{height:r.height,right:r.right,top:r.top},prev:p&&{bottom:p.bottom}};
+        const lead = run?.querySelector('.stream-tool-lead.inline');
+        const leadText = run?.querySelector('.stream-tool-lead-text');
+        const g=badge?.getBoundingClientRect(),b=live?.getBoundingClientRect(),r=run?.getBoundingClientRect(),p=prev?.getBoundingClientRect(),l=lead?.getBoundingClientRect(),t=leadText?.getBoundingClientRect();
+        // 契约分支（lead 特性后）：组内有内联 lead 时第一行是 lead 文本行，徽章
+        // 内联拼句末（左距 6px、同一文本行内、句末不贴组右缘）；无 lead 时徽章
+        // 才是组自身第一行（独立、右缘贴组右）。两者都绝不覆盖前序/后续行。
+        const inlineLead = !!l&&!!g&&!!b&&!!r&&!!t&&
+          Math.abs(l.top-r.top)<1&&Math.abs(g.top-l.top)<3&&Math.abs(g.bottom-l.bottom)<3&&
+          Math.abs(g.left-(t.right+6))<1.5&&g.right<r.right-1&&
+          g.bottom<=b.top+0.5&&r.height>=18&&r.height<=48;
+        const standalone = !l&&!!g&&!!b&&!!r&&!!p&&r.height>=18&&r.height<=24&&Math.abs(g.right-r.right)<1&&Math.abs(g.top-r.top)<1&&Math.abs(g.bottom-r.bottom)<1&&g.top>=p.bottom-0.5&&g.bottom<b.top&&g.left>b.left+4;
+        return {ok:inlineLead||standalone,mode:inlineLead?"inline-lead":standalone?"standalone":"broken",
+          badge:g&&{left:g.left,right:g.right,top:g.top,bottom:g.bottom,h:g.height},leadText:t&&{right:t.right},lead:l&&{top:l.top,bottom:l.bottom},live:b&&{left:b.left,top:b.top},run:r&&{height:r.height,right:r.right,top:r.top},prev:p&&{bottom:p.bottom}};
       })()`);
-      assert(alignment.ok, `collapsed badge must be the group's own first row, right-flush and never covering neighbours at ${width}px: ${JSON.stringify(alignment)}`);
+      assert(alignment.ok, `collapsed badge must lead the group (inline lead ends with the badge, standalone badge right-flush) and never cover neighbours at ${width}px: ${JSON.stringify(alignment)}`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
 
