@@ -1431,6 +1431,22 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-frame.working { animation: none; }
 .turn-assistant-heading { position: relative; z-index: 2; min-height: 28px; padding: 0 0 0 10px; border-bottom: 0; }
 .turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+/* 用户反馈：Thought/Action 展开后，滚动窗底边和下方正文需要一点视觉分界。
+   线画在滚动容器外侧，避免被 fade-bottom 的 mask 一起抹掉；有 live usage 时
+   由 usage 自己的上边框承担分界，不重复加线。 */
+.turn-work-panel:not(.has-live-usage)::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+:root[data-theme="light"] .turn-work-panel:not(.has-live-usage)::after {
+  background: rgba(20, 40, 50, 0.10);
+}
 .turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px; }
 .turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #ffffff14; background: transparent; }
 .turn-work-panel.has-live-usage > .turn-new-updates { bottom: 42px; }
@@ -7422,8 +7438,8 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   padding-left: 0;
   padding-right: 0;
 }
-/* 用户反馈：带 diff 的命令要和 diff 卡片共用一个色块——同一命令是一个整体，
-   相邻命令靠色块边界自然分开。卡片自身那层底色去掉，避免色块套色块。 */
+/* 用户反馈：带 diff 的命令要和 diff 卡片共用一个色块——同一命令是一个整体；
+   相邻命令由下方独立间距分开。卡片自身那层底色去掉，避免色块套色块。 */
 .stream-tool-row:has(.file-edits-panel) {
   padding: 6px 9px 9px;
   border-radius: 10px;
@@ -7435,6 +7451,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) { background: #f1f5f4; }
 :root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) .file-edits-panel { background: transparent; }
+/* 用户反馈：连续命令各自的 edit 卡片不能贴成一个长条。每条命令的 edit 色块
+   独立成块，相邻命令之间留出可见间距；单条命令内部仍保持紧凑。 */
+.stream-tool-merged-item:has(.file-edits-panel) + .stream-tool-merged-item:has(.file-edits-panel) {
+  margin-top: 8px;
+}
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
 .stream-tool-row .file-edit-head,
