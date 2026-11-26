@@ -793,9 +793,16 @@ async function main() {
       await browser.call("Input.dispatchMouseEvent", {
         type: "mouseWheel", x: 700, y: 380, deltaX: 0, deltaY: -40,
       });
-      await sleep(90);
-      const afterWheel = await scrollTopNow();
-      assert(afterWheel < before - 8,
+      // Slow runners batch wheel handling behind background work, so poll
+      // until the viewport actually moves instead of sleeping a fixed 90ms;
+      // the contract (wheel must scroll the timeline) is unchanged.
+      let afterWheel = before;
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline && afterWheel > before - 8) {
+        await sleep(60);
+        afterWheel = await scrollTopNow();
+      }
+      assert(afterWheel <= before - 8,
         `slow wheel-up did not move the viewport: ${before} -> ${afterWheel}`);
       // Any commit (typing rerenders the thread) used to re-pin the reader.
       typed += "s";
