@@ -13142,10 +13142,6 @@ const TurnInteraction = memo(function TurnInteraction({
     (count, run) => count + run.summary.activities.length,
     0,
   );
-  const toolActivityRunByStartIndex = useMemo(
-    () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
-    [toolActivityRuns],
-  );
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const runningStreamTools = useMemo(() => streamRetention
@@ -13547,35 +13543,16 @@ const TurnInteraction = memo(function TurnInteraction({
                       })}
                     </button>
                   )}
-                  {workItems.map((item, index) => {
-                    const { activity } = item;
-                    if (activity?.tone === "action") {
-                      // Timer lifecycle rows are system-status lines: they stay
-                      // individually visible and never fold into tool groups.
-                      if (activity.timer)
-                        return (
-                          <ToolActivity
-                            key={`timer-row-${item.key}`}
-                            activity={activity}
-                          />
-                        );
-                      const summary = toolActivityRunByStartIndex.get(index);
-                      return summary ? (
-                        <ToolActivityGroup
-                          key={`tool-activity-group-${item.key}`}
-                          summary={summary}
-                          enterPulse={item.key === thoughtPulseKey}
-                        />
-                      ) : null;
-                    }
-                    return activity ? (
-                      <ActivityView
-                        key={item.key}
-                        activity={activity}
-                        enterPulse={item.key === thoughtPulseKey}
-                      />
-                    ) : null;
-                  })}{" "}
+                  {/* 展开态复用流式呈现：折叠只是折叠，不换另一套行渲染。 */}
+                  <StreamWorkProvider value={isWorking}>
+                    <StreamActivityPresentation
+                      activities={workItems.flatMap(({ activity }) =>
+                        activity ? [activity] : [],
+                      )}
+                      thoughtText=""
+                      responseArriving={!!turn.final_answer || !!turn.preview}
+                    />
+                  </StreamWorkProvider>
                   {newerWorkItemCount > 0 && (
                     <button
                       type="button"
@@ -15990,60 +15967,6 @@ function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults:
   return activeParts.length > 0
     ? t("tools.runningWith", { parts: activeParts.join(" · ") })
     : t("tools.running");
-}
-
-function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActivitySummary; enterPulse?: boolean }) {
-  const showResults = useToolResultStatus();
-  const [open, setOpen] = useState(false);
-  const singleActivity =
-    summary.activities.length === 1 ? summary.activities[0] : undefined;
-  if (
-    (singleActivity?.tool_name === "run_bash" ||
-      singleActivity?.tool_name === "run_powershell") &&
-    singleActivity.tool_mode === "poll"
-  )
-    return <ToolActivity activity={singleActivity} />;
-  const running = summary.status === "running";
-  const groupStatusLabel = toolActivityGroupStatusLabel(summary, showResults);
-  const summaryLabel = t("tools.groupSummary", {
-    action: open ? t("tools.groupCollapse") : t("tools.groupExpand"),
-    label: summary.label,
-    status: groupStatusLabel,
-  });
-  return (
-    <details
-      className={`tool-activity-group ${!showResults && summary.status !== "running" ? "settled" : summary.status}${enterPulse ? " thought-run-enter" : ""}`}
-      open={open}
-      aria-busy={running || undefined}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary
-        aria-label={summaryLabel}
-        title={open ? t("tools.groupCollapse") : t("tools.groupExpand")}
-      >
-        <ChevronRight
-          className="tool-activity-group-icon tool-activity-chevron"
-          size={14}
-          aria-hidden="true"
-        />
-        {groupStatusLabel && <span className="tool-activity-group-status">{groupStatusLabel}</span>}
-        <span className="tool-activity-group-counts" aria-hidden="true">
-          {summary.counts.map(({ name, count }, index) => (
-            <span className="tool-activity-group-count" key={name}>
-              {index > 0 && <i>|</i>}
-              <span>{name}</span>
-              <strong>{count}</strong>
-            </span>
-          ))}
-        </span>
-      </summary>
-      <div className="tool-activity-group-body">
-        {summary.activities.map((activity, index) => (
-          <ToolActivity key={`${activity.id}-${index}`} activity={activity} />
-        ))}
-      </div>
-    </details>
-  );
 }
 
 function LocalizedFlippingTime({

@@ -932,16 +932,26 @@ async function main() {
         await waitFor(() => contains(".work-tool-count", "(+3 tools)"), "historical collapsed count must include all calls");
         await browser.evaluate(`document.querySelector('button.work-title-chip').click()`);
         await waitFor(async () => (await workExpanded()) === "true", "historical manual expansion failed");
+        // 展开态就是流式呈现本身：没有第二套分组卡片，也没有外框。
         for (const theme of ["dark", "light"]) {
           assert(await browser.evaluate(`(() => {
             document.documentElement.dataset.theme = ${JSON.stringify(theme)};
-            const groups = [...document.querySelectorAll('.tool-activity-group-body')];
-            const summaries = [...document.querySelectorAll('.tool-activity summary, .tool-activity-group > summary')];
-            if (!groups.length || !summaries.length) return false;
+            const panel = document.querySelector('.turn-work-panel');
+            const runs = [...document.querySelectorAll('.turn-work-panel .stream-tool-run')];
+            const summaries = [...document.querySelectorAll('.turn-work-panel .stream-tool-row')];
+            window.__workProbe = { panel: !!panel, runs: runs.length, summaries: summaries.length,
+              focus: document.activeElement?.className ?? null,
+              panelBorder: panel ? getComputedStyle(panel).borderTopWidth : null,
+              panelBg: panel ? getComputedStyle(panel).backgroundColor : null,
+              panelRadius: panel ? getComputedStyle(panel).borderTopLeftRadius : null };
+            if (!panel || !runs.length || !summaries.length) return false;
             summaries[0].focus();
-            return groups.every(node => getComputedStyle(node).borderLeftWidth === '0px') &&
+            summaries[0].classList.add('probe-focus');
+            const style = getComputedStyle(panel);
+            return style.borderTopWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)' &&
+              parseFloat(style.borderTopLeftRadius) === 0 &&
               summaries.every(node => !getComputedStyle(node).boxShadow.includes('inset'));
-          })()`), `${theme}: archived commands must not have a left rail or thick focus stripe`);
+          })()`), `${theme}: expanded work must reuse the stream rows inside an unboxed panel ${JSON.stringify(await browser.evaluate(`window.__workProbe ?? null`))}`);
         }
 
       }

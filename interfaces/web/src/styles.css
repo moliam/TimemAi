@@ -1430,9 +1430,9 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .turn-assistant-frame.working { animation: none; }
 .turn-assistant-heading { position: relative; z-index: 2; min-height: 28px; padding: 0 0 0 10px; border-bottom: 0; }
-.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 1px solid #4a4a4a; border-radius: 11px; background: #353535; box-shadow: none; }
-.turn-work-scroll { --work-edge-fade-size: 16px; padding: 14px 0 7px; }
-.turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #4a4a4a; background: #303030; }
+.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.turn-work-scroll { --work-edge-fade-size: 16px; padding: 2px 0 6px; }
+.turn-work-panel > .live-turn-usage { margin: 0; padding: 7px 10px 8px; border-top: 1px solid #ffffff14; background: transparent; }
 .turn-work-panel.has-live-usage > .turn-new-updates { bottom: 42px; }
 .turn-work-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); }
 .turn-work-scroll.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); }
@@ -1451,8 +1451,8 @@ button:disabled { cursor: not-allowed; }
 .composer-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :root[data-theme="light"] .turn-assistant-frame,
 :root[data-theme="light"] .turn-assistant-frame.working { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-:root[data-theme="light"] .turn-work-panel { border-color: #d3ddda; background: #fafbfb; box-shadow: none; }
-:root[data-theme="light"] .turn-work-panel > .live-turn-usage { border-top-color: #d3ddda; background: #f4f7f7; }
+:root[data-theme="light"] .turn-work-panel { border: 0; background: transparent; box-shadow: none; }
+:root[data-theme="light"] .turn-work-panel > .live-turn-usage { border-top-color: #00000014; background: transparent; }
 :root[data-theme="light"] .turn-assistant-heading { border-bottom: 0; }
 @media (max-width: 720px) {
   .turn-user-frame { max-width: 94%; }
@@ -7422,6 +7422,19 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   padding-left: 0;
   padding-right: 0;
 }
+/* 用户反馈：带 diff 的命令要和 diff 卡片共用一个色块——同一命令是一个整体，
+   相邻命令靠色块边界自然分开。卡片自身那层底色去掉，避免色块套色块。 */
+.stream-tool-row:has(.file-edits-panel) {
+  padding: 6px 9px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.stream-tool-row:has(.file-edits-panel) .file-edits-panel {
+  padding-top: 2px;
+  background: transparent;
+}
+:root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) { background: #f1f5f4; }
+:root[data-theme="light"] .stream-tool-row:has(.file-edits-panel) .file-edits-panel { background: transparent; }
 /* 用户反馈：文件名那一行的「修改」二字贴到卡片最左边了——面板内边距归零后需要
    给头部行自己的左右内缩（diff 行仍铺满，所以卡片看起来还是和正文同宽）。 */
 .stream-tool-row .file-edit-head,

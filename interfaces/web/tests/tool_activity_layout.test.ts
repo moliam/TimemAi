@@ -35,7 +35,6 @@ describe("tool activity row layout", () => {
   it("uses the whole row as disclosure without a persistent expand glyph", () => {
     const activity = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
     expect(activity).not.toContain('tool-activity-icon tool-activity-chevron');
-    expect(source).toContain('className="tool-activity-group-icon tool-activity-chevron"');
     expect(styles).toContain(".tool-activity.settled .tool-activity-command,");
     expect(styles).toContain("grid-template-columns: max-content minmax(0, 1fr) max-content;");
     expect(styles).toContain(".tool-activity.running.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }");
@@ -46,24 +45,9 @@ describe("tool activity row layout", () => {
     expect(activity).toContain("onPointerDown={trackSelectionGesture}");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
-    expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
-    expect(source).toContain('activeParts.push(t("tools.bgCount", { count: summary.backgroundRunningCount }));');
-    expect(source).toMatch(
-      /className="tool-activity-group-status"[\s\S]*className="tool-activity-group-counts"/,
-    );
     expect(styles).toContain(
       "grid-template-columns: 16px max-content minmax(0, 1fr)",
     );
-    expect(styles).toContain(
-      ".tool-activity-group-counts { min-width: 0;",
-    );
-  });
-
-  it("removes completed group checks while retaining explicit failure counts", () => {
-    expect(source).toContain('summary.status === "completed") return ""');
-    expect(source).toContain('groupStatusLabel && <span className="tool-activity-group-status">');
-    expect(source).toContain('return `✗(${summary.failedCount})`');
-    expect(source).not.toContain('summary.failedCount > 1');
   });
 
   it("renders live wait-budget countdowns without a second terminal status label", () => {
@@ -385,8 +369,10 @@ it("narrows tool rendering from the right edge while preserving mobile width", (
 });
 
 it("renders timer lifecycle rows as standalone system-status lines", () => {
-  // Ordinary mode: timer activities bypass the collapsed tool group.
-  expect(source).toMatch(/if \(activity\.timer\)\s*\n?\s*return \(\s*\n\s*<ToolActivity[\s\S]*?timer-row-/);
+  // The archived frame and the live stream share one presentation, so a timer
+  // row must stay standalone there too.
+  expect(source).toContain('<StreamActivityPresentation');
+  expect(source).not.toContain('timer-row-');
   // Grouping never absorbs timer rows in either mode.
   const grouping = readFileSync(new URL("../src/activity_groups.ts", import.meta.url), "utf8");
   expect(grouping).toContain('activity.tone === "action" && !activity.timer');

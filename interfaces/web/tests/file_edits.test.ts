@@ -183,6 +183,12 @@ describe("file edits surfaces", () => {
     // 用户反馈：文件名行的「修改」贴到卡片最左边了。面板左右内边距归零换取与正文
     // 同宽后，头部行自己内缩（diff 行仍铺满），两个容器都要遵守。
     expect(styles).toMatch(/\.stream-tool-row \.file-edit-head,\s*\.turn-edits-summary \.file-edit-head \{\s*padding-left: 10px;\s*padding-right: 10px;/);
+    // 用户反馈：带 diff 的命令和它的 diff 卡片共用一个色块，相邻命令靠色块分开；
+    // 卡片自己那层底色必须去掉，否则又是色块套色块。
+    expect(styles).toMatch(/\.stream-tool-row:has\(\.file-edits-panel\) \{[^}]*background: rgba\(255, 255, 255, 0\.035\);/);
+    expect(styles).toMatch(/\.stream-tool-row:has\(\.file-edits-panel\) \.file-edits-panel \{[^}]*background: transparent;/);
+    expect(styles).toMatch(/:root\[data-theme="light"\] \.stream-tool-row:has\(\.file-edits-panel\) \{ background: #f1f5f4; \}/);
+    expect(styles).toMatch(/:root\[data-theme="light"\] \.stream-tool-row:has\(\.file-edits-panel\) \.file-edits-panel \{ background: transparent; \}/);
     const lightPanelStart = styles.indexOf(':root[data-theme="light"] .file-edits-panel {');
     const lightPanel = styles.slice(lightPanelStart, styles.indexOf("}", lightPanelStart) + 1);
     expect(lightPanel).not.toContain("border");
