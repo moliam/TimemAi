@@ -8,8 +8,12 @@ const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8
 // 并入该组作领先文本，胶囊在句末内联显示，同一按钮负责展开/收起工具行。
 describe("stream tool lead capsule", () => {
   it("merges the adjacent remark into the following tool group", () => {
-    expect(main).toContain("next.lead = entry;");
-    expect(main).toContain("current.entries = [];");
+    expect(main).toContain("next.lead = source.entries[source.entries.length - 1];");
+    expect(main).toContain("source.entries = source.entries.slice(0, -1);");
+    // 用户反馈（修正）：remark 优先于 thought 预览——回溯先找 free_talk。
+    expect(main).toContain("if (isRemarkGroup(renderedGroups[back])) { leadSource = back; break; }");
+    expect(main).toContain("if (leadSource === -1) {");
+    expect(main).toContain("if (isThoughtGroup(renderedGroups[back])) { leadSource = back; break; }");
     expect(main).toContain("const visibleGroups = renderedGroups.filter(group => group.entries.length > 0);");
     // 时序语义不变：并入组内的 free_talk 章节仍算「回复位置」。
     expect(main).toContain("const leadChapter = group.lead?.activity?.kind === \"free_talk\"");

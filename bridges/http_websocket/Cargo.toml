@@ -5,6 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+flate2 = "1"
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
 timem_ui_contract = { path = "../../core/ui_contract" }

@@ -11,6 +11,7 @@ use axum::{
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
+use std::io::Write;
 
 /// Applies cache, referrer, content-type, and active-content protections.
 ///
@@ -95,6 +96,20 @@ pub fn decode_text<T: DeserializeOwned>(text: &str, max_bytes: usize) -> Inbound
     }
 }
 
+/// 序列化后达到该体积的 wire 帧改走 gzip 二进制帧；小帧保持文本零额外开销。
+pub const WIRE_FRAME_GZIP_THRESHOLD_BYTES: usize = 64 * 1024;
+
+/// `GZ1\n` 前缀标记 gzip 编解码体，留出未来换编码的空间而不必改协议版本。
+pub const WIRE_FRAME_GZIP_PREFIX: &[u8; 4] = b"GZ1\n";
+
+fn gzip_wire_frame(json: &str) -> std::io::Result<Vec<u8>> {
+    let mut frame = Vec::with_capacity(json.len() / 4 + 68);
+    frame.extend_from_slice(WIRE_FRAME_GZIP_PREFIX);
+    let mut encoder = flate2::write::GzEncoder::new(frame, flate2::Compression::new(3));
+    encoder.write_all(json.as_bytes())?;
+    encoder.finish()
+}
+
 pub struct JsonWebSocketSender {
     sender: SplitSink<WebSocket, Message>,
 }
@@ -153,6 +168,15 @@ impl JsonWebSocketSender {
     ) -> Result<(), JsonWebSocketSendError> {
         let text = serde_json::to_string(value)
             .map_err(|error| JsonWebSocketSendError::Serialize(error.to_string()))?;
+        if text.len() >= WIRE_FRAME_GZIP_THRESHOLD_BYTES {
+            let frame = gzip_wire_frame(&text)
+                .map_err(|error| JsonWebSocketSendError::Socket(error.to_string()))?;
+            self.sender
+                .send(Message::Binary(frame))
+                .await
+                .map_err(|error| JsonWebSocketSendError::Socket(error.to_string()))?;
+            return Ok(());
+        }
         self.send_serialized_text(text).await
     }
 
@@ -172,6 +196,24 @@ mod tests {
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct Command {
         value: String,
+    }
+
+    #[test]
+    fn gzip_wire_frames_roundtrip_with_codec_prefix() {
+        let json = serde_json::to_string(&serde_json::json!({
+            "hello": { "blob": "x".repeat(WIRE_FRAME_GZIP_THRESHOLD_BYTES * 2) }
+        }))
+        .unwrap();
+        let frame = gzip_wire_frame(&json).unwrap();
+        assert!(
+            frame.len() < json.len() / 2,
+            "level-3 gzip must halve the frame"
+        );
+        assert_eq!(&frame[..4], WIRE_FRAME_GZIP_PREFIX);
+        let mut decoder = flate2::read::GzDecoder::new(&frame[4..]);
+        let mut restored = String::new();
+        std::io::Read::read_to_string(&mut decoder, &mut restored).unwrap();
+        assert_eq!(restored, json);
     }
 
     #[test]

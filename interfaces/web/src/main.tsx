@@ -492,6 +492,27 @@ function storeActiveSessionId(sessionId: string): void {
   }
 }
 
+const WIRE_FRAME_GZIP_PREFIX = "GZ1\n";
+
+/** ≥64KiB 的大帧（hello/session_turns）由服务端发成 GZ1\n 前缀的 gzip 二进制帧
+ * （axum ws 无 permessage-deflate），用原生 DecompressionStream 解码。 */
+async function parseGzipWireEvent(data: Blob | ArrayBuffer): Promise<WireEvent> {
+  const bytes =
+    data instanceof Blob
+      ? new Uint8Array(await data.arrayBuffer())
+      : new Uint8Array(data);
+  const codec = String.fromCharCode(...bytes.subarray(0, WIRE_FRAME_GZIP_PREFIX.length));
+  if (codec !== WIRE_FRAME_GZIP_PREFIX) {
+    throw new Error("unknown binary wire frame");
+  }
+  const text = await new Response(
+    new Blob([bytes.subarray(WIRE_FRAME_GZIP_PREFIX.length)])
+      .stream()
+      .pipeThrough(new DecompressionStream("gzip")),
+  ).text();
+  return JSON.parse(text) as WireEvent;
+}
+
 function initialAccessToken() {
   const query = new URLSearchParams(window.location.search).get("token") ?? "";
   if (query) {
@@ -3619,13 +3640,21 @@ function TimemApp() {
         retryTimer = window.setTimeout(connect, delay);
       };
       ws.onerror = () => setConnected(false);
+      let inboundChain: Promise<void> = Promise.resolve();
       ws.onmessage = (message) => {
-        try {
-          const event = JSON.parse(String(message.data)) as WireEvent;
-          inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));
-        } catch {
-          /* Ignore malformed transport data. */
-        }
+        // 大帧异步解压也要保持到达顺序：串行 promise 链保证语义事件不乱序。
+        inboundChain = inboundChain
+          .then(async () => {
+            const data: unknown = message.data;
+            const event =
+              typeof data === "string"
+                ? (JSON.parse(data) as WireEvent)
+                : await parseGzipWireEvent(data as Blob | ArrayBuffer);
+            inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));
+          })
+          .catch(() => {
+            /* Ignore malformed transport data. */
+          });
       };
     };
     connect();
@@ -14024,16 +14053,39 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
   // 保持块级渲染，胶囊跟在最后一段后（阅读层级不变）。
   const renderedGroups: { entries: typeof entries; lead?: (typeof entries)[number] }[] =
     groups.map(entries => ({ entries }));
-  for (let index = 0; index + 1 < renderedGroups.length; index++) {
-    const current = renderedGroups[index];
-    const next = renderedGroups[index + 1];
-    if (current.entries.length !== 1 || next.lead) continue;
-    const entry = current.entries[0];
-    if (entry.activity?.kind === "free_talk" && !(entry.activity.detail ?? "").trim()) continue;
-    if (!entry.activity && !entry.thoughtText.trim()) continue;
-    if (next.entries[0]?.activity?.tone !== "action" || next.entries[0].activity.timer) continue;
-    next.lead = entry;
-    current.entries = [];
+  // 用户反馈：工具胶囊必须跟在「最近的 remark」后面。thought 预览与系统行
+  // 不算 remark——从动作组向前回溯，优先取最近的有文本 free_talk 作 lead
+  // （消费该条目，回复位语义不变）；没有 remark 时退回最近的 thought 文本，
+  // 避免胶囊悬空。相邻动作本就并为一个组，一个 remark 只会被消费一次。
+  const groupHead = (group: (typeof renderedGroups)[number]) => group.entries[0];
+  const isRemarkGroup = (group: (typeof renderedGroups)[number]) => {
+    const head = groupHead(group);
+    return head?.activity?.kind === "free_talk" && !!(head.activity.detail ?? "").trim();
+  };
+  const isThoughtGroup = (group: (typeof renderedGroups)[number]) => {
+    const head = groupHead(group);
+    return !head?.activity && !!head?.thoughtText.trim();
+  };
+  const isFoldableActionGroup = (group: (typeof renderedGroups)[number]) => {
+    const head = groupHead(group);
+    return head?.activity?.tone === "action" && !head.activity.timer;
+  };
+  for (let index = 0; index < renderedGroups.length; index++) {
+    const next = renderedGroups[index];
+    if (next.lead || !isFoldableActionGroup(next)) continue;
+    let leadSource = -1;
+    for (let back = index - 1; back >= 0; back--) {
+      if (isRemarkGroup(renderedGroups[back])) { leadSource = back; break; }
+    }
+    if (leadSource === -1) {
+      for (let back = index - 1; back >= 0; back--) {
+        if (isThoughtGroup(renderedGroups[back])) { leadSource = back; break; }
+      }
+    }
+    if (leadSource === -1) continue;
+    const source = renderedGroups[leadSource];
+    next.lead = source.entries[source.entries.length - 1];
+    source.entries = source.entries.slice(0, -1);
   }
   const visibleGroups = renderedGroups.filter(group => group.entries.length > 0);
   // One reverse scan, rather than rescanning the suffix for every tool group.
