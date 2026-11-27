@@ -110,10 +110,8 @@ fn spawn_child_on_pty(scenario: &str) -> (std::process::Child, std::fs::File) {
         let path = std::ffi::CStr::from_ptr(name.as_ptr())
             .to_string_lossy()
             .into_owned();
-        let slave_fd = libc::open(
-            std::ffi::CString::new(path).unwrap().as_ptr(),
-            libc::O_RDWR | libc::O_NOCTTY,
-        );
+        let slave_path = std::ffi::CString::new(path).unwrap();
+        let slave_fd = libc::open(slave_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
         assert!(slave_fd >= 0, "open pty slave failed");
         let slave = std::fs::File::from_raw_fd(slave_fd);
         let stdin = slave.try_clone().expect("clone slave for stdin");
@@ -140,7 +138,7 @@ fn child_output_until_result(master: &mut std::fs::File) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut collected = String::new();
     let mut buffer = [0_u8; 8192];
-    while collected.find(CHILD_RESULT_MARKER).is_none() {
+    while !collected.contains(CHILD_RESULT_MARKER) {
         if std::time::Instant::now() >= deadline {
             collected.push_str("\n[deadline reached before the child result marker]");
             break;

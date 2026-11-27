@@ -419,7 +419,7 @@ impl TurnFileEditsLedger {
         if self.absent_ancestor(resolved) {
             return (LedgerBaseline::Absent, None);
         }
-        if (size as u64) > self.budget {
+        if size > self.budget {
             return (
                 LedgerBaseline::Existed {
                     reason: SKIP_BUDGET,
